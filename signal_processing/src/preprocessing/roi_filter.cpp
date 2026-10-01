@@ -1,4 +1,38 @@
 #include "preprocessing/roi_filter.h"
+#include <iostream>
+#include <string>
+
+namespace{
+// 설정 파일에서 박스 하나(6개 값)을 읽어 Box3D로 변환하는 함수
+Box3D readBox(const Config& cfg, const std::string& prefix, const Box3D& def){
+    Box3D b;
+    // 문자열을 이어 붙여서 key(ex. "door.x_min")를 만들고,
+    // 설정 파일에서 해당 key를 찾아 값을 꺼냄. 없으면 def에서 가져와 Box3D에 채움.
+    b.x_min = cfg.getFloat(prefix+".x_min", def.x_min);
+    b.x_max = cfg.getFloat(prefix+".x_max", def.x_max);
+    b.y_min = cfg.getFloat(prefix+".y_min", def.y_min);
+    b.y_max = cfg.getFloat(prefix+".y_max", def.y_max);
+    b.z_min = cfg.getFloat(prefix+".z_min", def.z_min);
+    b.z_max = cfg.getFloat(prefix+".z_max", def.z_max);
+    return b;
+}
+}
+
+ROIConfig ROIConfig::fromConfig(const Config& cfg){
+    // 설정 파일에 값이 없을 때 쓸 기본값
+    const Box3D default_door {-0.45f, 0.45f, -0.50f, 0.30f, 0.10f, 2.10f};
+    const Box3D default_cabin{-0.75f, 0.75f,  0.30f, 1.35f, 0.10f, 2.20f};
+
+    ROIConfig c;
+    // c.door_zone, c.cabin_zone을 readBox로 읽기
+    c.door_zone = readBox(cfg, "door", default_door);
+    c.cabin_zone = readBox(cfg, "cabin", default_cabin);
+
+    if(!c.isValid()){
+        std::cerr << "[ROIConfig] 잘못된 ROI 범위 (min >= max). 설정 파일을 확인하세요. \n";
+    }
+    return c;
+}
 
 ROIFilter::ROIFilter(const ROIConfig& config): config_(config){}
 

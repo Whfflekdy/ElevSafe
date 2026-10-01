@@ -13,12 +13,14 @@
 
 #include "common/radar_point.h"
 #include "common/box3d.h"
+#include "common/config.h"
 
 // ROI 설정: 두 영역
 struct ROIConfig{
     Box3D door_zone;  // 출입구 영역
     Box3D cabin_zone; // 엘리베이터 내부 영역
 
+    static ROIConfig fromConfig(const Config& cfg);
     bool isValid() const{
         return door_zone.isValid() && cabin_zone.isValid();
     }

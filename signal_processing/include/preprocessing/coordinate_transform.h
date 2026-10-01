@@ -27,6 +27,7 @@
 #pragma once
 
 #include "common/radar_point.h"
+#include "common/config.h"
 
 // 센서의 설치 위치와 자세(엘리베이터 좌표계 기준)
 //
@@ -50,6 +51,8 @@ struct SensorPose{
     float roll_deg  = 0.0f; // x축 회전(옆으로 갸웃)
     float pitch_deg = 0.0f; // y축 회전(위아래로 끄덕(센서를 숙인 각도))
     float yaw_deg   = 0.0f; // z축 회전(좌우로 도리도리)
+
+    static SensorPose fromConfig(const Config& cfg);  // 설정 파일 값을 ROI와 센서 자세에 추가하는 기능 
 };
 
 class CoordinateTransform {

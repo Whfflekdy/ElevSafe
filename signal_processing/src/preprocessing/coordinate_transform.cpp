@@ -6,6 +6,17 @@ namespace { // 익명 네임스페이스: 이 파일 안에서만 쓰이는 상�
 constexpr float kDegToRad = 3.14159265358979323846f / 180.0f; // degree -> radian 변환 상수
 }
 
+SensorPose SensorPose::fromConfig(const Config& cfg){
+    SensorPose pose;
+    pose.tx = cfg.getFloat("sensor.tx", 0.0f);
+    pose.ty = cfg.getFloat("sensor.ty", 0.0f);
+    pose.tz = cfg.getFloat("sensor.tz", 0.0f);
+    pose.roll_deg  = cfg.getFloat("sensor.roll_deg", 0.0f);
+    pose.pitch_deg = cfg.getFloat("sensor.pitch_deg", 0.0f);
+    pose.yaw_deg   = cfg.getFloat("sensor.yaw_deg", 0.0f);
+    return pose;
+}
+
 // 생성자: 센서 좌표를 엘리베이터 좌표로 바꿔주는 변환기로 내부에 회전행렬 R_과 이동 벡터 t_을 가지고 있음.
 // post에 담긴 각도, 위치를 통해 R_, t_를 계산하여 저장
 // doppler, power, target_id, zone는 변환하지 않음. (회전/이동은 위치(x,y,z)만 바꾸므로)
