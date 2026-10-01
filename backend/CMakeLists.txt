@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(elevsafe_backend_core
     src/retina_protocol.cpp
     src/retina_client.cpp
+    src/frame_buffer.cpp
 )
 
 target_include_directories(elevsafe_backend_core
@@ -35,3 +36,11 @@ add_executable(retina_protocol_test
 target_link_libraries(retina_protocol_test PRIVATE elevsafe_backend_core)
 
 add_test(NAME retina_protocol_test COMMAND retina_protocol_test)
+
+add_executable(frame_buffer_test
+    tests/frame_buffer_test.cpp
+)
+
+target_link_libraries(frame_buffer_test PRIVATE elevsafe_backend_core)
+
+add_test(NAME frame_buffer_test COMMAND frame_buffer_test)
