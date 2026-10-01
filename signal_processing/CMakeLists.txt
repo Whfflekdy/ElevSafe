@@ -19,6 +19,10 @@ add_library(radar_core
 # radar_core를 쓰는 쪽은 include/ 를 기준으로 헤더를 찾음
 target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# 1) 정식 실행 파일 radar_pipeline을 생성하고 로직 묶음인 radar_core 연결
+add_executable(radar_pipeline src/main.cpp)
+target_link_libraries(radar_pipeline PRIVATE radar_core)
+
 # 2) 확인용 scratch 실행 파일
 add_executable(scratch tests/scratch.cpp)
 target_link_libraries(scratch PRIVATE radar_core)

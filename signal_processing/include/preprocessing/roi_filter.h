@@ -32,6 +32,14 @@ struct ROIStats{
     std::size_t door = 0;   // Door Zone으로 분류되어 남은 포인트 수
     std::size_t cabin = 0;  // Cabin Zone으로 분류되어 남은 포인트 수
     std::size_t dropped = 0; // 필터링되어 제거된 포인트 수
+
+    ROIStats& operator+=(const ROIStats& o){
+        input   += o.input;
+        door    += o.door;
+        cabin   += o.cabin;
+        dropped += o.dropped;
+        return *this;
+    }
 };
 
 class ROIFilter {
