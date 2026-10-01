@@ -1,36 +1,111 @@
 # ElevSafe Backend
 
-ElevSafe Backend 1차 구현은 Retina-4SN 또는 Radar Emulator의 TCP point-cloud stream을 수신하고, packet과 frame을 파싱하는 단계입니다.
+ElevSafe Backend는 Retina-4SN 또는 Radar Emulator에서 TCP raw binary
+stream을 수신하고, packet/frame 경계를 복원하여 `RadarFrame`으로 변환하는
+Radar interface와 초기 처리 파이프라인을 담당합니다.
 
-현재 데이터 흐름에서는 Radar Interface와 Parsing 단계까지 구현되어 있습니다.
+현재 Backend는 수신한 frame을 `BackendPipeline`과 `FrameBuffer`를 거쳐
+console consumer로 전달하는 단일 스레드 runtime까지 구현되어 있습니다.
+B Signal Processing, C Tracking/State, D Frontend는 현재 Backend에 연결되어
+있지 않습니다.
+
+## 디렉터리 구조
 
 ```text
-Retina-4SN
-    -> Backend TCP/Parser
-    -> Signal Processing
-    -> Tracking/State
-    -> Backend Result Aggregation
-    -> WebSocket
-    -> Frontend
+backend/
+├─ CMakeLists.txt
+├─ README.md
+├─ include/
+│  └─ elevsafe/
+│     ├─ radar_types.h
+│     ├─ retina_protocol.h
+│     ├─ retina_client.h
+│     ├─ frame_buffer.h
+│     └─ backend_pipeline.h
+├─ src/
+│  ├─ main.cpp
+│  ├─ retina_protocol.cpp
+│  ├─ retina_client.cpp
+│  ├─ frame_buffer.cpp
+│  └─ backend_pipeline.cpp
+└─ tests/
+   ├─ retina_protocol_test.cpp
+   ├─ frame_buffer_test.cpp
+   └─ backend_pipeline_test.cpp
 ```
 
-## 현재 구현
+## Runtime Data Flow
 
-- Retina-4SN / Radar Emulator TCP client
-- TCP `29172` direct connection
-- Raw binary stream 수신
-- stream buffer 기반 packet boundary 복원
-- partial `recv` 처리
-- 여러 packet 연속 처리
-- packet magic 및 `packageSize` 검증
-- Radar Frame parsing
-- Point Cloud parsing
-- `RadarPoint`: `x`, `y`, `z`, `doppler`, `power`, `targetId`
-- `RadarFrame`: `frameCount`, point vector
-- console 출력
-  - `frameCount`
-  - `pointCount`
-  - 첫 point의 `x`, `y`, `z`, `doppler`, `power`, `targetId`
+```text
+RetinaClient
+    -> RetinaStreamParser
+    -> RadarFrame
+    -> BackendPipeline::onFrame()
+    -> FrameBuffer
+    -> BackendPipeline::drain()
+    -> Console Consumer
+```
+
+현재 `RetinaClient::run()`은 blocking receive loop입니다. 수신된 byte는
+`RetinaStreamParser`로 전달되고, 완성된 `RadarFrame` callback은 같은
+실행 context에서 동기적으로 호출됩니다. `main.cpp`의 callback은 frame을
+`BackendPipeline::onFrame()`으로 enqueue한 뒤 즉시 `drain()`을 호출합니다.
+
+### RadarPoint / RadarFrame
+
+- `RadarPoint`는 point cloud 한 점의 `x`, `y`, `z`, `doppler`,
+  `power`, `targetId`를 보관합니다.
+- `RadarFrame`은 `frameCount`와 `std::vector<RadarPoint>`를 보관합니다.
+
+### RetinaStreamParser
+
+TCP `recv()` 경계와 packet 경계가 일치하지 않는 상황을 처리합니다.
+raw byte를 내부 stream buffer에 누적하고 packet magic과 `packageSize`를
+사용해 완전한 network packet을 추출합니다. partial packet, 여러 packet이
+하나의 receive에 포함된 경우, 앞부분 garbage에 대한 resynchronization을
+처리합니다.
+
+추출한 packet에서는 Radar Frame header와 point cloud를 검증하고
+`RadarFrame`을 생성합니다. packet header는 36 bytes, Radar Frame header는
+16 bytes이며, point count와 payload 범위도 검증합니다. 별도 target section의
+상세 구조와 의미는 현재 구현 범위에 포함되지 않습니다.
+
+### RetinaClient
+
+지정된 host와 TCP port에 직접 연결합니다. 현재 기본 port는 `29172`이며,
+Device Discovery는 사용하지 않습니다. 연결 후 raw byte를 수신하여
+`RetinaStreamParser`에 전달하고, parser가 생성한 frame을 callback으로
+전달합니다.
+
+### FrameBuffer
+
+`FrameBuffer`는 parsing이 완료된 `RadarFrame` 객체를 보관하는 bounded FIFO입니다.
+
+- 생성 시 frame capacity를 지정합니다.
+- capacity가 0이면 생성할 수 없습니다.
+- capacity를 초과하면 가장 오래된 frame을 제거합니다.
+- TCP raw byte를 보관하는 `RetinaStreamParser` 내부 buffer와는 별도입니다.
+
+현재 `main.cpp`의 capacity `1`은 synchronous enqueue -> immediate drain
+구조에 필요한 최소값입니다. production tuning 값으로 확정된 값이 아니며,
+producer와 consumer가 분리되는 구조에서는 별도 검토가 필요합니다.
+
+### BackendPipeline
+
+`BackendPipeline`은 현재 Backend 처리 파이프라인의 skeleton입니다.
+
+- `onFrame()`에서 입력 `RadarFrame`을 내부 `FrameBuffer`에 enqueue합니다.
+- `drain()`에서 대기 중인 frame을 FIFO 순서로 consumer에 전달합니다.
+- 현재는 generic `FrameConsumer` callback만 제공합니다.
+- B Signal Processing과 C Tracking/State 실제 모듈은 연결되어 있지 않습니다.
+
+### main.cpp
+
+`main.cpp`는 host와 port를 읽고 `RetinaClient`를 실행합니다. callback에서
+`onFrame()`을 호출한 직후 `drain()`을 호출하므로 현재 runtime은 별도
+worker thread 없는 single-thread synchronous 구조입니다. 기존의
+`frameCount`, `pointCount`, 첫 point의 `x/y/z/doppler/power/targetId`
+출력은 `drain()`에 전달된 console consumer가 담당합니다.
 
 ## 요구 환경
 
@@ -54,7 +129,26 @@ cmake --build backend/build --config Release
 ctest --test-dir backend/build -C Release --output-on-failure
 ```
 
-현재 parser 테스트는 partial packet, 여러 packet, garbage resync, 잘못된 magic, 비정상 `packageSize`, point count 경계와 trailing payload를 검증합니다.
+현재 CMake에 등록된 테스트는 다음 3개입니다.
+
+- `retina_protocol_test`: packet/frame parsing 및 stream edge case
+- `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
+- `backend_pipeline_test`: frame enqueue, FIFO drain, consumer 동작 및 overflow 전달 검증
+
+Release 기준 현재 검증 결과는 CTest `3/3` 통과입니다.
+
+## 검증 상태
+
+Radar Emulator에 대해서는 다음을 확인했습니다.
+
+- TCP `29172` 연결 성공
+- Emulator Clients `0 -> 1` 확인
+- `.pcr` 데이터에서 `frameCount` 연속 증가 확인
+- `pointCount` 정상 출력
+- `x/y/z/doppler/power/targetId` 정상 파싱 확인
+
+실제 RETINA-4SN에 대해서는 AP Mode 및 TCP `29172` 연결 후
+frame 연속 수신과 parsing을 확인했습니다.
 
 ## 실행
 
@@ -66,35 +160,49 @@ Radar Emulator를 실행하고 `.pcr` 데이터셋을 연 뒤 재생을 시작�
 .\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172
 ```
 
-### Retina-4SN
+### RETINA-4SN
 
-장치 IP를 직접 지정합니다. Device Discovery는 아직 구현하지 않았습니다.
+Device Discovery 없이 장치 IP를 직접 지정합니다.
 
 ```powershell
-.\backend\build\Release\elevsafe_backend.exe <RADAR_IP> 29172
+.\backend\build\Release\elevsafe_backend.exe 192.168.30.1 29172
 ```
 
-실제 Retina-4SN 장치에 대한 연결과 packet 수신은 아직 검증하지 않았습니다.
+실제 RETINA-4SN에서는 AP Mode 및 TCP `29172` 연결 후
+`frameCount`, `pointCount`, `x/y/z/doppler/power/targetId`의 연속
+수신 및 parsing까지 검증했습니다. 실제 연결 가능 여부와 데이터 수신은
+PC IP 설정 및 Radar의 Client 접근 허용 IP 설정에 영향을 받을 수 있습니다.
 
-## 검증 결과
+host와 port는 command line으로 지정할 수 있습니다. port는 `1`부터
+`65535`까지 허용됩니다. host를 생략하면 `main.cpp`에서
+`127.0.0.1`을 사용하고, port를 생략하면 `29172`를 사용합니다.
 
-- CMake Release build 성공
-- CTest 100% 통과
-- Radar Emulator TCP `29172` 연결 성공
-- Emulator Clients `0 -> 1` 확인
-- `.pcr` 데이터에서 `frameCount` 연속 증가 확인
-- `pointCount` 정상 출력
-- `x/y/z/doppler/power/targetId` 정상 파싱 확인
+## 현재 구현 범위
 
-## 미구현 또는 미확인
+- Retina-4SN / Radar Emulator TCP client
+- TCP `29172` direct connection
+- raw binary stream 수신
+- stream buffer 기반 packet boundary 복원
+- partial `recv` 및 여러 packet 처리
+- packet magic과 `packageSize` 검증
+- Radar Frame parsing
+- point cloud parsing
+- `RadarPoint` 및 `RadarFrame` 자료형
+- bounded `FrameBuffer`
+- `BackendPipeline` enqueue/drain skeleton
+- frameCount, pointCount, 첫 point console 출력
 
+## 현재 구현되지 않음
+
+- B Signal Processing 실제 연결
+- C Tracking / State 실제 연결
+- WebSocket Server
+- JSON Output
+- Multithreading
+- Automatic Reconnect
 - Device Discovery
-- 실제 Retina-4SN packet 검증
-- target section parsing
-- reference code의 `48056` offset 의미
-- firmware별 packet 차이
-- automatic reconnect
-- multithreaded processing pipeline
-- signal processing / DBSCAN
-- tracking / state machine
-- WebSocket / frontend output
+- Target Section 상세 Parsing
+
+향후 다른 모듈이 연결될 수 있지만, 현재 Backend runtime이 생성하거나
+전송하는 결과는 console 출력까지입니다. 위 미구현 영역을 현재 완료된
+기능으로 간주하지 않습니다.
