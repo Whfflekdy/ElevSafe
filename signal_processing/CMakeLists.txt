@@ -14,6 +14,7 @@ add_library(radar_core
   src/common/config.cpp
   src/preprocessing/coordinate_transform.cpp
   src/preprocessing/roi_filter.cpp
+  src/io/csv_io.cpp
 )
 # radar_core를 쓰는 쪽은 include/ 를 기준으로 헤더를 찾음
 target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
