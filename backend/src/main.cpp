@@ -1,6 +1,8 @@
+#include "elevsafe/backend_pipeline.h"
 #include "elevsafe/retina_client.h"
 
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -36,25 +38,34 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    elevsafe::RetinaClient client(host, port, [](const elevsafe::RadarFrame& frame)
+    // Capacity 1 is only the minimum needed for synchronous enqueue -> immediate drain.
+    // It is not a production tuning value and must be revisited for a separated producer/consumer design.
+    constexpr std::size_t kSynchronousFrameBufferCapacity = 1;
+    elevsafe::BackendPipeline pipeline(kSynchronousFrameBufferCapacity);
+
+    elevsafe::RetinaClient client(host, port, [&pipeline](const elevsafe::RadarFrame& frame)
     {
-        std::cout << "frameCount=" << frame.frameCount
-                  << " pointCount=" << frame.points.size();
-
-        if (!frame.points.empty())
+        pipeline.onFrame(frame);
+        pipeline.drain([](const elevsafe::RadarFrame& pendingFrame)
         {
-            const auto& point = frame.points.front();
-            std::cout << std::fixed << std::setprecision(3)
-                      << " firstPoint=(x=" << point.x
-                      << ", y=" << point.y
-                      << ", z=" << point.z
-                      << ", doppler=" << point.doppler
-                      << ", power=" << point.power
-                      << ", targetId=" << point.targetId
-                      << ')';
-        }
+            std::cout << "frameCount=" << pendingFrame.frameCount
+                      << " pointCount=" << pendingFrame.points.size();
 
-        std::cout << '\n';
+            if (!pendingFrame.points.empty())
+            {
+                const auto& point = pendingFrame.points.front();
+                std::cout << std::fixed << std::setprecision(3)
+                          << " firstPoint=(x=" << point.x
+                          << ", y=" << point.y
+                          << ", z=" << point.z
+                          << ", doppler=" << point.doppler
+                          << ", power=" << point.power
+                          << ", targetId=" << point.targetId
+                          << ')';
+            }
+
+            std::cout << '\n';
+        });
     });
 
     std::cerr << "Connecting to " << host << ':' << port << "...\n";
