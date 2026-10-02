@@ -6,8 +6,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 경고를 많이 켜서 실수를 컴파일러가 잡게 함
-add_compile_options(-Wall -Wextra)
-
+if(MSVC)
+  add_compile_options(/W4 /utf-8)
+else()
+  add_compile_options(-Wall -Wextra)
+endif()
 # 1) 파이프라인 핵심 로직을 라이브러리 하나로 묶음
 #    (Step이 추가될 때마다 여기에 .cpp를 한 줄씩 추가)
 add_library(radar_core
