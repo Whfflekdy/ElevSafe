@@ -1,0 +1,203 @@
+/* 전체 컨테이너 및 헤더 */
+.dashboard-container {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background-color: #1e293b;
+  color: #f8fafc;
+  min-height: 100vh;
+  margin: -8px;
+  padding-bottom: 20px;
+}
+.header {
+  background-color: #0f172a;
+  padding: 15px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 2px solid #334155;
+}
+.header h1 { margin: 0; font-size: 20px; }
+.spec-badge {
+  background-color: #334155;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #38bdf8;
+}
+/* 본문 영역 2단 분할 */
+.main-content {
+  display: flex;
+  gap: 20px;
+  padding: 20px;
+  height: calc(100vh - 100px);
+}
+
+/* 좌측 시각화 영역 */
+.visualization-section {
+  flex: 7;
+  background-color: #334155;
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+}
+.visualization-section h2 { margin-top: 0; font-size: 18px; color: #cbd5e1; }
+.canvas-container {
+  flex: 1;
+  background-color: #020617; /* 도면 배경을 더 짙게 처리 */
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center; /* 도면을 정중앙에 배치 */
+  border: 1px solid #475569;
+  position: relative;
+  overflow: hidden;
+}
+/*CAD 도면(Blueprint) 스타일링*/
+.blueprint-wrapper {
+  position: relative;
+  /* 폭은 App.jsx의 CONFIG에서 자동 주입됨 */
+}
+/* 1. 엘리베이터 내부 (Cabin) */
+.blueprint-cabin {
+  border: 4px solid #38bdf8; /* CAD 도면 느낌의 하늘색 두꺼운 벽 */
+  border-bottom: none; /* 문 쪽은 뚫려있음 */
+  background-color: rgba(56, 189, 248, 0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 2. 출입구 영역 (Doors) */
+.blueprint-doors {
+  height: 10px;
+  background-color: #38bdf8; /* 양쪽 벽면 */
+  display: flex;
+  justify-content: center; /* 실제 출입구(door-frame)를 중앙 정렬 */
+}
+.door-frame {
+  height: 10px;
+  background-color: #020617; /* 출입구 바닥은 배경색으로 뚫어줌 */
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+}
+/* 문짝 애니메이션 (열림/닫힘) */
+.door {
+  width: 48%; /* 문짝 하나당 폭 */
+  height: 10px;
+  background-color: #cbd5e1;
+  transition: transform 0.5s ease-in-out;
+}
+.door.DOOR_OPEN, .door.DOOR_HOLD {
+  transform: scaleX(0.1); /* 문이 열리면 안쪽으로 수축함 */
+}
+.left-door { transform-origin: left; }
+.right-door { transform-origin: right; }
+/* 3. 승강장 대기 구역 (Waiting Area) */
+.blueprint-waiting {
+  border: 2px dashed #64748b;
+  border-top: none;
+  background-color: rgba(100, 116, 139, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cad-label {
+  font-size: 13px;
+  color: #64748b;
+  font-weight: bold;
+  letter-spacing: 2px;
+}
+
+/*승객 점(Dot) 및 말풍선 툴팁*/
+.passenger-dot {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%); /* 정확히 중심점(x,y)에 오도록 축 이동 */
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+/* 정상 상태 */
+.passenger-dot.normal {
+  background-color: rgba(16, 185, 129, 0.3);
+  border: 2px solid #10b981;
+  z-index: 10;
+}
+.passenger-dot.normal .dot-core {
+  width: 8px; height: 8px; background-color: #10b981; border-radius: 50%;
+}
+
+/* 위험 상태 (FALL, IMMOBILE) */
+.passenger-dot.danger {
+  background-color: rgba(244, 63, 94, 0.4);
+  border: 2px solid #f43f5e;
+  animation: radar-pulse 1s infinite;
+  z-index: 100;
+}
+.passenger-dot.danger .dot-core {
+  width: 8px; height: 8px; background-color: #f43f5e; border-radius: 50%;
+}
+@keyframes radar-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.7); }
+  70% { box-shadow: 0 0 0 15px rgba(244, 63, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
+}
+
+/* 말풍선 툴팁 */
+.dot-tooltip {
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #1e293b;
+  border: 1px solid #475569;
+  padding: 10px 15px;
+  border-radius: 8px;
+  width: max-content;
+  color: white;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  z-index: 999;
+  text-align: left;
+}
+.dot-tooltip::after {
+  content: '';
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-width: 6px 6px 0;
+  border-style: solid;
+  border-color: #475569 transparent transparent transparent;
+}
+.dot-tooltip strong { font-size: 14px; color: #38bdf8; display: block; margin-bottom: 5px; }
+.dot-tooltip p { margin: 2px 0; font-size: 12px; color: #cbd5e1; }
+.dot-tooltip.alert { border-color: #f43f5e; }
+.dot-tooltip.alert strong { color: #f43f5e; }
+.dot-tooltip.alert .state-text { color: #fda4af; font-weight: bold; }
+
+
+/* =========================================
+   우측 패널 (기존과 동일)
+========================================= */
+.side-panel { flex: 3; display: flex; flex-direction: column; gap: 20px; }
+.control-panel, .log-monitor { background-color: #334155; border-radius: 12px; padding: 20px; }
+.control-panel h2, .log-monitor h2 { margin-top: 0; font-size: 16px; color: #cbd5e1; }
+.status-box { background-color: #0f172a; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #475569; }
+.status-box h3 { margin: 0 0 10px 0; font-size: 14px; color: #94a3b8; }
+.status-indicator { font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px; }
+.alert-hold { background-color: #f43f5e; color: white; }
+.normal-close { background-color: #3b82f6; color: white; }
+.control-buttons { display: flex; gap: 10px; margin-top: 12px; }
+.control-buttons button { flex: 1; padding: 8px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; color: white; }
+.btn-hold { background-color: #e11d48; }
+.btn-hold:hover { background-color: #be123c; }
+.btn-close { background-color: #475569; }
+.btn-close:hover { background-color: #334155; }
+.terminal-window { background-color: #020617; color: #34d399; font-family: 'Courier New', monospace; padding: 12px; border-radius: 8px; height: 200px; overflow-y: auto; font-size: 13px; border: 1px solid #475569; }
+.terminal-window p { margin: 6px 0; }
+.log-danger { color: #f43f5e; font-weight: bold; }
