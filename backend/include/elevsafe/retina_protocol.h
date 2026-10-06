@@ -25,7 +25,7 @@ namespace elevsafe
     class RetinaStreamParser
     {
     public:
-        using FrameCallback = std::function<void(const RadarFrame&)>;
+        using FrameCallback = std::function<void(RadarFrame&)>;
 
         struct Statistics
         {

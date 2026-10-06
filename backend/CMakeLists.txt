@@ -53,3 +53,11 @@ add_executable(backend_pipeline_test
 target_link_libraries(backend_pipeline_test PRIVATE elevsafe_backend_core)
 
 add_test(NAME backend_pipeline_test COMMAND backend_pipeline_test)
+
+add_executable(relative_frame_clock_test
+    tests/relative_frame_clock_test.cpp
+)
+
+target_link_libraries(relative_frame_clock_test PRIVATE elevsafe_backend_core)
+
+add_test(NAME relative_frame_clock_test COMMAND relative_frame_clock_test)

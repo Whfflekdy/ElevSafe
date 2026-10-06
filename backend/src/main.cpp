@@ -49,6 +49,7 @@ int main(int argc, char** argv)
         pipeline.drain([](const elevsafe::RadarFrame& pendingFrame)
         {
             std::cout << "frameCount=" << pendingFrame.frameCount
+                      << " timestampUs=" << pendingFrame.timestampUs
                       << " pointCount=" << pendingFrame.points.size();
 
             if (!pendingFrame.points.empty())

@@ -101,6 +101,7 @@ namespace
     {
         expect(frames.size() == 1, "expected one parsed frame");
         expect(frames[0].frameCount == frameCount, "unexpected frame count");
+        expect(frames[0].timestampUs == 0, "parser must leave the frame timestamp at its default");
         expect(frames[0].points.size() == 2, "unexpected point count");
         expect(frames[0].points[0].targetId == 7, "unexpected first target id");
         expect(frames[0].points[1].targetId == -1, "unexpected second target id");
@@ -112,6 +113,26 @@ namespace
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
         feed(parser, makePacket(11, samplePoints()));
         expectSampleFrame(frames, 11);
+    }
+
+    void testMutableFrameCallback()
+    {
+        RadarFrame receivedFrame;
+        bool callbackCalled = false;
+        RetinaStreamParser parser([&](RadarFrame& frame)
+        {
+            callbackCalled = true;
+            expect(frame.timestampUs == 0, "parsed frame timestamp must initially be zero");
+            frame.timestampUs = 40605;
+            receivedFrame = frame;
+        });
+
+        feed(parser, makePacket(25, samplePoints()));
+
+        expect(callbackCalled, "mutable frame callback was not called");
+        expect(receivedFrame.frameCount == 25, "mutable callback changed the frame count");
+        expect(receivedFrame.timestampUs == 40605, "mutable callback could not assign the timestamp");
+        expect(receivedFrame.points.size() == 2, "mutable callback changed the parsed points");
     }
 
     void testOneByteChunks()
@@ -256,6 +277,7 @@ int main()
     try
     {
         testCompletePacket();
+        testMutableFrameCallback();
         testOneByteChunks();
         testMultiplePacketsInOneChunk();
         testGarbageBeforePacket();
