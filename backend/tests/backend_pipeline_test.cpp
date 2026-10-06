@@ -13,10 +13,11 @@ namespace
             throw std::runtime_error(message);
     }
 
-    elevsafe::RadarFrame makeFrame(std::uint32_t frameCount)
+    elevsafe::RadarFrame makeFrame(std::uint32_t frameCount, std::uint64_t timestampUs = 0)
     {
         elevsafe::RadarFrame frame;
         frame.frameCount = frameCount;
+        frame.timestampUs = timestampUs;
 
         elevsafe::RadarPoint point;
         point.x = 1.25f;
@@ -46,14 +47,16 @@ namespace
     void testDrainSingleFrame()
     {
         elevsafe::BackendPipeline pipeline(2);
-        pipeline.onFrame(makeFrame(7));
+        pipeline.onFrame(makeFrame(7, 40605));
 
         std::size_t callbackCount = 0;
         std::uint32_t receivedFrameCount = 0;
+        std::uint64_t receivedTimestampUs = 0;
         const auto drained = pipeline.drain([&](const elevsafe::RadarFrame& frame)
         {
             ++callbackCount;
             receivedFrameCount = frame.frameCount;
+            receivedTimestampUs = frame.timestampUs;
             expect(frame.points.size() == 1, "point count was not preserved");
             expect(frame.points[0].x == 1.25f, "x was not preserved");
             expect(frame.points[0].y == -2.5f, "y was not preserved");
@@ -65,8 +68,31 @@ namespace
 
         expect(drained == 1, "single-frame drain must return one");
         expect(receivedFrameCount == 7, "consumer received an unexpected frame count");
+        expect(receivedTimestampUs == 40605, "consumer received an unexpected frame timestamp");
         expect(callbackCount == 1, "consumer must be called once");
         expect(pipeline.pendingSize() == 0, "drain must empty the pipeline");
+    }
+
+    void testFrameCountGapPreservesTimestamps()
+    {
+        elevsafe::BackendPipeline pipeline(2);
+        pipeline.onFrame(makeFrame(100, 0));
+        pipeline.onFrame(makeFrame(105, 50000));
+
+        std::vector<std::uint32_t> frameCounts;
+        std::vector<std::uint64_t> timestampsUs;
+        const auto drained = pipeline.drain([&](const elevsafe::RadarFrame& frame)
+        {
+            frameCounts.push_back(frame.frameCount);
+            timestampsUs.push_back(frame.timestampUs);
+        });
+
+        expect(drained == 2, "gap test must drain both frames");
+        expect(frameCounts.size() == 2, "gap test frame count size mismatch");
+        expect(timestampsUs.size() == 2, "gap test timestamp size mismatch");
+        expect(frameCounts[0] == 100 && frameCounts[1] == 105, "pipeline changed gapped frame counts");
+        expect(timestampsUs[0] == 0 && timestampsUs[1] == 50000,
+            "pipeline must preserve timestamps independently of frame count gaps");
     }
 
     void testDrainReturnsCountAndPreservesFifo()
@@ -198,6 +224,7 @@ int main()
         testConstruction();
         testOnFrame();
         testDrainSingleFrame();
+        testFrameCountGapPreservesTimestamps();
         testDrainReturnsCountAndPreservesFifo();
         testEmptyDrain();
         testEmptyConsumerPreservesFrames();

@@ -1,5 +1,6 @@
 #include "elevsafe/retina_client.h"
 
+#include "elevsafe/relative_frame_clock.h"
 #include "elevsafe/retina_protocol.h"
 
 #include <array>
@@ -178,8 +179,10 @@ namespace elevsafe
 
         log << "Connected to " << m_host << ':' << m_port << '\n';
 
-        RetinaStreamParser parser([this](const RadarFrame& frame)
+        RelativeFrameClock frameClock;
+        RetinaStreamParser parser([this, &frameClock](RadarFrame& frame)
         {
+            frame.timestampUs = frameClock.timestampUs(RelativeFrameClock::Clock::now());
             if (m_callback)
                 m_callback(frame);
         });

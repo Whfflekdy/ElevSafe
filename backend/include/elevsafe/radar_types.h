@@ -18,6 +18,7 @@ namespace elevsafe
     struct RadarFrame
     {
         std::uint32_t frameCount = 0;
+        std::uint64_t timestampUs = 0;
         std::vector<RadarPoint> points;
     };
 }

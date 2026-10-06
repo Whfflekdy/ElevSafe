@@ -18,6 +18,7 @@ backend/
 ├─ include/
 │  └─ elevsafe/
 │     ├─ radar_types.h
+│     ├─ relative_frame_clock.h
 │     ├─ retina_protocol.h
 │     ├─ retina_client.h
 │     ├─ frame_buffer.h
@@ -31,7 +32,8 @@ backend/
 └─ tests/
    ├─ retina_protocol_test.cpp
    ├─ frame_buffer_test.cpp
-   └─ backend_pipeline_test.cpp
+   ├─ backend_pipeline_test.cpp
+   └─ relative_frame_clock_test.cpp
 ```
 
 ## Runtime Data Flow
@@ -55,7 +57,9 @@ RetinaClient
 
 - `RadarPoint`는 point cloud 한 점의 `x`, `y`, `z`, `doppler`,
   `power`, `targetId`를 보관합니다.
-- `RadarFrame`은 `frameCount`와 `std::vector<RadarPoint>`를 보관합니다.
+- `RadarFrame`은 `frameCount`, `timestampUs`, `std::vector<RadarPoint>`를 보관합니다.
+- `timestampUs`는 현재 TCP connection의 첫 valid frame을 `0`으로 한 host-side
+  monotonic relative timestamp이며 단위는 microseconds입니다.
 
 ### RetinaStreamParser
 
@@ -75,7 +79,10 @@ raw byte를 내부 stream buffer에 누적하고 packet magic과 `packageSize`�
 지정된 host와 TCP port에 직접 연결합니다. 현재 기본 port는 `29172`이며,
 Device Discovery는 사용하지 않습니다. 연결 후 raw byte를 수신하여
 `RetinaStreamParser`에 전달하고, parser가 생성한 frame을 callback으로
-전달합니다.
+전달합니다. 완성된 frame을 받은 직후 `std::chrono::steady_clock`을 사용해
+connection-local `timestampUs`를 부여하며, 새 `run()`/connection에서는 첫
+valid frame이 다시 `0`부터 시작합니다. 이 값은 sensor hardware timestamp가
+아니며 `frameCount`나 고정 FPS로 보간하지 않습니다.
 
 ### FrameBuffer
 
@@ -104,7 +111,7 @@ producer와 consumer가 분리되는 구조에서는 별도 검토가 필요합�
 `main.cpp`는 host와 port를 읽고 `RetinaClient`를 실행합니다. callback에서
 `onFrame()`을 호출한 직후 `drain()`을 호출하므로 현재 runtime은 별도
 worker thread 없는 single-thread synchronous 구조입니다. 기존의
-`frameCount`, `pointCount`, 첫 point의 `x/y/z/doppler/power/targetId`
+`frameCount`, `timestampUs`, `pointCount`, 첫 point의 `x/y/z/doppler/power/targetId`
 출력은 `drain()`에 전달된 console consumer가 담당합니다.
 
 ## 요구 환경
@@ -129,13 +136,14 @@ cmake --build backend/build --config Release
 ctest --test-dir backend/build -C Release --output-on-failure
 ```
 
-현재 CMake에 등록된 테스트는 다음 3개입니다.
+현재 CMake에 등록된 테스트는 다음 4개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
 - `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
 - `backend_pipeline_test`: frame enqueue, FIFO drain, consumer 동작 및 overflow 전달 검증
+- `relative_frame_clock_test`: connection-relative timestamp 계산 및 reset 검증
 
-Release 기준 현재 검증 결과는 CTest `3/3` 통과입니다.
+Release 기준 현재 검증 결과는 CTest `4/4` 통과입니다.
 
 ## 검증 상태
 
@@ -188,9 +196,10 @@ host와 port는 command line으로 지정할 수 있습니다. port는 `1`부터
 - Radar Frame parsing
 - point cloud parsing
 - `RadarPoint` 및 `RadarFrame` 자료형
+- connection-relative `timestampUs` 생성 및 전달
 - bounded `FrameBuffer`
 - `BackendPipeline` enqueue/drain skeleton
-- frameCount, pointCount, 첫 point console 출력
+- frameCount, timestampUs, pointCount, 첫 point console 출력
 
 ## 현재 구현되지 않음
 
