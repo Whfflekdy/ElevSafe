@@ -23,12 +23,13 @@ function App() {
     [데이터 수집 및 전처리 팀 연동 가이드]
     실제 4D 레이더 데이터 팀이 WebSocket이나 API로 넘겨줄 JSON 데이터 구조입니다.
     Expected Format:
-    {
       "timestamp": "2026-10-01T14:02:05Z",
-      "door_status": "DOOR_HOLD",
+      "door_command": "HOLD", -> null, OPEN, HOLD, CLOSE
+      "door_state": "OPEN", -> OPEN, CLOSED, OPENING, CLOSEING
       "passengers": [
-        { "id": 1, "x": 150, "y": 120, "state": "INSIDE" },
-        { "id": 2, "x": 150, "y": 320, "state": "FALL" }->>FALL, INSIDE, ENTERING, EXITING, IMMOBILE
+        { "id": 1, "x": -0.20, "y": 1.00, "state": "INSIDE","safety_state": null,"label": "Passenger #1"},
+        { "id": 2, "x": 150, "y": 320, "state": "ENTERING", "safety_state": "FALL","label": "Passenger #2"}
+         ->가능한 값 INSIDE, ENTERING, EXITING/IMMOBILE, FALL
       ]
     }
     =================================================================
@@ -39,9 +40,9 @@ function App() {
   // ---> [지워야함] 현재 테스트용 예시 승객 (x, y 좌표도 cm 단위입니다)
   // 초록점과 빨간점이 살짝 겹치도록 좌표를 비슷하게 두어, 빨간점이 무조건 위로 올라오는지 테스트합니다.
   const [passengers, setPassengers] = useState([
-    { id: 1, x: 100, y: 80, state: 'INSIDE', label: 'Passenger #1' },  // 정상 승객
-    { id: 2, x: 105, y: 85, state: 'FALL', label: 'Passenger #2' },    // 겹쳐진 낙상 승객 (무조건 위로 보임)
-    { id: 3, x: 100, y: 220, state: 'ENTERING', label: 'Passenger #3' } // 출입구 대기 구역 승객
+    { id: 1, x: -30, y: 100, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
+    { id: 2, x: 40, y: -50, state: 'ENTERING', safety_state: 'FALL', label: 'Passenger #2' },    // 승강장 좌측 대기 중 낙상 발생 ->나중에 state를 OUTSIDE로 변경 상의중
+    { id: 3, x: 80, y: 130, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' } // 카빈 내부 좌측 구석 장기 미동
   ]);
 
   const [systemLogs, setSystemLogs] = useState([
@@ -70,20 +71,21 @@ function App() {
     // --- [실제 넣어야 함] 끝 ---
   */
 
-    // 💡 상태값에 따라 색상 테마(초록/빨강)를 결정하는 함수
-  const getStatusTheme = (state) => {
-    if (['FALL', 'IMMOBILE'].includes(state)) return 'danger'; // 위험 상태는 빨강
-    return 'normal'; // ENTERING, INSIDE, EXITING은 초록
+// 💡 safety_state 유무에 따라 화면 렌더링 색상 분기
+  const getTheme = (safetyState) => {
+    if (safetyState === 'FALL' || safetyState === 'IMMOBILE') return 'danger';
+    return 'normal';
   };
 
   // 💡 상태값에 따라 말풍선에 띄울 한글 설명을 결정하는 함수
-  const getStatusLabel = (state) => {
+  const getStatusLabel = (state, safetyState) => {
+    if (safetyState === 'FALL') return '🚨 비상 (낙상 감지!)';
+    if (safetyState === 'IMMOBILE') return '🚨 비상 (장기 미동 감지!)';
+    
     switch (state) {
       case 'ENTERING': return '🚶 입장 중 (정상)';
       case 'INSIDE': return '✅ 정상 탑승';
       case 'EXITING': return '🚶 퇴장 중 (정상)';
-      case 'FALL': return '🚨 비상 (낙상 감지!)';
-      case 'IMMOBILE': return '🚨 비상 (장기 미동 감지!)';
       default: return '알 수 없음';
     }
   };
@@ -154,12 +156,20 @@ function App() {
 
               {/* 4. 승객(점) 렌더링 및 말풍선 툴팁 */}
               {passengers.map(p => {
-                const theme = getStatusTheme(p.state);
+                const theme = getTheme(p.safety_state);
+
+                // [좌표 변환 핵심 로직]
+                // X축: 중앙에서 카 내부를 기준으로 왼쪽(+)이면 화면 우측으로 더함
+                const leftPos = (CONFIG_CM.ELEV_WIDTH / 2 + p.x) * SCALE;
+                // Y축: 도면의 문턱 위치(ELEV_DEPTH)에서 Y값이 양수(+)면 위로 빼주고, 음수(-)면 아래로 더해짐
+                const topPos = (CONFIG_CM.ELEV_DEPTH - p.y) * SCALE;
+
+
                 return (
                 <div 
                   key={p.id} 
                   className={`passenger-dot ${theme}`}
-                  style={{ left: p.x * SCALE, top: p.y * SCALE }}
+                  style={{ left: leftPos, top: topPos }}
                   onClick={(e) => {
                     e.stopPropagation();
                     setSelectedDot(p.id);
@@ -174,7 +184,7 @@ function App() {
                       <strong>{p.label}</strong>
                       <p>실제 좌표: (X: {p.x}cm, Y: {p.y}cm)</p>
                       <p className="state-text">
-                        상태: {getStatusLabel(p.state)}
+                        상태: {getStatusLabel(p.state, p.safety_state)}
                       </p>
                     </div>
                   )}
@@ -210,7 +220,7 @@ function App() {
             <h2>실시간 시스템 로그 (Terminal)</h2>
             <div className="terminal-window">
               {systemLogs.map((log, index) => (
-                <p key={index} className={log.includes('FALL') || log.includes('HOLD') ? 'log-danger' : ''}>
+                <p key={index} className={log.includes('FALL') || log.includes('HOLD') || log.includes('IMMOBILE') ? 'log-danger' : ''}>
                   {log}
                 </p>
               ))}
