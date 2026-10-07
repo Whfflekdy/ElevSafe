@@ -30,28 +30,32 @@ int main(int argc, char** argv) {
 
     const ROIFilter roi(roi_cfg);
     // 3. 데이터 읽기
-    std::vector<Frame> frames = readFramesCSV(input_path);
+    std::vector<FrameData> frames = readFramesCSV(input_path);
     if (frames.empty()) {
         std::cerr << "입력 프레임이 없습니다: " << input_path << "\n";
         return 1;
     }
 
     // 4. 프레임마다 파이프라인 실행
-    std::vector<Frame> outputs;
+    std::vector<FrameData> outputs;
     outputs.reserve(frames.size());
     ROIStats total;
 
-    for (auto& frame : frames) {
+    for (auto& fd : frames) {
         // TODO(Step 2): 좌표 변환 전에 센서 기준 극좌표 격자 번호 계산 (polar.assignBins)
         //               변환 후에는 센서 기준 좌표가 사라지므로 반드시 맨 앞에 둘 것
 
         // TODO: (1-a) transform 으로 frame 좌표 변환
         // TODO: (1-b) roi.filter 로 필터링 + 통계 받기, 결과를 outputs 에 추가
         // TODO: 이번 프레임 통계를 total 에 누적
-        transform.apply(frame);
+        transform.apply(fd.points);
 
         ROIStats stats;
-        outputs.push_back(roi.filter(frame, &stats));
+        FrameData out;
+        out.frame_id = fd.frame_id;
+        out.timestamp_ms = fd.timestamp_ms;
+        out.points = roi.filter(fd.points, &stats);
+        outputs.push_back(std::move(out));
         total += stats;
 
         // TODO(Step 2): background_subtractor

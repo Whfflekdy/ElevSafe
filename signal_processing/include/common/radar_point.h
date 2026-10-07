@@ -12,23 +12,6 @@ enum class Zone: std::uint8_t{
     CABIN = 2  // 엘리베이터 내부 영역
 };
 
-// 헤더에 함수 본문을 두면 include한 .cpp마다 정의가 생기므로
-// inline으로 표시해 링크 시 중복 정의 에러를 막음.
-inline const char* zoneToString(Zone zone){
-    switch(zone){
-        case Zone::NONE:
-            return "NONE";
-            break;
-        case Zone::DOOR:
-            return "DOOR";
-            break;
-        case Zone::CABIN:
-            return "CABIN";
-            break;
-    }
-    return "UNKNOWN"; // 값이 잘못 들어온 경우 대비. 
-}
-
 struct RadarPoint{
     float x=0.0f;       // 좌우 [m]
     float y=0.0f;       // 깊이 [m]
@@ -47,3 +30,28 @@ struct RadarPoint{
 
 // 한 프레임에 들어온 포인트 묶음(Frame 별칭)
 using Frame = std::vector<RadarPoint>;
+
+// 한 프레임의 메타 정보 + 포인트 목록
+// (파일 입출력과 main 에서 사용. 필터들은 기존처럼 Frame 만 받는다)
+struct FrameData {
+    int frame_id = -1;          // 센서 원본 frameCount
+    double timestamp_ms = 0.0;  // 세션 첫 프레임 기준 경과 시간 [ms]
+    Frame points;               // 포인트 목록
+};
+
+// 헤더에 함수 본문을 두면 include한 .cpp마다 정의가 생기므로
+// inline으로 표시해 링크 시 중복 정의 에러를 막음.
+inline const char* zoneToString(Zone zone){
+    switch(zone){
+        case Zone::NONE:
+            return "NONE";
+            break;
+        case Zone::DOOR:
+            return "DOOR";
+            break;
+        case Zone::CABIN:
+            return "CABIN";
+            break;
+    }
+    return "UNKNOWN"; // 값이 잘못 들어온 경우 대비. 
+}
