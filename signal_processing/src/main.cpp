@@ -12,6 +12,7 @@
 #include "io/csv_io.h"
 #include "preprocessing/coordinate_transform.h"
 #include "preprocessing/roi_filter.h"
+#include "preprocessing/polar_grid.h"
 
 int main(int argc, char** argv) {
     // 실행할 때 경로를 넘기면 그걸 쓰고, 안 넘기면 기본 경로 사용
@@ -27,6 +28,7 @@ int main(int argc, char** argv) {
     const CoordinateTransform transform(SensorPose::fromConfig(cfg)); // 설정파일 -> 센서 자세 -> 변환기
     const ROIConfig roi_cfg = ROIConfig::fromConfig(cfg);             // 설정 파일 -> ROI 영역
     if(!roi_cfg.isValid()) return 1;                                  // 범위가 잘못됐으면 종료
+    const PolarGrid polar(PolarGridConfig::fromConfig(cfg));
 
     const ROIFilter roi(roi_cfg);
     // 3. 데이터 읽기
