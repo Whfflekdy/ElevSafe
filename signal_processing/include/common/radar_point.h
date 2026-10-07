@@ -38,6 +38,11 @@ struct RadarPoint{
 
     int target_id = -1; // 센서가 부여한 ID(-1: 부여되지 않음)
     Zone zone = Zone::NONE; // ROI 필터가 채워 넣는 영역 라벨. 
+
+    // 센서 기준 극좌표 격자 번호
+    int range_bin = -1; // 거리 칸 번호(-1: 계산 안 됨)
+    int az_bin    = -1; // 방위각 칸 번호
+    int el_bin    = -1; // 고도각 칸 번호 
 };
 
 // 한 프레임에 들어온 포인트 묶음(Frame 별칭)

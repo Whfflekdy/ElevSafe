@@ -1,0 +1,5 @@
+build/
+data/output/*
+!data/output/.gitkeep
+scratch
+tests/scratch.cpp
