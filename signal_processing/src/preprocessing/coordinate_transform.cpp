@@ -18,7 +18,7 @@ SensorPose SensorPose::fromConfig(const Config& cfg){
 }
 
 // 생성자: 센서 좌표를 엘리베이터 좌표로 바꿔주는 변환기로 내부에 회전행렬 R_과 이동 벡터 t_을 가지고 있음.
-// post에 담긴 각도, 위치를 통해 R_, t_를 계산하여 저장
+// pose에 담긴 각도, 위치를 통해 R_, t_를 계산하여 저장
 // doppler, power, target_id, zone는 변환하지 않음. (회전/이동은 위치(x,y,z)만 바꾸므로)
 CoordinateTransform::CoordinateTransform(const SensorPose& pose){
     // 세 가지 회전 각도를 라디안으로 변환하여 (r, p, y)로 저장
