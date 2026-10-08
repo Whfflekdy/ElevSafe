@@ -20,6 +20,7 @@ add_library(radar_core
   src/io/csv_io.cpp
   src/preprocessing/polar_grid.cpp
   src/preprocessing/background_subtractor.cpp
+  src/clustering/dbscan.cpp
 )
 # radar_core를 쓰는 쪽은 include/ 를 기준으로 헤더를 찾음
 target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
