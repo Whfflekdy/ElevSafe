@@ -1,6 +1,6 @@
 # signal_processing — 신호 처리 및 클러스터링
 
-4D 레이더 포인트 클라우드에서 엘리베이터 출입구(Door Zone)와 내부(Cabin)의 유효 포인트를 정제하고,
+4D 레이더(Retina-4SN) 포인트 클라우드에서 엘리베이터 출입구(Door Zone)와 내부(Cabin)의 유효 포인트를 정제하고,
 클러스터링을 통해 탑승객 단위의 객체를 추출하는 모듈입니다.
 
 담당: 김수연 (B)
@@ -8,12 +8,15 @@
 ## 파이프라인
 
 ```
-CSV 입력 → 좌표 변환 → ROI 필터 → 정적 배경 제거 → SOR/RCS → DBSCAN → Bounding Box → CSV 출력
-           (Step 1)    (Step 1)     (Step 2)       (Step 3)  (Step 4)   (Step 5)
+CSV 입력 → 격자 번호 → 좌표 변환 → ROI 필터 → 정적 배경 제거 → SOR/RCS → DBSCAN → Bounding Box → CSV 출력
+           (Step 2)   (Step 1)    (Step 1)    (Step 2)        (Step 3)  (Step 4)   (Step 5)
 ```
 
 - [x] **Step 1**: 센서 → 엘리베이터 좌표 변환, Door Zone / Cabin ROI 필터 및 Zone 라벨링
-- [ ] **Step 2**: 정적 배경 제거 (빈 엘리베이터 배경 맵 기반)
+- [x] **Step 2**: 극좌표(u-v) 격자 기반 정적 배경 제거 (배경 맵 생성·저장·적용)
+  - [ ] 실제 빈 장면 + 정지 승객 데이터로 검증
+  - [ ] Power 보조 판단 (벽에 기댄 승객 보호) — 검증 결과에 따라 결정
+  - [ ] 문 열림/닫힘 상태별 배경 맵 — 문 상태 신호 확정 후
 - [ ] **Step 3**: 허공 노이즈 제거 (RCS, SOR)
 - [ ] **Step 4**: DBSCAN 클러스터링 및 파라미터 튜닝
 - [ ] **Step 5**: Bounding Box 추출 및 대형 군집 분할
@@ -24,19 +27,24 @@ CSV 입력 → 좌표 변환 → ROI 필터 → 정적 배경 제거 → SOR/RCS
 signal_processing/
 ├── CMakeLists.txt
 ├── config/
-│   └── elevator_default.cfg       # 엘리베이터 규격 / 센서 설치 자세
-├── include/                       # 헤더 (선언)
+│   ├── elevator_default.cfg       # 엘리베이터 규격 / 센서 설치 자세 / 격자 / 배경 제거
+│   └── minitest.cfg               # 엘리베이터가 아닌 장소(책상 위 센서) 데이터 테스트용
+├── include/
 │   ├── common/                    # radar_point.h, box3d.h, config.h
 │   ├── io/                        # csv_io.h
-│   ├── preprocessing/             # coordinate_transform.h, roi_filter.h
+│   ├── preprocessing/             # coordinate_transform.h, roi_filter.h,
+│   │                              # polar_grid.h, background_subtractor.h
 │   ├── clustering/                # (Step 4 예정)
 │   └── postprocessing/            # (Step 5 예정)
-├── src/                           # 구현 (include와 같은 구조) + main.cpp
+├── src/                           # 구현 (include와 같은 구조)
+│   ├── main.cpp                   # radar_pipeline: 정제 파이프라인 실행기
+│   └── build_background.cpp       # build_background: 빈 장면 → 배경 맵 생성
 ├── tests/
 ├── tools/
 └── data/
-    ├── raw/                       # 실측 녹화 데이터
+    ├── raw/                       # 실측 녹화 CSV (git 제외)
     ├── sample/                    # 테스트용 소형 데이터 (tiny.csv)
+    ├── background/                # 생성된 배경 맵 (git 제외)
     └── output/                    # 실행 결과 (git 제외)
 ```
 
@@ -46,52 +54,116 @@ signal_processing/
 cd signal_processing
 cmake -S . -B build        # 처음 한 번, 또는 CMakeLists.txt 수정 시
 cmake --build build
+```
+
+**파이프라인 실행**
+
+```bash
 ./build/radar_pipeline [config] [input.csv] [output.csv]
 ```
 
 인자를 생략하면 `config/elevator_default.cfg`, `data/sample/tiny.csv`, `data/output/roi_out.csv`를 사용합니다.
+설정 파일의 `background.map_path`에 배경 맵이 없으면 배경 제거만 건너뛰고 나머지는 그대로 실행합니다.
+
+**배경 맵 생성**
+
+```bash
+./build/build_background [config] [empty.csv] [map.csv]
+```
+
+빈 장면 CSV로 배경 맵을 만들어 저장합니다. 이후 `radar_pipeline`이 설정 파일의 `background.map_path`에서 불러옵니다.
+
+**녹화 데이터(PCR) 사용 순서**
+
+1. [sg-radar-tools](https://github.com/jin-1031/sg-radar-tools)의 `tools/pcr/pcr_to_csv.py`로 PCR → CSV 변환
+   (Python 가상환경에서 `pip install zstandard` 필요, 세션이 여러 개면 `--session N`)
+2. 변환한 CSV를 `data/raw/` 아래에 저장
+3. 빈 장면 CSV로 `build_background` 실행 → 대상 CSV로 `radar_pipeline` 실행
 
 ## 좌표계
 
 모든 ROI와 이후 처리는 **엘리베이터 좌표계** 기준입니다.
 
 - 원점: 캐빈 문턱(sill) 중앙의 바닥면
-- x: 좌우 (캐빈 안에서 문을 볼 때 오른쪽 +)
+- x: 좌우 (**승강장에서 캐빈을 바라볼 때** 오른쪽 +)
 - y: 깊이 (캐빈 안쪽 +, 승강장 쪽 −)
 - z: 높이 (바닥 0, 위쪽 +)
-- 단위: m, deg
-- 오른손 좌표계
-
-> **센서 축 (Retina-4SN, 2026-10-05 미니테스트로 확인)**
-> 정면 +Y, 오른쪽 +X, 위 +Z, 오른손 좌표계 / Doppler: 접근 −, 이탈 +
-> - 아래로 숙여 설치하면 `roll_deg` 음수 (예: 25° 하방 → `-25`)
-> - 뒷벽에서 문을 향해 설치하면 `yaw_deg = 180`
+- 오른손 좌표계, 단위 m
 
 변환식: `p_엘리베이터 = R × p_센서 + t`
 (R = Rz(yaw) · Ry(pitch) · Rx(roll), t = 엘리베이터 원점 기준 센서 설치 위치)
 
-> **⚠️ 실측 전 확인 필요: 센서 정면 축**
-> 회전 부호는 센서 출력 좌표축에 따라 달라집니다.
-> - 센서 정면이 +x: 아래로 숙이면 `pitch_deg` 양수
-> - 센서 정면이 +y (TI mmWave 출력에서 흔함): 아래로 숙이면 `roll_deg` 음수
->
-> 센서 정면에 사람이 섰을 때 x, y 중 어느 값이 크게 나오는지로 확인합니다.
+> **센서 축 (Retina-4SN, 2026-10-05 미니테스트로 확인)**
+> 정면 +Y, 오른쪽 +X, 위 +Z, 오른손 좌표계 / 단위 m / Doppler: 접근 −, 이탈 +
+> - 아래로 숙여 설치하면 `roll_deg` 음수 (예: 25° 하방 → `-25`)
+> - 뒷벽에서 문을 향해 설치하면 `yaw_deg = 180`
+> - 검증: `front_man`(정면 1m) 사람 점 평균 (x −0.02, y 1.25), `right_man`(오른쪽 1m) 사람 점 x 0.75 ~ 1.25
+
+## 센서 격자 구조 (실측)
+
+Retina-4SN의 포인트는 연속 공간이 아니라 **거리와 방향 코사인(u-v)의 격자** 위에만 찍힙니다.
+미니테스트 데이터(`front_man`, `conn_bg`)로 측정했으며, 모든 점이 오차 0칸으로 격자 위에 있었습니다.
+
+| 항목 | 정의 | 간격 | 기준점 |
+|---|---|---|---|
+| 거리 r | √(x² + y² + z²) | **0.071565 m** | 0 |
+| 좌우 u | x / r (방위 방향 코사인) | **0.015938** (정면 근처 약 0.91°) | 0 |
+| 위아래 v | z / r = sin(고도각) | **0.015938** | 0 |
+
+- 칸 번호 = `round(값 / 간격)`. 각도(atan, asin)가 아니라 u, v가 일정 간격이라는 점에 주의
+- u 칸 번호 범위 약 −47 ~ 47 → 좌우 시야각 약 ±49°
+- 작년 레포트의 수치(거리 75mm, 각도 1.04° / 1.27°, 각도 격자)와 다르므로 이 값을 기준으로 함
+- 격자 번호는 **센서 좌표 기준**이라 좌표 변환 전에 계산해 `RadarPoint`에 저장 (`has_bins`, `range_bin`, `u_bin`, `v_bin`)
+
+## 정적 배경 제거
+
+빈 장면에서 **전체 프레임 중 일정 비율 이상 점이 찍힌 격자 칸**을 배경으로 등록하고, 이후 그 칸에 떨어진 점을 제거합니다.
+도플러 기반 제거는 정지한 승객까지 지우므로 사용하지 않습니다.
+
+| 설정 키 | 기본값 | 설명 |
+|---|---|---|
+| `background.map_path` | — | 배경 맵 파일 경로 (없으면 배경 제거 생략) |
+| `background.occupancy_threshold` | 0.3 | 이 비율 이상 프레임에서 찍힌 칸을 배경으로 등록 |
+| `background.dilation` | 0 | 배경 칸 주변 몇 칸까지 배경으로 넓힐지 (센서 진동 대비) |
+
+배경 맵 파일은 `range_bin,u_bin,v_bin` 형식의 CSV입니다.
+
+### 배경 맵 사용 원칙 (미니테스트 실험 결과)
+
+| 실험 | 결과 | 교훈 |
+|---|---|---|
+| `conn_bg`로 맵 생성 → `conn_bg`에 적용 | 72.9% 제거 | 코드 동작 확인 |
+| `conn_bg`로 맵 생성 → `front_man`에 적용 | **0% 제거**, 전체 1,105칸 중 겹치는 칸 0개 | 센서 배치가 다르면 배경 맵을 전혀 쓸 수 없음 |
+| `doppler_man`(사람 포함)으로 맵 생성 → 자기 자신에 적용 | 사람이 멈춰 선 3m 근처만 제거 | 사람이 섞인 데이터로 만들면 **정지한 승객이 지워짐** |
+
+따라서 배경 맵은 반드시
+
+1. **사람이 전혀 없는 빈 장면**으로,
+2. **실제 측정과 같은 센서 설치 상태**에서 (센서 설치 직후, 승객 시나리오 전에) 만들어야 하며,
+3. 센서를 다시 설치하거나 각도를 바꾸면 **다시 생성**해야 합니다.
 
 ## 데이터 형식
 
-입력 CSV (`target_id`는 생략 가능, 없으면 -1)
+**입력 CSV** (컬럼은 헤더 이름으로 찾음, 순서 무관)
+
 ```
-frame,x,y,z,doppler,power,target_id
+frame,timestamp_ms,x,y,z,doppler,power,target_id
 ```
 
-출력 CSV (ROI 안의 포인트만, `zone` 열 추가)
+- 필수: `frame, x, y, z, doppler, power` / 선택: `timestamp_ms`(없으면 0), `target_id`(없으면 −1)
+- `frame`: 센서 원본 frameCount
+- `timestamp_ms`: 세션 첫 프레임 기준 경과 시간 [ms] (PCR 원본 프레임 간격 보존)
+- 단위: x/y/z m, doppler m/s
+
+**출력 CSV**
+
 ```
-frame,x,y,z,doppler,power,target_id,zone
+frame,timestamp_ms,x,y,z,doppler,power,target_id,zone
 ```
 
+- `frame`, `timestamp_ms`는 입력 값 그대로 보존
 - `zone`: `DOOR` / `CABIN`
-- 출력의 `frame`은 원본 번호가 아니라 0부터 매긴 순번입니다.
-- 파싱할 수 없는 줄은 경고(줄 번호 포함) 후 건너뜁니다.
+- 파싱할 수 없는 줄은 경고(줄 번호 포함) 후 건너뜀
 
 ## 설정 파일
 
@@ -102,28 +174,30 @@ frame,x,y,z,doppler,power,target_id,zone
 |---|---|---|
 | `sensor.tx/ty/tz` | 0 | 센서 설치 위치 [m] |
 | `sensor.roll/pitch/yaw_deg` | 0 | 센서 설치 각도 [deg] |
+| `polar.range_res` | 0.071565 | 거리 격자 간격 [m] |
+| `polar.uv_res` | 0.015938 | u, v 격자 간격 |
 | `door.*` | x ±0.45, y −0.50~0.30, z 0.10~2.10 | Door Zone 범위 |
 | `cabin.*` | x ±0.75, y 0.30~1.35, z 0.10~2.20 | Cabin 범위 |
+| `background.*` | 위 표 참고 | 정적 배경 제거 |
 
 Door Zone과 Cabin이 겹치는 경계에서는 진입/퇴장 판단을 위해 **Door Zone을 우선**합니다.
-현재 값은 폭 1.6m × 깊이 1.4m 캐빈, 폭 0.9m 출입문을 가정한 값이며 실측 후 수정이 필요합니다.
+현재 ROI 값은 폭 1.6m × 깊이 1.4m 캐빈, 폭 0.9m 출입문을 가정한 값이며 실측 후 수정이 필요합니다.
 
-## 참고: 레이더 포인트의 방사형 격자 구조
+## 실측 데이터 특성 (미니테스트)
 
-작년 프로젝트 레포트 기준, 센서 포인트는 연속 공간이 아니라 이산 격자 위에 찍힙니다
-(거리 해상도 75mm, 방위각 약 1.04°, 고도각 약 1.27°). 엘리베이터 거리(~2.5m)에서는
-거리 방향 간격(7.5cm)이 가장 거칠며, 다음 단계 파라미터에 반영할 예정입니다.
+- 프레임당 점 수가 많음: `front_man` 평균 약 646개, `right_man` 약 1,020개
+- 프레임 속도 약 18.5 ~ 20 fps로 일정하지 않음 → `timestamp_ms`로 실제 간격 사용
+- `power`는 dB가 아닌 선형 값으로 보임 (1,066 ~ 301,723) → Step 3 임계값은 로그 변환 후 설계 예정
+- `target_id`: 6번 등 소수 ID가 대부분, 나머지는 250 · 253 · 255 → 센서 내부 추적 ID와 특수값으로 추정 (SDK 문서 확인 필요)
 
-- Step 1: 벽 쪽 ROI 여유를 7.5~10cm 이상으로 검토
-- Step 2: 배경 맵을 (거리, 방위각, 고도각) 격자 인덱스 기반으로 구성 검토
-- Step 3: SOR 임계값을 거리에 따라 조정
-- Step 4: DBSCAN epsilon은 격자 간격보다 충분히 크게 (약 0.15m 이상부터 탐색)
+## 알아둘 점
 
-※ 올해 센서/처프 설정이 다르면 수치가 달라지므로 실측 데이터로 재확인 필요
+- PCR 변환 도구는 **점이 없는 프레임을 CSV에서 제외**합니다. 그래서 frame 번호가 건너뛰어도 통신 유실인지 빈 프레임인지 CSV만으로는 구분할 수 없고, 배경 맵 점유율 계산의 분모가 실제보다 약간 작아집니다 (`conn_bg`: 229프레임 중 6프레임 제외).
+- 엘리베이터가 아닌 장소의 데이터는 `config/minitest.cfg`(센서 좌표 그대로, ROI 사실상 해제)로 테스트합니다.
 
-## TODO (실측 데이터 확보 후)
+## TODO
 
-- [ ] 센서 정면 축 확인 및 회전 부호 결정
-- [ ] 엘리베이터 치수, 센서 설치 위치 측정 후 `elevator_default.cfg` 반영
-- [ ] 빈 엘리베이터 녹화 (Step 2 배경 맵용)
-- [ ] 실측 데이터로 ROI 범위 검증
+- [ ] 실제 빈 장면 + 정지 승객 녹화로 배경 제거 검증
+- [ ] 엘리베이터 치수, 센서 설치 위치·각도 실측 후 `elevator_default.cfg` 반영
+- [ ] `target_id` 250 ~ 255 의미 확인 (A)
+- [ ] Step 3 RCS / SOR 설계 (power 로그 스케일, 거리별 임계값)
