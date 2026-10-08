@@ -23,7 +23,7 @@ struct RadarPoint{
     Zone zone = Zone::NONE; // ROI 필터가 채워 넣는 영역 라벨. 
 
     // 센서 기준 극좌표 격자 번호 (좌표 변환 전에 PolarGrid가 계산)
-    bool has_bins = false; // 격좌 좌표 계산 여부
+    bool has_bins = false; // 격좌 좌표 계산 여부 (계산 안 됨을 표시하기 위해)
     int range_bin = 0; // 거리 칸 번호
     int u_bin = 0;     // 좌우 사인 칸 번호(음수 가능)
     int v_bin = 0; // 위아래 사인 칸 번호 (음수 가능)
