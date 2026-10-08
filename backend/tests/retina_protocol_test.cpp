@@ -1,6 +1,7 @@
 #include "elevsafe/retina_protocol.h"
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <cstdint>
 #include <iostream>
@@ -111,8 +112,10 @@ namespace
     {
         std::vector<RadarFrame> frames;
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
         feed(parser, makePacket(11, samplePoints()));
         expectSampleFrame(frames, 11);
+        expect(parser.processingSummary().totalValidFrames == 1, "complete packet must create one timing sample");
     }
 
     void testMutableFrameCallback()
@@ -133,6 +136,8 @@ namespace
         expect(receivedFrame.frameCount == 25, "mutable callback changed the frame count");
         expect(receivedFrame.timestampUs == 40605, "mutable callback could not assign the timestamp");
         expect(receivedFrame.points.size() == 2, "mutable callback changed the parsed points");
+        expect(parser.processingSummary().totalValidFrames == 0,
+            "processing metrics must remain disabled by default");
     }
 
     void testOneByteChunks()
@@ -140,11 +145,13 @@ namespace
         const auto packet = makePacket(12, samplePoints());
         std::vector<RadarFrame> frames;
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
 
         for (const auto byte : packet)
             parser.feed(std::span<const std::uint8_t>(&byte, 1));
 
         expectSampleFrame(frames, 12);
+        expect(parser.processingSummary().totalValidFrames == 1, "one-byte chunks must create one timing sample");
     }
 
     void testMultiplePacketsInOneChunk()
@@ -156,12 +163,14 @@ namespace
 
         std::vector<RadarFrame> frames;
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
         feed(parser, combined);
 
         expect(frames.size() == 2, "expected two parsed frames");
         expect(frames[0].frameCount == 13, "unexpected first frame count");
         expect(frames[1].frameCount == 14, "unexpected second frame count");
         expect(frames[1].points.size() == 1, "unexpected second point count");
+        expect(parser.processingSummary().totalValidFrames == 2, "multiple packets must create one timing sample per frame");
     }
 
     void testGarbageBeforePacket()
@@ -181,9 +190,11 @@ namespace
         const auto packet = makePacket(16, samplePoints());
         std::vector<RadarFrame> frames;
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
 
         feed(parser, std::vector<std::uint8_t>(packet.begin(), packet.end() - 1));
         expect(frames.empty(), "truncated packet must not emit a frame");
+        expect(parser.processingSummary().totalValidFrames == 0, "truncated packet must not create a timing sample");
         parser.feed(std::span<const std::uint8_t>(&packet.back(), 1));
         expectSampleFrame(frames, 16);
     }
@@ -193,9 +204,11 @@ namespace
         auto packet = makePacket(17, samplePoints(), elevsafe::kFrameMagic ^ 1u);
         std::vector<RadarFrame> frames;
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
         feed(parser, packet);
         expect(frames.empty(), "invalid frame magic must be rejected");
         expect(parser.statistics().packetsRejected == 1, "invalid magic must increment rejection count");
+        expect(parser.processingSummary().totalValidFrames == 0, "invalid frame magic must not create a timing sample");
     }
 
     void testPointCountLimit()
@@ -215,10 +228,13 @@ namespace
         {
             std::vector<RadarFrame> frames;
             RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+            parser.setProcessingMetricsEnabled(true);
             feed(parser, makePacket(21, {}, elevsafe::kFrameMagic, packageSize, true));
 
             expect(frames.empty(), "package smaller than the frame header must be rejected");
             expect(parser.statistics().packetsRejected == 1, "short package rejection must be recorded");
+            expect(parser.processingSummary().totalValidFrames == 0,
+                "invalid package size must not create a timing sample");
         }
     }
 
@@ -265,10 +281,104 @@ namespace
 
         std::vector<RadarFrame> frames;
         RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
         feed(parser, invalid);
 
         expectSampleFrame(frames, 19);
         expect(parser.statistics().packetsRejected >= 1, "abnormal package size must be rejected");
+        expect(parser.processingSummary().totalValidFrames == 1,
+            "only the valid packet after an abnormal package size must create a timing sample");
+    }
+
+    void testProcessingSummary()
+    {
+        elevsafe::ParserProcessingMetrics metrics;
+        for (int milliseconds = 1; milliseconds <= 25; ++milliseconds)
+            metrics.record(std::chrono::milliseconds(milliseconds));
+
+        const auto summary = metrics.summary();
+        expect(summary.totalValidFrames == 25, "summary total valid frame count mismatch");
+        expect(summary.warmupExcluded == 5, "summary warm-up count mismatch");
+        expect(summary.measuredFrames == 20, "summary measured frame count mismatch");
+        expect(summary.averageProcessingMs == 15.5, "summary average mismatch");
+        expect(summary.p95ProcessingMs == 24.0, "summary p95 mismatch");
+        expect(summary.maximumProcessingMs == 25.0, "summary maximum mismatch");
+    }
+
+    void testProcessingMetricsFreezeTransition()
+    {
+        elevsafe::ParserProcessingMetrics metrics;
+        metrics.setFrameLimit(2);
+
+        expect(!metrics.record(std::chrono::milliseconds(1)), "first limited sample must not freeze metrics");
+        expect(metrics.record(std::chrono::milliseconds(2)), "limit-reaching sample must freeze metrics once");
+        expect(!metrics.record(std::chrono::milliseconds(3)), "frozen metrics must not freeze a second time");
+        expect(metrics.frozen(), "metrics must remain frozen after reaching the limit");
+        expect(metrics.summary().totalValidFrames == 2, "frozen metrics must preserve the configured frame limit");
+    }
+
+    void testProcessingFrameLimitFreezesAfterValidFrames()
+    {
+        std::vector<RadarFrame> frames;
+        RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
+        parser.setProcessingMetricsFrameLimit(164);
+
+        std::vector<std::uint8_t> packets;
+        for (std::uint32_t frameCount = 1; frameCount <= 165; ++frameCount)
+        {
+            const auto packet = makePacket(frameCount, samplePoints());
+            packets.insert(packets.end(), packet.begin(), packet.end());
+        }
+        feed(parser, packets);
+
+        const auto frozenSummary = parser.processingSummary();
+        expect(frames.size() == 165, "frame delivery must continue after metrics freeze");
+        expect(parser.processingMetricsFrozen(), "metrics must freeze at the configured valid frame limit");
+        expect(frozenSummary.totalValidFrames == 164, "frame limit must cap valid timing samples");
+        expect(frozenSummary.warmupExcluded == 5, "frame limit summary warm-up count mismatch");
+        expect(frozenSummary.measuredFrames == 159, "frame limit summary measured count mismatch");
+
+        feed(parser, makePacket(166, samplePoints()));
+        const auto summaryAfterAdditionalFrame = parser.processingSummary();
+        expect(frames.size() == 166, "parser must continue to deliver frames after metrics freeze");
+        expect(summaryAfterAdditionalFrame.totalValidFrames == frozenSummary.totalValidFrames,
+            "additional frames must not change frozen timing sample count");
+        expect(summaryAfterAdditionalFrame.measuredFrames == frozenSummary.measuredFrames,
+            "additional frames must not change frozen measured count");
+        expect(summaryAfterAdditionalFrame.averageProcessingMs == frozenSummary.averageProcessingMs,
+            "additional frames must not change frozen average");
+        expect(summaryAfterAdditionalFrame.p95ProcessingMs == frozenSummary.p95ProcessingMs,
+            "additional frames must not change frozen p95");
+        expect(summaryAfterAdditionalFrame.maximumProcessingMs == frozenSummary.maximumProcessingMs,
+            "additional frames must not change frozen maximum");
+    }
+
+    void testProcessingFrameLimitCountsOnlyValidFrames()
+    {
+        std::vector<RadarFrame> frames;
+        RetinaStreamParser parser([&](const RadarFrame& frame) { frames.push_back(frame); });
+        parser.setProcessingMetricsEnabled(true);
+        parser.setProcessingMetricsFrameLimit(1);
+
+        feed(parser, makePacket(30, samplePoints(), elevsafe::kFrameMagic ^ 1u));
+        expect(!parser.processingMetricsFrozen(), "invalid frame must not consume the timing frame limit");
+        expect(parser.processingSummary().totalValidFrames == 0, "invalid frame must not create a timing sample");
+
+        const auto validPacket = makePacket(31, samplePoints());
+        feed(parser, std::vector<std::uint8_t>(validPacket.begin(), validPacket.end() - 1));
+        expect(!parser.processingMetricsFrozen(), "truncated packet must not consume the timing frame limit");
+        expect(parser.processingSummary().totalValidFrames == 0, "truncated packet must not create a timing sample");
+
+        parser.feed(std::span<const std::uint8_t>(&validPacket.back(), 1));
+        const auto summary = parser.processingSummary();
+        expect(parser.processingMetricsFrozen(), "completed valid frame must consume the timing frame limit");
+        expect(summary.totalValidFrames == 1, "valid frame must create one timing sample");
+        expect(summary.warmupExcluded == 1, "short frame limit must exclude its valid frame as warm-up");
+        expect(summary.measuredFrames == 0, "short frame limit must safely allow no measured frames");
+        expect(summary.averageProcessingMs == 0.0, "short frame limit average must remain zero");
+        expect(summary.p95ProcessingMs == 0.0, "short frame limit p95 must remain zero");
+        expect(summary.maximumProcessingMs == 0.0, "short frame limit maximum must remain zero");
     }
 }
 
@@ -289,6 +399,10 @@ int main()
         testTrailingPayloadIsIgnored();
         testMaximumPointCount();
         testAbnormalPackageSize();
+        testProcessingSummary();
+        testProcessingMetricsFreezeTransition();
+        testProcessingFrameLimitFreezesAfterValidFrames();
+        testProcessingFrameLimitCountsOnlyValidFrames();
     }
     catch (const std::exception& exception)
     {

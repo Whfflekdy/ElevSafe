@@ -2,6 +2,7 @@
 
 #include "radar_types.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -22,6 +23,33 @@ namespace elevsafe
     inline constexpr std::size_t kMaxPacketPayloadSize = 16u * 1024u * 1024u;
     inline constexpr std::size_t kMaxBufferedBytes = kNetworkPacketHeaderSize + kMaxPacketPayloadSize;
 
+    struct ParserProcessingSummary
+    {
+        std::size_t totalValidFrames = 0;
+        std::size_t warmupExcluded = 0;
+        std::size_t measuredFrames = 0;
+        double averageProcessingMs = 0.0;
+        double p95ProcessingMs = 0.0;
+        double maximumProcessingMs = 0.0;
+    };
+
+    class ParserProcessingMetrics
+    {
+    public:
+        static constexpr std::size_t kWarmupFrameCount = 5;
+
+        void setFrameLimit(std::size_t frameLimit) noexcept;
+        bool record(std::chrono::steady_clock::duration duration);
+        bool frozen() const noexcept;
+        void reset() noexcept;
+        ParserProcessingSummary summary() const;
+
+    private:
+        std::vector<std::chrono::nanoseconds> m_validFrameDurations;
+        std::size_t m_frameLimit = 0;
+        bool m_frozen = false;
+    };
+
     class RetinaStreamParser
     {
     public:
@@ -36,11 +64,15 @@ namespace elevsafe
         explicit RetinaStreamParser(FrameCallback callback = {});
 
         void setFrameCallback(FrameCallback callback);
+        void setProcessingMetricsEnabled(bool enabled) noexcept;
+        void setProcessingMetricsFrameLimit(std::size_t frameLimit) noexcept;
         void feed(std::span<const std::uint8_t> bytes);
         void reset();
 
         std::size_t bufferedBytes() const;
         const Statistics& statistics() const;
+        ParserProcessingSummary processingSummary() const;
+        bool processingMetricsFrozen() const noexcept;
 
     private:
         bool extractOnePacket();
@@ -50,5 +82,7 @@ namespace elevsafe
         std::vector<std::uint8_t> m_streamBuffer;
         FrameCallback m_callback;
         Statistics m_statistics;
+        ParserProcessingMetrics m_processingMetrics;
+        bool m_processingMetricsEnabled = false;
     };
 }
