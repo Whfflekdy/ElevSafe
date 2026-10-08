@@ -115,7 +115,7 @@ bool writeFramesCSV(const std::string& path, const std::vector<FrameData>& frame
     }
 
     file << std::fixed << std::setprecision(3);   // 소수점 3자리 (m 기준 mm, ms 기준 µs)
-    file << "frame,timestamp_ms,x,y,z,doppler,power,target_id,zone\n";
+    file << "frame,timestamp_ms,x,y,z,doppler,power,target_id,zone,cluster\n";
     for (const auto& fd : frames) {
         for (const auto& p : fd.points) {
             // fd.frame_id, fd.timestamp_ms, p.x, p.y, p.z, p.doppler, p.power,
@@ -123,7 +123,7 @@ bool writeFramesCSV(const std::string& path, const std::vector<FrameData>& frame
             file << fd.frame_id << ','<< fd.timestamp_ms << ','
             << p.x << ',' << p.y << ',' << p.z << ','
             << p.doppler << ',' << p.power << ','
-            << p.target_id << ',' << zoneToString(p.zone) << '\n';
+            << p.target_id << ',' << zoneToString(p.zone) << ','<<p.cluster_id<< '\n';
         }
     }
     return true;

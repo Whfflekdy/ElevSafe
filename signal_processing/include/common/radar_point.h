@@ -27,6 +27,8 @@ struct RadarPoint{
     int range_bin = 0; // 거리 칸 번호
     int u_bin = 0;     // 좌우 사인 칸 번호(음수 가능)
     int v_bin = 0; // 위아래 사인 칸 번호 (음수 가능)
+
+    int cluster_id = -1;
 };
 
 // 한 프레임에 들어온 포인트 묶음(Frame 별칭)
