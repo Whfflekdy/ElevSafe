@@ -59,6 +59,7 @@
 }
 /* 1. 엘리베이터 내부 (Cabin) */
 .blueprint-cabin {
+  box-sizing: border-box;
   border: 4px solid #38bdf8; /* CAD 도면 느낌의 하늘색 두꺼운 벽 */
   border-bottom: none; /* 문 쪽은 뚫려있음 */
   background-color: rgba(56, 189, 248, 0.05);
@@ -68,13 +69,13 @@
 }
 /* 2. 출입구 영역 (Doors) */
 .blueprint-doors {
-  height: 10px;
+  box-sizing: border-box;
   background-color: #38bdf8; /* 양쪽 벽면 */
   display: flex;
   justify-content: center; /* 실제 출입구(door-frame)를 중앙 정렬 */
 }
 .door-frame {
-  height: 10px;
+  box-sizing: border-box;
   background-color: #020617; /* 출입구 바닥은 배경색으로 뚫어줌 */
   position: relative;
   display: flex;
@@ -83,7 +84,6 @@
 /* 문짝 애니메이션 (열림/닫힘) */
 .door {
   width: 48%; /* 문짝 하나당 폭 */
-  height: 10px;
   background-color: #cbd5e1;
   transition: transform 0.5s ease-in-out;
 }
@@ -94,6 +94,7 @@
 .right-door { transform-origin: right; }
 /* 3. 승강장 대기 구역 (Waiting Area) */
 .blueprint-waiting {
+  box-sizing: border-box;
   border: 2px dashed #64748b;
   border-top: none;
   background-color: rgba(100, 116, 139, 0.1);

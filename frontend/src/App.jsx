@@ -7,6 +7,7 @@ const CONFIG_CM = {
   ELEV_WIDTH: 200,      // 카 폭 (가로) : 예) 200cm
   ELEV_DEPTH: 150,      // 카 깊이 (세로) : 예) 150cm
   DOOR_WIDTH: 90,       // 출입구 폭 : 예) 90cm
+  DOOR_THICKNESS: 15,   // 문틈 두께 (세로 폭) 예) 15cm
   WAITING_DEPTH: 180,   // 승강장(대기 구역) 길이 : 예) 180cm
 };
 
@@ -39,7 +40,7 @@ function App() {
   // ---> [지워야함] 현재 테스트를 위해 임의로 박아둔 예시 승객 데이터입니다.
   // ---> [지워야함] 현재 테스트용 예시 승객 (x, y 좌표 m 단위입니다)
   const [passengers, setPassengers] = useState([
-    { id: 1, x: -0.0, y: 0.0, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
+    { id: 1, x: -0.3, y: 0.5, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
     { id: 2, x: 0.4, y: -0.5, state: 'ENTERING', safety_state: 'FALL', label: 'Passenger #2' },    // 승강장 좌측 입장 중 낙상 발생
     { id: 3, x: 0.8, y: 1.3, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' }, // 카빈 내부 좌측 구석 장기 미동
     { id: 4, x: -0.2, y: -1.2, state: 'OUTSIDE', safety_state: null, label: 'Passenger #4' } // 승강장 대기
@@ -160,8 +161,8 @@ function App() {
               </div>
 
               {/* 2. 출입구 (Door Zone) */}
-              <div className="blueprint-doors" style={{ width: CONFIG_CM.ELEV_WIDTH * SCALE }}>
-                <div className="door-frame" style={{ width: CONFIG_CM.DOOR_WIDTH * SCALE }}>
+              <div className="blueprint-doors" style={{ width: CONFIG_CM.ELEV_WIDTH * SCALE, height: CONFIG_CM.DOOR_THICKNESS*SCALE }}>
+                <div className="door-frame" style={{ width: CONFIG_CM.DOOR_WIDTH * SCALE, height: '100%' }}>
                   <div className={`door left-door ${doorState}`}></div>
                   <div className={`door right-door ${doorState}`}></div>
                 </div>
@@ -191,7 +192,8 @@ function App() {
                 // X축: 중앙에서 카 내부를 기준으로 왼쪽(+)이면 화면 우측으로 더함
                 const leftPos = (CONFIG_CM.ELEV_WIDTH / 2 + x_cm) * SCALE;
                 // Y축: 도면의 문턱 위치(ELEV_DEPTH)에서 Y값이 양수(+)면 위로 빼주고, 음수(-)면 아래로 더해짐
-                const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm) * SCALE;
+                // y=0일때 정확히 문 두께의 중앙에 오도록 맞춤.
+                const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm + (CONFIG_CM.DOOR_THICKNESS / 2)) * SCALE;
                 // 선택된 점에 추가할 하이라이트
                 const isSelected = selectedDot === p.id ? 'selected-glow' : '';
 
