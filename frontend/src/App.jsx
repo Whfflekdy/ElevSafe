@@ -63,7 +63,7 @@ function App() {
       
       ws.onmessage = (event) => {
         const realData = JSON.parse(event.data);
-        setDoorStatus(realData.door_statue); 
+        setDoorState(realData.door_state);
         setPassengers(realData.passengers); 
       };
 
