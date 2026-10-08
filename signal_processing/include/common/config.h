@@ -15,6 +15,7 @@ public:
 
     bool has(const std::string& key) const;
     float getFloat(const std::string& key, float default_value) const;
+    std::string getString(const std::string& key, const std::string& default_value) const;
 
 private:
     std::unordered_map<std::string, std::string> values_;   // key -> value 문자열

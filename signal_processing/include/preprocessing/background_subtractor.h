@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
+#include <string>
 
 #include "common/config.h"
 #include "common/radar_point.h"
@@ -40,6 +41,13 @@ public:
 
     // 칸 번호 세 개 -> 열쇠 하나
     static std::int64_t makeKey(int range_bin, int u_bin, int v_bin);
+
+    // 배경 맵 파일 저장 / 불러오기 (성공 시 true)
+    bool save(const std::string& path) const;
+    bool load(const std::string& path);
+
+    // 열쇠 하나 -> 칸 번호 세 개 (makeKey 의 반대)
+    static void splitKey(std::int64_t key, int& range_bin, int& u_bin, int& v_bin);
 
 private:
     BackgroundConfig config_;

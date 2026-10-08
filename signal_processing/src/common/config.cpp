@@ -63,3 +63,8 @@ float Config::getFloat(const std::string& key, float default_value) const {
         return default_value;
     }
 }
+// 맵 파일에서 경로를 읽기 위한 string 반환 함수.
+std::string Config::getString(const std::string& key, const std::string& default_value)const{
+    auto it = values_.find(key);
+    return it == values_.end() ? default_value : it->second;
+}

@@ -28,6 +28,9 @@ target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 add_executable(radar_pipeline src/main.cpp)
 target_link_libraries(radar_pipeline PRIVATE radar_core)
 
+add_executable(build_background src/build_background.cpp)
+target_link_libraries(build_background PRIVATE radar_core)
+
 # 2) 확인용 scratch 실행 파일
 add_executable(scratch tests/scratch.cpp)
 target_link_libraries(scratch PRIVATE radar_core)

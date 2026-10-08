@@ -1,6 +1,10 @@
 #include "preprocessing/background_subtractor.h"
 
 #include <unordered_map>
+#include <algorithm>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 
 BackgroundConfig BackgroundConfig::fromConfig(const Config& cfg) {
     BackgroundConfig c;
@@ -15,6 +19,69 @@ std::int64_t BackgroundSubtractor::makeKey(int range_bin, int u_bin, int v_bin) 
     // TODO: range_bin * 1,000,000 + (u_bin + 500) * 1,000 + (v_bin + 500)
     //       곱셈이 int 범위를 넘지 않도록 static_cast<std::int64_t>(range_bin) 부터 시작
     return static_cast<std::int64_t>(range_bin)*1000000 + (u_bin+500)*1000+(v_bin+500);
+}
+
+void BackgroundSubtractor::splitKey(std::int64_t key, int& range_bin, int& u_bin, int& v_bin) {
+    range_bin = static_cast<int>(key / 1000000);
+    u_bin = static_cast<int>((key / 1000) % 1000) - 500;
+    v_bin = static_cast<int>(key % 1000) - 500;
+}
+
+bool BackgroundSubtractor::save(const std::string& path) const {
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "[Background] 파일을 쓸 수 없음: " << path << "\n";
+        return false;
+    }
+    file << "range_bin,u_bin,v_bin\n";
+
+    // 정렬해서 쓰면 사람이 읽기 쉽고, 같은 맵은 항상 같은 파일이 된다
+    std::vector<std::int64_t> keys(background_.begin(), background_.end());
+    std::sort(keys.begin(), keys.end());
+
+    for (std::int64_t k : keys) {
+        // TODO: splitKey 로 r, u, v 를 꺼내서 "r,u,v" 한 줄로 쓰기
+        int r,u,v;
+        splitKey(k, r,u,v);
+        file << r <<','<<u<<','<<v<<'\n';
+    }
+    return true;
+}
+
+bool BackgroundSubtractor::load(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "[Background] 파일을 열 수 없음: " << path << "\n";
+        return false;
+    }
+    background_.clear();
+
+    std::string line;
+    std::getline(file, line);   // 헤더 건너뜀
+    int line_no = 1;
+    while (std::getline(file, line)) {
+        ++line_no;
+        if (line.empty()) continue;
+        try {
+            // TODO 1: line 을 ',' 기준으로 나눠 std::stoi 로 정수 세 개(r, u, v) 읽기
+            //         (std::stringstream ss(line); std::getline(ss, cell, ','); 를 세 번)
+            // TODO 2: makeKey(r, u, v) 를 background_ 에 insert
+            std::stringstream ss(line);
+            std::string cell;
+
+            std::getline(ss, cell, ',');
+            const int r = std::stoi(cell);
+            std::getline(ss,cell,',');
+            const int u = std::stoi(cell);
+            std::getline(ss,cell,',');
+            const int v = std::stoi(cell);
+            
+            background_.insert(makeKey(r,u,v));
+        } catch (...) {
+            std::cerr << "[Background] " << path << ":" << line_no << " 읽기 실패, 건너뜀\n";
+        }
+    }
+    return true;
 }
 
 void BackgroundSubtractor::build(const std::vector<FrameData>& empty_frames) {
@@ -41,9 +108,8 @@ void BackgroundSubtractor::build(const std::vector<FrameData>& empty_frames) {
         // TODO: count 가 min_hits 보다 작으면 건너뛰기
         if(count<min_hits) continue;
         // 열쇠에서 칸 번호 세 개를 다시 꺼냄
-        const int r = static_cast<int>(k / 1000000);
-        const int u = static_cast<int>((k / 1000) % 1000) - 500;
-        const int v = static_cast<int>(k % 1000) - 500;
+        int r, u, v;
+        splitKey(k, r, u, v);
 
         for (int dr = -d; dr <= d; ++dr)
             for (int du = -d; du <= d; ++du)
