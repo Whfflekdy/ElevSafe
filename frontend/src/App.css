@@ -108,6 +108,31 @@
   letter-spacing: 2px;
 }
 
+/* 새로운 스티커 메모 디자인 (상세 정보 고정 패널)*/
+.info-panel {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  background-color: #1e293b;
+  border: 2px solid #475569;
+  padding: 15px 20px;
+  border-radius: 8px;
+  color: white;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+  z-index: 999;
+  min-width: 220px;
+}
+.info-panel h3 { margin: 0 0 10px 0; font-size: 13px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 5px; }
+.info-panel strong { font-size: 16px; color: #38bdf8; display: block; margin-bottom: 5px; }
+.info-panel p { margin: 6px 0; font-size: 13px; color: #cbd5e1; }
+.info-panel button { margin-top: 12px; padding: 6px 10px; width: 100%; background: #334155; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+.info-panel button:hover { background: #475569; }
+
+/* 비상 상태 패널 디자인 */
+.info-panel.alert { border-color: #f43f5e; }
+.info-panel.alert strong { color: #f43f5e; }
+.info-panel.alert .state-text { color: #fda4af; font-weight: bold; }
+
 /*승객 점(Dot) 및 말풍선 툴팁*/
 .passenger-dot {
   position: absolute;
@@ -142,44 +167,19 @@
 .passenger-dot.danger .dot-core {
   width: 8px; height: 8px; background-color: #f43f5e; border-radius: 50%;
 }
+
+/* 클릭 시 강한 테두리 표시 */
+.passenger-dot.selected-glow {
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.9);
+  border-color: #ffffff;
+  z-index: 200; /* 선택된 점은 다른 점들보다 무조건 위로 */
+}
+
 @keyframes radar-pulse {
   0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.7); }
   70% { box-shadow: 0 0 0 15px rgba(244, 63, 94, 0); }
   100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
 }
-
-/* 말풍선 툴팁 */
-.dot-tooltip {
-  position: absolute;
-  bottom: 30px;
-  left: 50%;
-  transform: translateX(-50%);
-  background-color: #1e293b;
-  border: 1px solid #475569;
-  padding: 10px 15px;
-  border-radius: 8px;
-  width: max-content;
-  color: white;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-  z-index: 999;
-  text-align: left;
-}
-.dot-tooltip::after {
-  content: '';
-  position: absolute;
-  bottom: -6px;
-  left: 50%;
-  transform: translateX(-50%);
-  border-width: 6px 6px 0;
-  border-style: solid;
-  border-color: #475569 transparent transparent transparent;
-}
-.dot-tooltip strong { font-size: 14px; color: #38bdf8; display: block; margin-bottom: 5px; }
-.dot-tooltip p { margin: 2px 0; font-size: 12px; color: #cbd5e1; }
-.dot-tooltip.alert { border-color: #f43f5e; }
-.dot-tooltip.alert strong { color: #f43f5e; }
-.dot-tooltip.alert .state-text { color: #fda4af; font-weight: bold; }
-
 
 /* =========================================
    우측 패널 (기존과 동일)
@@ -190,8 +190,6 @@
 .status-box { background-color: #0f172a; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #475569; }
 .status-box h3 { margin: 0 0 10px 0; font-size: 14px; color: #94a3b8; }
 .status-indicator { font-size: 18px; font-weight: bold; padding: 12px; border-radius: 6px; }
-
-/* .alert-hold { background-color: #f43f5e; color: white; }*/
 
 .normal-open { background-color: #10b981; color: white; }
 .normal-close { background-color: #3b82f6; color: white; }

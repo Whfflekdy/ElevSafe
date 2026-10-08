@@ -39,7 +39,7 @@ function App() {
   // ---> [지워야함] 현재 테스트를 위해 임의로 박아둔 예시 승객 데이터입니다.
   // ---> [지워야함] 현재 테스트용 예시 승객 (x, y 좌표 m 단위입니다)
   const [passengers, setPassengers] = useState([
-    { id: 1, x: -0.3, y: 1.0, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
+    { id: 1, x: -0.0, y: 0.0, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
     { id: 2, x: 0.4, y: -0.5, state: 'ENTERING', safety_state: 'FALL', label: 'Passenger #2' },    // 승강장 좌측 입장 중 낙상 발생
     { id: 3, x: 0.8, y: 1.3, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' }, // 카빈 내부 좌측 구석 장기 미동
     { id: 4, x: -0.2, y: -1.2, state: 'OUTSIDE', safety_state: null, label: 'Passenger #4' } // 승강장 대기
@@ -110,6 +110,8 @@ function App() {
     setSelectedDot(null);
   };
 
+  const selectedPassenger = passengers.find(p => p.id === selectedDot);
+
   return (
     <div className="dashboard-container" onClick={handleBackgroundClick}>
       <header className="header">
@@ -126,11 +128,27 @@ function App() {
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
-            
+
+            {/* 고정된 상세 정보 패널 (스티커 메모 형태) */}
+            {selectedPassenger && (
+              <div 
+                className={`info-panel ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3>상세 정보 패널</h3>
+                <strong>{selectedPassenger.label}</strong>
+                <p>수신 좌표: X {selectedPassenger.x}m / Y {selectedPassenger.y}m</p>
+                <p className="state-text">
+                  상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
+                </p>
+                <button onClick={() => setSelectedDot(null)}>닫기</button>
+              </div>
+            )}            
+
             {/* SCALE을 곱해서 실제 화면 픽셀 크기로 자동 변환 */}
             <div className="blueprint-wrapper" style={{ width: CONFIG_CM.ELEV_WIDTH * SCALE }}> 
              
-              {/* 1. 카 내부 (Cabin) */}
+              {/* 1. 캐빈 내부 (Cabin) */}
               <div 
                 className="blueprint-cabin" 
                 style={{ 
@@ -138,7 +156,7 @@ function App() {
                   height: CONFIG_CM.ELEV_DEPTH * SCALE 
                 }}
               >
-                <span className="cad-label">카 내부 (Cabin)</span>
+                <span className="cad-label">캐빈 내부 (Cabin)</span>
               </div>
 
               {/* 2. 출입구 (Door Zone) */}
@@ -174,12 +192,13 @@ function App() {
                 const leftPos = (CONFIG_CM.ELEV_WIDTH / 2 + x_cm) * SCALE;
                 // Y축: 도면의 문턱 위치(ELEV_DEPTH)에서 Y값이 양수(+)면 위로 빼주고, 음수(-)면 아래로 더해짐
                 const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm) * SCALE;
-
+                // 선택된 점에 추가할 하이라이트
+                const isSelected = selectedDot === p.id ? 'selected-glow' : '';
 
                 return (
                 <div 
                   key={p.id} 
-                  className={`passenger-dot ${theme}`}
+                  className={`passenger-dot ${theme} ${isSelected}`}
                   style={{ left: leftPos, top: topPos }}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -188,17 +207,6 @@ function App() {
                 >
                   {/* 점 안의 코어 색상 */}
                   <div className="dot-core"></div>
-
-                  {/* 점을 클릭했을 때 뜨는 말풍선 */}
-                  {selectedDot === p.id && (
-                    <div className={`dot-tooltip ${theme === 'danger' ? 'alert' : ''}`}>
-                      <strong>{p.label}</strong>
-                      <p>수신 좌표: (X: {p.x}m, Y: {p.y}m)</p>
-                      <p className="state-text">
-                        상태: {getStatusLabel(p.state, p.safety_state)}
-                      </p>
-                    </div>
-                  )}
                 </div>
               );
             })}
