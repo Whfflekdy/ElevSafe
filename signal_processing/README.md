@@ -75,10 +75,12 @@ cmake --build build
 **배경 맵 생성**
 
 ```bash
+mkdir -p data/background   # 처음 한 번 (배경 맵은 git에 올리지 않아 폴더가 없을 수 있음)
 ./build/build_background [config] [empty.csv] [map.csv]
 ```
 
 빈 장면 CSV로 배경 맵을 만들어 저장합니다. 이후 `radar_pipeline`이 설정 파일의 `background.map_path`에서 불러옵니다.
+`data/background/`는 `.gitignore`로 제외되어 레포를 새로 받으면 폴더가 없으므로, 처음 한 번 만들어야 저장됩니다.
 
 **녹화 데이터(PCR) 사용 순서**
 

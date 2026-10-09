@@ -32,6 +32,8 @@ target_link_libraries(radar_pipeline PRIVATE radar_core)
 add_executable(build_background src/build_background.cpp)
 target_link_libraries(build_background PRIVATE radar_core)
 
-# 2) 확인용 scratch 실행 파일
-add_executable(scratch tests/scratch.cpp)
-target_link_libraries(scratch PRIVATE radar_core)
+# 확인용 scratch 실행 파일 (tests/scratch.cpp 가 있을 때만, git에는 올리지 않음)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/scratch.cpp)
+  add_executable(scratch tests/scratch.cpp)
+  target_link_libraries(scratch PRIVATE radar_core)
+endif()
