@@ -185,6 +185,32 @@ host와 port는 command line으로 지정할 수 있습니다. port는 `1`부터
 `65535`까지 허용됩니다. host를 생략하면 `main.cpp`에서
 `127.0.0.1`을 사용하고, port를 생략하면 `29172`를 사용합니다.
 
+### Parser Latency Benchmark
+
+Radar Emulator로 PCR을 한 번 재생하며 A 수신/파싱 구간을 측정하려면 다음처럼
+`--benchmark`를 마지막 인자로 지정합니다.
+
+```powershell
+.\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172 --benchmark
+```
+
+Radar Emulator의 loop playback에서 첫 N개의 valid frame만 측정하려면
+`--benchmark-frames N`을 함께 지정합니다. 예를 들어 164-frame PCR의 공식 측정은
+다음과 같습니다.
+
+```powershell
+.\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172 --benchmark --benchmark-frames 164
+```
+
+이 모드는 기존 frame별 console 출력을 생략하지만, 동일한 synchronous
+`BackendPipeline` enqueue/drain 경로는 유지합니다. `RetinaStreamParser`가 valid
+`RadarFrame`을 완성하기 전의 parser core latency만 기록하므로 `recv()` 대기,
+network/replay interval, `timestampUs` 설정, pipeline 및 console I/O는 측정값에
+포함되지 않습니다. 처음 5개의 valid frame은 warm-up으로 제외하며 이후 frame의
+average, nearest-rank p95, maximum을 milliseconds 단위로 출력합니다. frame limit에
+도달하면 summary를 한 번 출력하고 이후 반복 frame은 parsing을 계속하되 benchmark
+통계에는 추가하지 않습니다.
+
 ## 현재 구현 범위
 
 - Retina-4SN / Radar Emulator TCP client
@@ -197,6 +223,7 @@ host와 port는 command line으로 지정할 수 있습니다. port는 `1`부터
 - point cloud parsing
 - `RadarPoint` 및 `RadarFrame` 자료형
 - connection-relative `timestampUs` 생성 및 전달
+- parser core latency benchmark (`--benchmark`, first 5 valid frames excluded)
 - bounded `FrameBuffer`
 - `BackendPipeline` enqueue/drain skeleton
 - frameCount, timestampUs, pointCount, 첫 point console 출력

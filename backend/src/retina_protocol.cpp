@@ -1,6 +1,7 @@
 #include "elevsafe/retina_protocol.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -78,6 +79,68 @@ namespace elevsafe
 
     }
 
+    void ParserProcessingMetrics::setFrameLimit(std::size_t frameLimit) noexcept
+    {
+        m_frameLimit = frameLimit;
+        m_frozen = m_frameLimit != 0 && m_validFrameDurations.size() >= m_frameLimit;
+    }
+
+    bool ParserProcessingMetrics::record(std::chrono::steady_clock::duration duration)
+    {
+        if (m_frozen)
+            return false;
+
+        m_validFrameDurations.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(duration));
+        if (m_frameLimit != 0 && m_validFrameDurations.size() >= m_frameLimit)
+        {
+            m_frozen = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool ParserProcessingMetrics::frozen() const noexcept
+    {
+        return m_frozen;
+    }
+
+    void ParserProcessingMetrics::reset() noexcept
+    {
+        m_validFrameDurations.clear();
+        m_frozen = false;
+    }
+
+    ParserProcessingSummary ParserProcessingMetrics::summary() const
+    {
+        ParserProcessingSummary result;
+        result.totalValidFrames = m_validFrameDurations.size();
+        result.warmupExcluded = std::min(result.totalValidFrames, kWarmupFrameCount);
+        result.measuredFrames = result.totalValidFrames - result.warmupExcluded;
+
+        if (result.measuredFrames == 0)
+            return result;
+
+        const auto firstMeasured = m_validFrameDurations.begin()
+            + static_cast<std::ptrdiff_t>(result.warmupExcluded);
+        std::vector<std::chrono::nanoseconds> measuredDurations(
+            firstMeasured,
+            m_validFrameDurations.end());
+
+        double totalMilliseconds = 0.0;
+        for (const auto duration : measuredDurations)
+        {
+            totalMilliseconds += std::chrono::duration<double, std::milli>(duration).count();
+        }
+        result.averageProcessingMs = totalMilliseconds / static_cast<double>(result.measuredFrames);
+
+        std::sort(measuredDurations.begin(), measuredDurations.end());
+        const std::size_t p95Index = (result.measuredFrames * 95 + 99) / 100 - 1;
+        result.p95ProcessingMs = std::chrono::duration<double, std::milli>(measuredDurations[p95Index]).count();
+        result.maximumProcessingMs = std::chrono::duration<double, std::milli>(measuredDurations.back()).count();
+        return result;
+    }
+
     RetinaStreamParser::RetinaStreamParser(FrameCallback callback) :
         m_callback(std::move(callback))
     {
@@ -87,6 +150,16 @@ namespace elevsafe
     void RetinaStreamParser::setFrameCallback(FrameCallback callback)
     {
         m_callback = std::move(callback);
+    }
+
+    void RetinaStreamParser::setProcessingMetricsEnabled(bool enabled) noexcept
+    {
+        m_processingMetricsEnabled = enabled;
+    }
+
+    void RetinaStreamParser::setProcessingMetricsFrameLimit(std::size_t frameLimit) noexcept
+    {
+        m_processingMetrics.setFrameLimit(frameLimit);
     }
 
     void RetinaStreamParser::feed(std::span<const std::uint8_t> bytes)
@@ -113,6 +186,7 @@ namespace elevsafe
     {
         m_streamBuffer.clear();
         m_statistics = {};
+        m_processingMetrics.reset();
     }
 
     std::size_t RetinaStreamParser::bufferedBytes() const
@@ -125,8 +199,22 @@ namespace elevsafe
         return m_statistics;
     }
 
+    ParserProcessingSummary RetinaStreamParser::processingSummary() const
+    {
+        return m_processingMetrics.summary();
+    }
+
+    bool RetinaStreamParser::processingMetricsFrozen() const noexcept
+    {
+        return m_processingMetrics.frozen();
+    }
+
     bool RetinaStreamParser::extractOnePacket()
     {
+        const bool measureProcessing = m_processingMetricsEnabled && !m_processingMetrics.frozen();
+        const auto processingStart = measureProcessing
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         std::size_t packetStart = std::numeric_limits<std::size_t>::max();
 
         for (std::size_t magicOffset = 0; magicOffset + sizeof(std::uint32_t) <= m_streamBuffer.size(); ++magicOffset)
@@ -188,6 +276,8 @@ namespace elevsafe
         }
 
         ++m_statistics.packetsParsed;
+        if (measureProcessing)
+            m_processingMetrics.record(std::chrono::steady_clock::now() - processingStart);
         if (m_callback)
             m_callback(frame);
 

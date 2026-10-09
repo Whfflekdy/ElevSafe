@@ -103,9 +103,31 @@ namespace elevsafe
         m_callback = std::move(callback);
     }
 
+    void RetinaClient::setProcessingMetricsEnabled(bool enabled) noexcept
+    {
+        m_processingMetricsEnabled = enabled;
+    }
+
+    void RetinaClient::setProcessingMetricsFrameLimit(std::optional<std::size_t> frameLimit) noexcept
+    {
+        m_processingMetricsFrameLimit = frameLimit;
+    }
+
+    const ParserProcessingSummary& RetinaClient::processingSummary() const noexcept
+    {
+        return m_processingSummary;
+    }
+
+    bool RetinaClient::processingMetricsFrozen() const noexcept
+    {
+        return m_processingMetricsFrozen;
+    }
+
     int RetinaClient::run(std::ostream& log)
     {
         m_stopRequested = false;
+        m_processingSummary = {};
+        m_processingMetricsFrozen = false;
         closeSocket();
 
         SocketRuntime runtime;
@@ -180,9 +202,18 @@ namespace elevsafe
         log << "Connected to " << m_host << ':' << m_port << '\n';
 
         RelativeFrameClock frameClock;
-        RetinaStreamParser parser([this, &frameClock](RadarFrame& frame)
+        RetinaStreamParser parser;
+        parser.setProcessingMetricsEnabled(m_processingMetricsEnabled);
+        if (m_processingMetricsFrameLimit.has_value())
+            parser.setProcessingMetricsFrameLimit(*m_processingMetricsFrameLimit);
+        parser.setFrameCallback([this, &frameClock, &parser](RadarFrame& frame)
         {
             frame.timestampUs = frameClock.timestampUs(RelativeFrameClock::Clock::now());
+            if (!m_processingMetricsFrozen && parser.processingMetricsFrozen())
+            {
+                m_processingSummary = parser.processingSummary();
+                m_processingMetricsFrozen = true;
+            }
             if (m_callback)
                 m_callback(frame);
         });
@@ -227,6 +258,8 @@ namespace elevsafe
                 static_cast<std::size_t>(received)));
         }
 
+        m_processingSummary = parser.processingSummary();
+        m_processingMetricsFrozen = parser.processingMetricsFrozen();
         closeSocket();
         return result;
     }
