@@ -1,6 +1,6 @@
 // main.cpp
 // 정제 파이프라인 실행기
-// 현재: 좌표 변환 -> ROI 필터 (Step 1)
+// 현재: 격자 번호 -> 좌표 변환 -> ROI 필터 -> 정적 배경 제거 (Step 1~2)
 // 이후: -> 정적 배경 제거 (Step 2) -> SOR/RCS (Step 3) -> DBSCAN (Step 4) -> BBox (Step 5)
 //
 // 사용법: ./build/radar_pipeline [config] [input.csv] [output.csv]
@@ -12,6 +12,8 @@
 #include "io/csv_io.h"
 #include "preprocessing/coordinate_transform.h"
 #include "preprocessing/roi_filter.h"
+#include "preprocessing/polar_grid.h"
+#include "preprocessing/background_subtractor.h"
 
 int main(int argc, char** argv) {
     // 실행할 때 경로를 넘기면 그걸 쓰고, 안 넘기면 기본 경로 사용
@@ -27,45 +29,60 @@ int main(int argc, char** argv) {
     const CoordinateTransform transform(SensorPose::fromConfig(cfg)); // 설정파일 -> 센서 자세 -> 변환기
     const ROIConfig roi_cfg = ROIConfig::fromConfig(cfg);             // 설정 파일 -> ROI 영역
     if(!roi_cfg.isValid()) return 1;                                  // 범위가 잘못됐으면 종료
+    const PolarGrid polar(PolarGridConfig::fromConfig(cfg));
+    BackgroundSubtractor bg(BackgroundConfig::fromConfig(cfg));
+    const std::string map_path = cfg.getString("background.map_path", "");
+    const bool use_bg = !map_path.empty() && bg.load(map_path);
+    if (use_bg) std::cout << "[배경 제거] 배경 칸 " << bg.backgroundCellCount() << "개 사용\n";
+    else        std::cout << "[배경 제거] 배경 맵 없음 → 건너뜀\n";
 
     const ROIFilter roi(roi_cfg);
     // 3. 데이터 읽기
-    std::vector<Frame> frames = readFramesCSV(input_path);
+    std::vector<FrameData> frames = readFramesCSV(input_path);
     if (frames.empty()) {
         std::cerr << "입력 프레임이 없습니다: " << input_path << "\n";
         return 1;
     }
 
     // 4. 프레임마다 파이프라인 실행
-    std::vector<Frame> outputs;
+    std::vector<FrameData> outputs;
     outputs.reserve(frames.size());
     ROIStats total;
+    BGStats bg_total;
 
-    for (auto& frame : frames) {
-        // TODO(Step 2): 좌표 변환 전에 센서 기준 극좌표 격자 번호 계산 (polar.assignBins)
-        //               변환 후에는 센서 기준 좌표가 사라지므로 반드시 맨 앞에 둘 것
-
-        // TODO: (1-a) transform 으로 frame 좌표 변환
-        // TODO: (1-b) roi.filter 로 필터링 + 통계 받기, 결과를 outputs 에 추가
-        // TODO: 이번 프레임 통계를 total 에 누적
-        transform.apply(frame);
+    for (auto& fd : frames) {
+        polar.assignBins(fd.points); // 격자 번호(센서 좌표)
+        transform.apply(fd.points);  // 좌표 변환.
 
         ROIStats stats;
-        outputs.push_back(roi.filter(frame, &stats));
-        total += stats;
+        Frame kept = roi.filter(fd.points, &stats); // ROI
+        total+= stats;
 
-        // TODO(Step 2): background_subtractor
+        if(use_bg){                 // 정적 배경 제거
+            BGStats bs;
+            kept = bg.filter(kept, &bs);
+            bg_total.input += bs.input;
+            bg_total.removed += bs.removed;
+        }
+
         // TODO(Step 3): outlier_filter (RCS, SOR)
         // TODO(Step 4): dbscan
         // TODO(Step 5): bbox 후처리
+
+        FrameData out;
+        out.frame_id = fd.frame_id;
+        out.timestamp_ms = fd.timestamp_ms;
+        out.points = std::move(kept);
+        outputs.push_back(std::move(out));
     }
 
     // 5. 결과 요약 출력 및 저장
-    std::cout << "=== ROI 필터 결과 (" << frames.size() << " frames) ===\n"
+    std::cout << "=== 결과 (" << frames.size() << " frames) ===\n"
               << "입력 포인트 : " << total.input   << "\n"
               << "DOOR        : " << total.door    << "\n"
               << "CABIN       : " << total.cabin   << "\n"
-              << "제거됨      : " << total.dropped << "\n";
+              << "ROI 제거    : " << total.dropped << "\n";
+    if (use_bg) std::cout << "배경 제거   : " << bg_total.removed << "\n";
 
     if (!writeFramesCSV(output_path, outputs)) return 1;
     std::cout << "출력 저장: " << output_path << "\n";

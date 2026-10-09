@@ -18,6 +18,8 @@ add_library(radar_core
   src/preprocessing/coordinate_transform.cpp
   src/preprocessing/roi_filter.cpp
   src/io/csv_io.cpp
+  src/preprocessing/polar_grid.cpp
+  src/preprocessing/background_subtractor.cpp
 )
 # radar_core를 쓰는 쪽은 include/ 를 기준으로 헤더를 찾음
 target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -25,6 +27,9 @@ target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 # 1) 정식 실행 파일 radar_pipeline을 생성하고 로직 묶음인 radar_core 연결
 add_executable(radar_pipeline src/main.cpp)
 target_link_libraries(radar_pipeline PRIVATE radar_core)
+
+add_executable(build_background src/build_background.cpp)
+target_link_libraries(build_background PRIVATE radar_core)
 
 # 2) 확인용 scratch 실행 파일
 add_executable(scratch tests/scratch.cpp)
