@@ -28,7 +28,7 @@ struct RadarPoint{
     int u_bin = 0;     // 좌우 사인 칸 번호(음수 가능)
     int v_bin = 0; // 위아래 사인 칸 번호 (음수 가능)
 
-    int cluster_id = -1;
+    int cluster_id = -1; // DBSCAN 클러스터링 번호 (-1: 노이즈 또는 클러스터링 전)
 };
 
 // 한 프레임에 들어온 포인트 묶음(Frame 별칭)
