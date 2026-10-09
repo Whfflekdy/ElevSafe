@@ -4,3 +4,5 @@ data/output/*
 data/background/
 scratch
 tests/scratch.cpp
+build-release/
+data/raw/
