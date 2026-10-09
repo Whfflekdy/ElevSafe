@@ -8,7 +8,7 @@
 - 엘리베이터 카 내부 및 승강장 대기 구역을 포함한 **2D 평면도 시각화**
   - 실제 치수 기준 설정값 사용 (cm)
   - `ELEV_WIDTH`, `ELEV_DEPTH`, `DOOR_WIDTH`, `WAITING_DEPTH`
-  - 화면 표시용 `SCALE` 값으로 cm 단위를 픽셀 단위로 변환
+  - 화면 표시용 `SCALE` 값으로 m 단위를 픽셀 단위로 변환
 - 승객 객체를 점(Point) 형태로 렌더링
   - 승객 위치 `x`, `y` 좌표 기반 표시
   - 승객 상태에 따른 색상 구분
@@ -19,12 +19,14 @@
   - 현재 좌표
   - 상태 정보
 - 엘리베이터 문 상태 UI 구현
-  - `DOOR_OPEN`
-  - `DOOR_HOLD`
-  - `DOOR_CLOSE`
+  - `OPEN`
+  - `CLOSED`
+  - `OPENING`
+  - `CLOSING`
 - 수동 문 제어 버튼 구현
-  - `HOLD 강제`
-  - `CLOSE 강제`
+  - `강제 OPEN`
+  - `강제 HOLD`
+  - `강제 CLOSE`
 - 문 상태 변경 시 시스템 로그 추가
 
 ## 사용 기술
@@ -43,15 +45,17 @@
 
 ```javascript
 [
-  { id: 1, x: 100, y: 80, state: 'INSIDE', label: 'Passenger #1' },
-  { id: 2, x: 105, y: 85, state: 'FALL', label: 'Passenger #2' },
-  { id: 3, x: 100, y: 220, state: 'ENTERING', label: 'Passenger #3' }
-]
+   { id: 1, x: -0.3, y: 1.0, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },
+    { id: 2, x: 0.4, y: -0.5, state: 'ENTERING', safety_state: 'FALL', label: 'Passenger #2' },
+    { id: 3, x: 0.8, y: 1.3, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' },
+    { id: 4, x: -0.2, y: -1.2, state: 'OUTSIDE', safety_state: null, label: 'Passenger #4' }
+  ]
 ```
 
 - `Passenger #1`: 엘리베이터 내부의 정상 탑승자
-- `Passenger #2`: 엘리베이터 내부의 낙상 상태 승객
-- `Passenger #3`: 승강장 대기 구역에서 입장 중인 승객
+- `Passenger #2`: 엘리베이터 입장 중 낙상 상태 승객
+- `Passenger #3`: 엘리베이터 내부의 부동 상태 승객
+- `Passenger #4`: 엘리베이터 입장 대기 중 승객
 
 위 데이터는 실제 레이더 데이터가 아닌 프론트엔드 시각화 및 위험 상태 표현을 확인하기 위한 예시 데이터입니다.
 
@@ -62,22 +66,27 @@
 초기 문 상태는 아래와 같습니다.
 
 ```javascript
-const [doorStatus, setDoorStatus] = useState('DOOR_HOLD');
+const [doorState, setDoorState] = useState('CLOSED'));
 ```
 
 사용자가 화면의 수동 제어 버튼을 눌렀을 때만 문 상태가 변경됩니다.
 
 ```javascript
-<button onClick={() => handleManualControl('DOOR_HOLD')}>
-  HOLD 강제
+<button onClick={() => handleDoorCommand('OPEN')} className="btn-open">
+  강제 OPEN
 </button>
 
-<button onClick={() => handleManualControl('DOOR_CLOSE')}>
-  CLOSE 강제
+<button onClick={() => handleDoorCommand('HOLD')} className="btn-hold">
+  강제 HOLD
 </button>
+
+<button onClick={() => handleDoorCommand('CLOSE')} className="btn-close">
+  강제 CLOSE
+</button>
+
 ```
 
-현재는 승객의 상태가 `ENTERING`, `EXITING`, `FALL` 등으로 변경되어도 문 상태가 자동으로 열리거나, 열린 상태를 유지하거나, 닫히지 않습니다.
+현재는 승객의 상태가 `ENTERING`, `EXITING`, `FALL`, `IMMOBILE` 등으로 변경되어도 문 상태가 자동으로 열리거나, 열린 상태를 유지하거나, 닫히지 않습니다.
 
 ## 백엔드/레이더 연동 시 데이터 형식
 
@@ -86,13 +95,15 @@ const [doorStatus, setDoorStatus] = useState('DOOR_HOLD');
 ```json
 {
   "timestamp": "2026-10-01T14:02:05Z",
-  "door_status": "DOOR_HOLD",
+  "door_command": "HOLD",
+  "door_state": "OPEN",
   "passengers": [
     {
       "id": 1,
-      "x": 150,
-      "y": 120,
+      "x": -0.20,
+      "y": 1.00,
       "state": "INSIDE",
+      "safety_state": null,
       "label": "Passenger #1"
     }
   ]
@@ -103,38 +114,61 @@ const [doorStatus, setDoorStatus] = useState('DOOR_HOLD');
 
 향후 백엔드 또는 레이더 데이터 처리 파트와 연결할 때, 아래 변수명 및 데이터 형식을 함께 맞춰볼 필요가 있습니다.
 
+### 최상위 필드
+
 | 변수명 | 타입 | 설명 |
 |---|---|---|
-| `passengers` | Array | 화면에 표시할 승객 객체 목록 |
-| `id` | Number | 각 승객 객체를 구분하기 위한 식별자 |
-| `x` | Number | 평면도 내 승객의 가로 위치 |
-| `y` | Number | 평면도 내 승객의 세로 위치 |
-| `state` | String | 승객의 현재 행동 또는 위험 상태 |
-| `label` | String | 툴팁에 표시할 승객 이름 |
-| `doorStatus` | String | 현재 화면에 표시할 엘리베이터 문 상태 |
-| `selectedDot` | Number 또는 `null` | 현재 클릭되어 상세 정보가 표시된 승객의 `id` |
-| `systemLogs` | Array | 화면의 시스템 로그 영역에 표시할 문자열 목록 |
+| `timestamp` | String | 데이터 측정 또는 생성 시각 |
+| `door_command` | String 또는 null | Backend가 결정한 Door 제어 명령 |
+| `door_state` | String | 실제 Door의 현재 상태 |
+| `passengers` | Array | 현재 전달할 승객 객체 목록 |
 
-### 현재 사용 중인 승객 상태값
 
-| 상태값 | 의미 | 화면 표시 |
-|---|---|---|
-| `ENTERING` | 엘리베이터에 입장 중 | 정상 상태 |
-| `INSIDE` | 엘리베이터 내부에 탑승 중 | 정상 상태 |
-| `EXITING` | 엘리베이터에서 하차 중 | 정상 상태 |
-| `FALL` | 낙상 감지 상태 | 위험 상태 |
-| `IMMOBILE` | 장시간 움직임 없음 | 위험 상태 |
+### passengers 내부 필드
 
-### 현재 사용 중인 문 상태값
+| 변수명 | 타입 | 의미 | 비고 |
+|---|---|---|---|
+| `id` | Number | 승객 추적용 고유 식별자 | 최종 Tracking ID 사용 예정 |
+| `x` | Number | 공통 좌표계 X 위치 | 단위 m |
+| `y` | Number | 공통 좌표계 Y 위치 | 단위 m |
+| `state` | String | 승객 위치/이동 상태 | `OUTSIDE`, `ENTERING`, `INSIDE`, `EXITING` |
+| `safety_state` | String 또는 null | 이상 상태 | `FALL`, `IMMOBILE`, `null` |
+| `label` | String | UI 툴팁 표시용 이름 | 생략 시 Frontend에서 생성 가능 |
+
+### 승객 위치/이동 상태: `state`
+
+| 값 | 의미 |
+|---|---|
+| `OUTSIDE` | 승강장 대기 구역에 있으나 아직 탑승 또는 퇴장 전이 중이 아닌 상태 |
+| `ENTERING` | 승강장에서 엘리베이터로 입장 중 |
+| `INSIDE` | 엘리베이터 내부 탑승 상태 |
+| `EXITING` | 엘리베이터에서 퇴장 중 |
+
+### 이상 상태: `safety_state`
+
+| 값 | 의미 |
+|---|---|
+| `null` | 현재 이상 상태 없음 |
+| `FALL` | 낙상 발생 |
+| `IMMOBILE` | 장시간 미동 없음 |
+
+### 현재 사용 중인 Door_command 값
 
 | 상태값 | 의미 |
 |---|---|
-| `DOOR_OPEN` | 문이 열린 상태 |
-| `DOOR_HOLD` | 문을 열린 상태로 유지하는 상태 |
-| `DOOR_CLOSE` | 문이 닫힌 상태 |
+| `null` | 해당 시점에 새로 발생한 Door Command가 없음 |
+| `OPEN` | 문이 열린 상태 |
+| `HOLD` | 문을 열린 상태로 유지하는 상태 |
+| `CLOSE` | 문이 닫힌 상태 |
 
+### door_state 허용 값
+| 상태값 | 의미 |
+|---|---|
+| `OPEN`| 문이 열려있음 |
+| `CLOSED` | 문이 닫혀있음 |
+| `OPENING` | 문이 열리는 중 |
+| `CLOSING` | 문이 닫히는 중|
 
-> 현재 변수명은 프론트엔드에서 임시로 정의한 규약입니다. 백엔드에서 레이더의 `x`, `y`, `z`, `doppler`, `power`, `targetId` 등을 어떤 이름과 단위로 가공해 전달할지 팀 전체에서 확정한 뒤, 프론트엔드 변수명 또는 변환 로직을 맞춰야 합니다.
 
 ## 향후 시연 시나리오
 
@@ -157,7 +191,6 @@ const [doorStatus, setDoorStatus] = useState('DOOR_HOLD');
 - 실제 승객 데이터로 `passengers` 상태 갱신
 - 레이더 좌표와 프론트엔드 평면도 좌표 간 변환
 - 레이더 또는 백엔드의 객체 ID와 프론트엔드 `id` 값 연결
-- 레이더/백엔드에서 판단한 사람 상태와 프론트엔드 `state` 값 통일
 - 승객 상태에 따른 자동 문 제어 로직
   - 사람이 입장 중이면 문 열기 또는 열림 유지
   - 사람이 하차 중이면 문 열림 유지
