@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
 
         FrameData out;
         out.frame_id = fd.frame_id;
-        out.timestamp_ms = fd.timestamp_ms;
+        out.timestamp_us = fd.timestamp_us;
         out.points = std::move(kept);
         outputs.push_back(std::move(out));
     }
