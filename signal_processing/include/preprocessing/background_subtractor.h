@@ -16,8 +16,8 @@
 #include "common/radar_point.h"
 
 struct BackgroundConfig {
-    float occupancy_threshold = 0.3f;  // 전체 프레임 중 이 비율 이상 점이 찍힌 칸 = 배경
-    int dilation = 0;                  // 배경 칸 주변 몇 칸까지 배경으로 넓힐지 (0 = 넓히지 않음)
+    float occupancy_threshold = 0.2f;  // 전체 프레임 중 이 비율 이상 점이 찍힌 칸 = 배경
+    int dilation = 1;                  // 배경 칸 주변 몇 칸까지 배경으로 넓힐지 (0 = 넓히지 않음)
 
     static BackgroundConfig fromConfig(const Config& cfg);
 };
