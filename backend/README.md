@@ -86,11 +86,13 @@ valid frame이 다시 `0`부터 시작합니다. 이 값은 sensor hardware time
 
 ### FrameBuffer
 
-`FrameBuffer`는 parsing이 완료된 `RadarFrame` 객체를 보관하는 bounded FIFO입니다.
+`FrameBuffer`는 parsing이 완료된 `RadarFrame` 객체를 보관하는
+`std::deque<RadarFrame>` 기반 bounded FIFO입니다.
 
 - 생성 시 frame capacity를 지정합니다.
 - capacity가 0이면 생성할 수 없습니다.
-- capacity를 초과하면 가장 오래된 frame을 제거합니다.
+- 오래된 frame부터 소비하며, 남아 있는 frame의 FIFO 순서를 유지합니다.
+- 용량이 가득 찬 상태에서 새 frame을 넣으면 가장 오래된 frame을 제거합니다.
 - TCP raw byte를 보관하는 `RetinaStreamParser` 내부 buffer와는 별도입니다.
 
 현재 `main.cpp`의 capacity `1`은 synchronous enqueue -> immediate drain
@@ -113,6 +115,37 @@ producer와 consumer가 분리되는 구조에서는 별도 검토가 필요합�
 worker thread 없는 single-thread synchronous 구조입니다. 기존의
 `frameCount`, `timestampUs`, `pointCount`, 첫 point의 `x/y/z/doppler/power/targetId`
 출력은 `drain()`에 전달된 console consumer가 담당합니다.
+
+## FrameBuffer 운영 정책
+
+### 현 단계 잠정 기본안
+
+- 기존 FIFO 및 용량 초과 시 drop-oldest 정책을 유지합니다.
+- 기존 `FrameBuffer`와 `BackendPipeline`을 재사용하며, 새로운 queue,
+  worker thread 또는 동기화 기능은 도입하지 않습니다.
+- 현재 single-thread enqueue -> immediate drain 구조와 capacity `1`을 유지합니다.
+  최종 운영 capacity는 A-B-C 연동 후 실제 처리율과 지연 측정 결과로 결정합니다.
+
+### 현재 구조의 한계
+
+- consumer가 느리면 같은 thread의 parser 처리와 다음 `recv()`도 늦어집니다.
+  현재 즉시 drain 구조에서는 FrameBuffer에 여러 frame이 쌓이는 대신
+  OS TCP 수신 buffer에 데이터가 쌓일 수 있습니다.
+- FrameBuffer의 drop-oldest는 이미 parsing된 frame에만 적용되므로 TCP backlog를
+  해결하지 못합니다. capacity를 늘리는 것만으로 지속적인 처리율 부족을 해결할 수 없습니다.
+- 현재 Parser Benchmark는 parser core 처리시간만 측정합니다.
+  FrameBuffer 대기, consumer 처리 및 TCP 대기를 포함한 전체 pipeline 지연 측정이 아닙니다.
+
+### 추후 통합 시 확인 및 팀 협의 사항
+
+- 9주차 A-B-C 연동 후 실제 frame 처리시간과 지연을 측정합니다.
+- frame 누락 시 C Tracking의 대응 정책을 협의합니다. drop-oldest는 남은 frame의
+  순서를 보존하지만 모든 frame의 연속 처리를 보장하지 않습니다.
+- 실시간성 요구에 맞는 허용 지연시간과 queue capacity를 결정합니다.
+- 필요 시 overflow drop 통계, queue 대기 및 처리시간 계측을 추가합니다.
+  현재 queue 길이는 `pendingSize()`로 조회할 수 있지만 drop 통계와 대기시간 계측은 없습니다.
+- consumer 오류 시 종료, 계속 처리 또는 재시도 여부를 협의합니다.
+- 실제 Radar Emulator 기반 과부하 검증으로 TCP backlog와 처리 지연을 확인합니다.
 
 ## 요구 환경
 
