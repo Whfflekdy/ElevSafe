@@ -201,7 +201,7 @@ Retina-4SN의 포인트는 연속 공간이 아니라 **거리와 방향 코사�
 **입력 CSV** (컬럼은 헤더 이름으로 찾음, 순서 무관)
 
 ```
-frame,timestamp_ms,x,y,z,doppler,power,target_id
+frame,timestamp_us,x,y,z,doppler,power,target_id
 ```
 
 - 필수: `frame, x, y, z, doppler, power` / 선택: `timestamp_ms`(없으면 0), `target_id`(없으면 −1)
@@ -238,13 +238,17 @@ frame,timestamp_ms,x,y,z,doppler,power,target_id,zone,cluster
 
 Door Zone과 Cabin이 겹치는 경계에서는 진입/퇴장 판단을 위해 **Door Zone을 우선**합니다.
 현재 ROI 값은 폭 1.6m × 깊이 1.4m 캐빈, 폭 0.9m 출입문을 가정한 값이며 실측 후 수정이 필요합니다.
+현재는 **승강장(OUTSIDE) 구역이 없어서** y < −0.50인 점은 ROI에서 제거됩니다.
+A-D 합의 v4 예시의 승강장 승객(y = −1.20, OUTSIDE)은 지금 범위로는 출력되지 않으므로,
+리허설 후 `HALL` 구역을 추가할 예정입니다 (아래 "협의 필요" 참고).
+원본 PCR에는 모든 점이 남아 있으므로 범위를 바꾼 뒤 다시 실행하면 승강장 데이터를 되살릴 수 있습니다.
 
 ## 실측 데이터 특성 (미니테스트)
 
 - 프레임당 점 수가 많음: `front_man` 평균 약 646개, `right_man` 약 1,020개
-- 프레임 속도 약 18.5 ~ 20 fps로 일정하지 않음 → `timestamp_ms`로 실제 간격 사용
+- 프레임 속도 약 18.5 ~ 20 fps로 일정하지 않음 → `timestamp_us`로 실제 간격 사용
 - `power`는 dB가 아닌 선형 값으로 보임 (1,066 ~ 301,723) → Step 3 임계값은 로그 변환 후 설계 예정
-- `target_id`: 센서 추적 대상 번호 (255 = 어떤 대상에도 속하지 않음, 250·253은 확인 필요). 센서 Detection의 status는 0 서 있음 / 1 누움 / 2 앉음 / 3 넘어짐 / 4 판단 불가. 빈 방에서도 물체를 "앉음"으로 추적하므로 참고용으로만 사용
+- `target_id`: 센서 추적 대상 번호 (255 = 어떤 대상에도 속하지 않음, 0~254: 센서 대상 번호, 특별 취급하지 않음(A확인)). 센서 Detection의 status는 0 서 있음 / 1 누움 / 2 앉음 / 3 넘어짐 / 4 판단 불가. 빈 방에서도 물체를 "앉음"으로 추적하므로 참고용으로만 사용
 
 ## 알아둘 점
 
@@ -285,12 +289,35 @@ z_scale을 키우면 어른 한 명이 다시 위아래로 쪼개지므로 클�
 - 필요 데이터: S0-1(문 닫힘), S0-2(문 열림), S0-3(문 개폐 반복)
 - 협의 시기: 9주차 파이프라인 연동 시 A와 함께 (요청 사항은 docs/integration.md로 사전 공유)
 
+### Door Zone · 승강장(OUTSIDE) 범위 - C, D
+
+**현재 (B 초안)**: Door Zone y −0.50 ~ +0.30, Cabin y +0.30 ~ +1.40, 승강장 구역 없음 (`rehearsal.cfg`)
+- 문턱(y = 0)을 사이에 두고 양쪽에 걸친 범위라, 캐빈 안이라도 문턱에서 0.3m까지는 `DOOR`
+- A-D 합의 v4에서 Door Transition Zone 범위는 "C와 협의 후 확정"으로 남아 있음
+
+**문제**: y < −0.50은 제거되어, C가 승강장 대기 승객을 OUTSIDE로 판정할 데이터가 없음
+
+**제안**
+- B: 승강장 쪽 점을 지우지 않고 `HALL` 구역 라벨을 추가해 넘김 (ROI 필터·Zone 종류·출력 라벨 수정)
+- C: `HALL` 덩어리를 보고 OUTSIDE 판정 (상태 판정은 C 담당, v4 기준)
+- B의 `zone = DOOR` 범위와 C의 Door Transition Zone을 **하나의 범위로 통일**
+
+**정해야 할 것**
+- 승강장 쪽 범위 (초안: 문턱에서 약 1.5m까지)
+- Door Zone의 캐빈 쪽 깊이 (현재 0.3m)
+- D 화면에 구역 경계를 표시할지
+
+**관련 데이터**: 리허설 R1-4(승강장 −0.3m), R4-1·R4-2(문턱에서 약 1.5m 떨어져 출발)
+
+**협의 시기**: 리허설 데이터로 초안 확정 후 C와 협의 → v4 문서 반영 요청 (A·D)
+
 ## TODO
 
 ### 리허설 전 (6주차)
-- [ ] 시각 단위 µs 반영: CSV 읽기·쓰기, `FrameData`를 `timestamp_us`로 (`timestamp_ms`도 읽을 수 있게 유지)
+- [x] 시각 단위 µs 반영: CSV 읽기·쓰기, `FrameData`를 `timestamp_us`로 (`timestamp_ms`도 읽을 수 있게 유지)
 - [ ] 처리 시간 Release 재측정, 루트 `docs/timing.md` 올리기
-- [ ] A·B 연동 합의 (`SignalPipeline::process(RadarFrame, FrameContext)` → `PipelineResult`), B·C 출력 형식 합의 — 10/11
+- [x] A·B 연동 합의: `SignalPipeline::process(const FrameData&, const FrameContext&)` → `PipelineResult`, RadarFrame → FrameData Adapter는 A 담당 (10/10)
+- [x] B·C 출력 형식 합의: 덩어리 1개당 1줄 (`frame_id, timestamp_us, cluster_id, cx, cy, cz, x/y/z_min·max, z_top, mean_doppler, num_points, zone, maybe_merged`), `z_top` = 상위 95% 높이, 덩어리 0개 프레임도 `frame_id·timestamp_us`만 있는 줄로 출력, 합쳐진 덩어리는 B가 표시만 하고 최종 판단은 C
 - [ ] Step 3 SOR / RCS 구현: power 로그 변환, 거리별 임계값, **다중경로 유령(약한 power·듬성한 점) 제거**를 목표에 포함
 - [ ] Step 5 1차 출력: 덩어리 요약 CSV(중심점, Bounding Box, `z_top` 등) — B·C 형식 합의 후
 
@@ -300,6 +327,8 @@ z_scale을 키우면 어른 한 명이 다시 위아래로 쪼개지므로 클�
 - [ ] 회전 부호(R1-2), 바닥 z ≈ 0 확인
 - [ ] 배경 맵 기준 10% 사용 가능 여부: 벽에 기댄 사람(R2-2)으로 손실 확인 (현재 기본 20%)
 - [ ] DBSCAN: 두 사람 나란히(R3-1), 어른 옆 낮은 자세(R3-3), 누운 사람 쪼개짐(R5-2) 확인
+- [ ] R4-1·R4-2는 문턱에서 약 1.5m 떨어진 곳에서 출발·도착 (승강장 범위 결정용)
+- [ ] 녹화 중 연기자 외에는 승강장 쪽 1.5m 밖이나 센서 뒤에 서기 (나중에 범위를 넓혀 다시 돌릴 때 팀원이 덩어리로 잡히지 않게)
 
 ### 엘리베이터 촬영(10/29) 전
 - [ ] 문 닫힘·열림 배경 맵의 공통 칸 맵 기능 (`tests/data/bg_closed.csv`, `bg_open.csv`로 테스트)
@@ -307,6 +336,7 @@ z_scale을 키우면 어른 한 명이 다시 위아래로 쪼개지므로 클�
 - [ ] 바닥 점 높이로 센서 흔들림·기울기 변화 감지
 - [ ] 엘리베이터용 설정 파일 틀 (센서 위치·각도, 캐빈 치수만 채우면 되게)
 - [ ] 배경 자동 학습 오프라인 시험 설계 (빈 구간 판단 → 맵 생성)
+- [ ] `HALL` 구역 추가 (ROI 필터, Zone 종류, `zoneToString`, cfg `hall.*`), Door Zone·승강장 범위를 C와 협의 후 확정
 
 ### 엘리베이터 촬영 후
 - [ ] 실측 치수·센서 자세로 `elevator_default.cfg` 확정
