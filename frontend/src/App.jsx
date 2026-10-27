@@ -4,10 +4,10 @@ import './App.css';
 // 🛠️ [실제 도면 규격 설정 - 단위: cm]
 // 이제 px 단위로 머리 아프게 고민할 필요 없이 실제 줄자로 잰 cm 길이를 넣으세요!
 const CONFIG_CM = {
-  ELEV_WIDTH: 200,      // 카 폭 (가로) : 예) 200cm
-  ELEV_DEPTH: 150,      // 카 깊이 (세로) : 예) 150cm
+  ELEV_WIDTH: 160,      // 카 폭 (가로) : 예) 200cm
+  ELEV_DEPTH: 140,      // 카 깊이 (세로) : 예) 150cm
   DOOR_WIDTH: 90,       // 출입구 폭 : 예) 90cm
-  DOOR_THICKNESS: 15,   // 문틈 두께 (세로 폭) 예) 15cm
+  DOOR_THICKNESS: 5,   // 문틈 두께 (세로 폭) 예) 15cm
   WAITING_DEPTH: 180,   // 승강장(대기 구역) 길이 : 예) 180cm
 };
 
@@ -39,11 +39,11 @@ function App() {
 
   // ---> [지워야함] 현재 테스트를 위해 임의로 박아둔 예시 승객 데이터입니다.
   // ---> [지워야함] 현재 테스트용 예시 승객 (x, y 좌표 m 단위입니다)
-  const [passengers, setPassengers] = useState([
-    { id: 1, x: -0.3, y: 0.5, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
-    { id: 2, x: 0.4, y: -0.5, state: 'ENTERING', safety_state: 'FALL', label: 'Passenger #2' },    // 승강장 좌측 입장 중 낙상 발생
-    { id: 3, x: 0.8, y: 1.3, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' }, // 카빈 내부 좌측 구석 장기 미동
-    { id: 4, x: -0.2, y: -1.2, state: 'OUTSIDE', safety_state: null, label: 'Passenger #4' } // 승강장 대기
+  const [passengers] = useState([
+    { id: 1, x: 0, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
+    { id: 2, x: 0.25, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #2' },    // 승강장 좌측 입장 중 낙상 발생
+    { id: 3, x: 0, y: 0, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' }, // 카빈 내부 좌측 구석 장기 미동
+    { id: 4, x: -0.25, y: 1, state: 'OUTSIDE', safety_state: 'FALL', label: 'Passenger #4' } // 승강장 대기
   ]);
 
   const [systemLogs, setSystemLogs] = useState([
@@ -77,6 +77,19 @@ function App() {
     if (safetyState === 'FALL' || safetyState === 'IMMOBILE') return 'danger';
     return 'normal';
   };
+
+  // 💡 전체 승객 중 비상 상태(FALL 또는 IMMOBILE)인 사람이 1명이라도 있는지 확인
+  const isDangerActive = passengers.some(
+    p => p.safety_state === 'IMMOBILE' && p.state !== 'OUTSIDE'
+  );
+
+useEffect(() => {
+  if (isDangerActive) {
+    // (테스트용이므로 짧은 비프음)
+    const audio = new Audio('/alert-sound.mp3'); 
+    audio.play().catch(e => console.log("브라우저 자동재생 정책 제한"));
+  }
+}, [isDangerActive]);
 
   // 💡 상태값에 따라 말풍선에 띄울 한글 설명을 결정하는 함수
   const getStatusLabel = (state, safetyState) => {
@@ -114,7 +127,7 @@ function App() {
   const selectedPassenger = passengers.find(p => p.id === selectedDot);
 
   return (
-    <div className="dashboard-container" onClick={handleBackgroundClick}>
+    <div className={`dashboard-container ${isDangerActive ? 'danger-background' : ''}`} onClick={handleBackgroundClick}>
       <header className="header">
         <h1>ElevSafe 관제 시스템 — [RETINA-4SN 4D Radar 연동]</h1>
         <div className="spec-badge">
@@ -123,28 +136,32 @@ function App() {
       </header>
 
       <div className="main-content">
+
+        {/* 좌측 패널: 승객 상세 정보 */}
+        <div className="left-panel" onClick={(e) => e.stopPropagation()}>
+          <h2>승객 상세 정보</h2>
+          {selectedPassenger ? (
+            <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
+              <h3>ID: {selectedPassenger.id}</h3>
+              <strong>{selectedPassenger.label}</strong>
+              <p>수신 좌표:<br/>X {selectedPassenger.x}m / Y {selectedPassenger.y}m</p>
+              <p className="state-text">
+                상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
+              </p>
+              <button onClick={() => setSelectedDot(null)}>선택 해제</button>
+            </div>
+          ) : (
+            <div className="empty-info">
+              <p>도면에서 승객(점)을 클릭하면<br/>여기에 상세 정보가 표시됩니다.</p>
+            </div>
+          )}
+        </div>
         
         {/* 좌측: 2D 도면 (Blueprint) 시각화 영역 */}
         <div className="visualization-section">
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
-
-            {/* 고정된 상세 정보 패널 (스티커 메모 형태) */}
-            {selectedPassenger && (
-              <div 
-                className={`info-panel ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <h3>상세 정보 패널</h3>
-                <strong>{selectedPassenger.label}</strong>
-                <p>수신 좌표: X {selectedPassenger.x}m / Y {selectedPassenger.y}m</p>
-                <p className="state-text">
-                  상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
-                </p>
-                <button onClick={() => setSelectedDot(null)}>닫기</button>
-              </div>
-            )}            
 
             {/* SCALE을 곱해서 실제 화면 픽셀 크기로 자동 변환 */}
             <div className="blueprint-wrapper" style={{ width: CONFIG_CM.ELEV_WIDTH * SCALE }}> 
