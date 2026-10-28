@@ -7,6 +7,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <algorithm>
+#include <cmath> // for llround()
 
 namespace {
 std::string trim(const std::string& s) {
@@ -57,7 +58,11 @@ std::vector<FrameData> readFramesCSV(const std::string& path) {
     const int i_frame = col["frame"];
     const int i_x = col["x"], i_y = col["y"], i_z = col["z"];
     const int i_dop = col["doppler"], i_pow = col["power"];
-    const int i_ts  = col.count("timestamp_ms") ? col["timestamp_ms"] : -1;
+    // 시각 컬럼: µs를 우선, 없으면 예전 녹화 형식(ms)을 읽어 µs로 변환
+    // i_us = "timestamp_us" 컬럼 위치 (없으면 -1)
+    const int i_us = col.count("timestamp_us") ? col ["timestamp_us"] : -1;
+    // i_ms = "timestamp_ms" 컬럼 위치 (없으면 -1)
+    const int i_ms  = col.count("timestamp_ms") ? col["timestamp_ms"] : -1;
     const int i_tid = col.count("target_id")    ? col["target_id"]    : -1;
 
     // 한 줄에 최소 몇 칸이 있어야 필수 값을 다 읽을 수 있는지
@@ -93,8 +98,14 @@ std::vector<FrameData> readFramesCSV(const std::string& path) {
 
             FrameData& fd = by_frame[frame];   // 처음 보는 frame 이면 새로 생성됨
             fd.frame_id = frame;
-            // i_ts 가 0 이상이면 fd.timestamp_ms = std::stod(cells[i_ts]);
-            if(i_ts>=0) fd.timestamp_ms = std::stod(cells[i_ts]);
+            // TODO: 시각 읽기 (target_id처럼 "위치 >= 0 이고 그 칸이 존재하면" 조건으로)
+            //   1) i_us 칸이 있으면 → std::stoll 로 정수 그대로
+            if(i_us>=0 && i_us<static_cast<int>(cells.size()))
+                fd.timestamp_us = std::stoll(cells[i_us]);
+            //   2) 아니고 i_ms 칸이 있으면 → std::stod 로 읽어 ×1000 → std::llround 로 반올림
+            else if(i_ms>=0 && i_ms<static_cast<int>(cells.size())) 
+                fd.timestamp_us = std::llround((std::stod(cells[i_ms]))*1000);
+            //   3) 둘 다 없으면 → 아무것도 안 함 (기본값 0)
             fd.points.push_back(p);
         } catch (...) {
             std::cerr << "[CSV] " << path << ":" << line_no << " 숫자 변환 실패, 건너뜀\n";
@@ -114,13 +125,13 @@ bool writeFramesCSV(const std::string& path, const std::vector<FrameData>& frame
         return false;
     }
 
-    file << std::fixed << std::setprecision(3);   // 소수점 3자리 (m 기준 mm, ms 기준 µs)
-    file << "frame,timestamp_ms,x,y,z,doppler,power,target_id,zone,cluster\n";
+    file << std::fixed << std::setprecision(3);   // 소수점 3자리 (m 기준 mm)
+    file << "frame,timestamp_us,x,y,z,doppler,power,target_id,zone,cluster\n";
     for (const auto& fd : frames) {
         for (const auto& p : fd.points) {
             // fd.frame_id, fd.timestamp_ms, p.x, p.y, p.z, p.doppler, p.power,
             // p.target_id, zoneToString(p.zone) 를 ',' 로 이어서 한 줄 쓰기
-            file << fd.frame_id << ','<< fd.timestamp_ms << ','
+            file << fd.frame_id << ','<< fd.timestamp_us << ','
             << p.x << ',' << p.y << ',' << p.z << ','
             << p.doppler << ',' << p.power << ','
             << p.target_id << ',' << zoneToString(p.zone) << ','<<p.cluster_id<< '\n';

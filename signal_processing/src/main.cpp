@@ -8,6 +8,8 @@
 
 #include <iostream>
 #include <string>
+#include <iomanip>
+#include <sstream>
 
 #include "common/config.h"
 #include "io/csv_io.h"
@@ -91,7 +93,7 @@ int main(int argc, char** argv) {
 
         FrameData out;
         out.frame_id = fd.frame_id;
-        out.timestamp_ms = fd.timestamp_ms;
+        out.timestamp_us = fd.timestamp_us;
         out.points = std::move(kept);
         outputs.push_back(std::move(out));
     }
@@ -102,7 +104,18 @@ int main(int argc, char** argv) {
               << "DOOR        : " << total.door    << "\n"
               << "CABIN       : " << total.cabin   << "\n"
               << "ROI 제거    : " << total.dropped << "\n";
-    if (use_bg) std::cout << "배경 제거   : " << bg_total.removed << "\n";
+    if (use_bg) {
+        std::cout << "배경 제거   : " << bg_total.removed;
+        if (bg_total.input > 0) {
+            const double ratio = static_cast<double>(bg_total.removed) / bg_total.input * 100.0;
+            std::ostringstream pct;
+            pct << std::fixed << std::setprecision(1) << ratio;
+            std::cout << " (ROI 통과 점의 " << pct.str() << "%)";
+        } else {
+            std::cout << " (ROI 통과 점 없음 → 설치 실측값 확인)";
+        }
+        std::cout << "\n";
+    }
     std::cout << "[" << clusterer.name() << "] 프레임당 평균 덩어리 "
           << static_cast<double>(total_clusters) / frames.size()
           << "개, 노이즈 점 " << total_noise << "개\n";

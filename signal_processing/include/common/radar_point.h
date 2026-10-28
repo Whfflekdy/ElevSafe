@@ -38,7 +38,7 @@ using Frame = std::vector<RadarPoint>;
 // (파일 입출력과 main 에서 사용. 필터들은 기존처럼 Frame 만 받는다)
 struct FrameData {
     int frame_id = -1;          // 센서 원본 frameCount
-    double timestamp_ms = 0.0;  // 세션 첫 프레임 기준 경과 시간 [ms]
+    int64_t timestamp_us = 0;  // 세션 첫 프레임 기준 경과 시간 [us]
     Frame points;               // 포인트 목록
 };
 

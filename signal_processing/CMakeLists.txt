@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.14)
 project(signal_processing LANGUAGES CXX)
 
 # C++17 사용
-set(CMAKE_CXX_STANDARD 17)
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 경고를 많이 켜서 실수를 컴파일러가 잡게 함
