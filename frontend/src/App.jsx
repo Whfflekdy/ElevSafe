@@ -1,97 +1,221 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 // 🛠️ [실제 도면 규격 설정 - 단위: cm]
 // 이제 px 단위로 머리 아프게 고민할 필요 없이 실제 줄자로 잰 cm 길이를 넣으세요!
 const CONFIG_CM = {
-  ELEV_WIDTH: 160,      // 카 폭 (가로) : 예) 200cm
-  ELEV_DEPTH: 140,      // 카 깊이 (세로) : 예) 150cm
-  DOOR_WIDTH: 90,       // 출입구 폭 : 예) 90cm
-  DOOR_THICKNESS: 5,   // 문틈 두께 (세로 폭) 예) 15cm
-  WAITING_DEPTH: 180,   // 승강장(대기 구역) 길이 : 예) 180cm
+  ELEV_WIDTH: 162,      // 카 폭 (가로)
+  ELEV_DEPTH: 137,      // 카 깊이 (세로)
+  DOOR_WIDTH: 88,       // 출입구 폭
+  DOOR_THICKNESS:24,    // 문틈 두께 (세로 폭)
+  WAITING_DEPTH: 90,   // 승강장(대기 구역) 길이
+  WAITING_WIDTH: 166,   // 승강장 최대 폭
+  TRAP_DEPTH: 52,       // 사다리꼴 깊이
+  TRAP_BOTTOM_W: 101,   // 사다리꼴 하단 폭
 };
 
 // 🔍 화면 확대/축소 비율 (1cm = 몇 px로 그릴 것인가?)
 // 도면이 화면에 비해 너무 작으면 이 숫자를 2.5, 3.0으로 늘리고, 너무 크면 1.5 등으로 줄이세요.
-const SCALE = 1.5;
+const SCALE = 1.6;
+
+
+/* [실제 연동 시 바꿀 설정]
+ * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
+ * true : WebSocket으로 데이터 수신 및 명령 전송
+ * HTTPS 화면에서는 서버도 wss:// 주소를 사용해야 합니다.
+ */
+const USE_REAL_WEBSOCKET = false;
+const RADAR_WS_URL = 'ws://localhost:8080/radar';
+const MAX_WIDTH = Math.max(CONFIG_CM.ELEV_WIDTH, CONFIG_CM.WAITING_WIDTH);
+// 외곽선을 한 번 계산합니다. 내부 구분선과 면 채우기는 없습니다.
+const PLAN = (() => {
+  const c = MAX_WIDTH / 2;
+  const cabinL = c - CONFIG_CM.ELEV_WIDTH / 2;
+  const cabinR = c + CONFIG_CM.ELEV_WIDTH / 2;
+  const doorL = c - CONFIG_CM.DOOR_WIDTH / 2;
+  const doorR = c + CONFIG_CM.DOOR_WIDTH / 2;
+  const trapL = c - CONFIG_CM.TRAP_BOTTOM_W / 2;
+  const trapR = c + CONFIG_CM.TRAP_BOTTOM_W / 2;
+  const waitL = c - CONFIG_CM.WAITING_WIDTH / 2;
+  const waitR = c + CONFIG_CM.WAITING_WIDTH / 2;
+  const cabinBottom = CONFIG_CM.ELEV_DEPTH;
+  const doorBottom = cabinBottom + CONFIG_CM.DOOR_THICKNESS;
+  const waitingTop = doorBottom + CONFIG_CM.TRAP_DEPTH;
+  const height = waitingTop + CONFIG_CM.WAITING_DEPTH;
+
+  return {
+    height,
+    waitingTop,
+    path: `M ${cabinL} 0 H ${cabinR} V ${cabinBottom}
+      H ${doorR} V ${doorBottom} L ${trapR} ${waitingTop}
+      H ${waitR} V ${height} H ${waitL} V ${waitingTop}
+      H ${trapL} L ${doorL} ${doorBottom} V ${cabinBottom}
+      H ${cabinL} Z`,
+  };
+})();
+
+// 도면, 구역 이름, 문 애니메이션을 담당합니다. children에는 승객 점이 들어갑니다.
+function FloorPlan({ doorState, children }) {
+  return (
+    <div
+      className="floor-plan"
+      style={{ width: MAX_WIDTH * SCALE, height: PLAN.height * SCALE }}
+    >
+      {/* 기존 하늘색 외곽선 */}
+      <svg
+        className="floor-outline"
+        viewBox={`0 0 ${MAX_WIDTH} ${PLAN.height}`}
+        role="img"
+        aria-label="캐빈과 출입구, 사다리꼴 연결부, 승강장 평면도"
+      >
+        <path d={PLAN.path} />
+      </svg>
+
+      {/* 공간 이름은 승객 클릭을 방해하지 않도록 CSS에서 pointer-events를 끕니다. */}
+      <span className="plan-label" style={{ top: CONFIG_CM.ELEV_DEPTH * SCALE / 2 }}>
+        캐빈 내부 (Cabin)
+      </span>
+      <span
+        className="plan-label"
+        style={{ top: (PLAN.waitingTop + CONFIG_CM.WAITING_DEPTH / 2) * SCALE }}
+      >
+        승강장 (Waiting Area)
+      </span>
+
+      {/* 실제 문 영역: 문 상태에 따라 양쪽 문짝을 수축/복원합니다. */}
+      <div
+        className={`plan-door-frame ${doorState === 'OPEN' || doorState === 'OPENING' ? 'is-open' : ''}`}
+        style={{
+          left: (MAX_WIDTH - CONFIG_CM.DOOR_WIDTH) * SCALE / 2,
+          top: CONFIG_CM.ELEV_DEPTH * SCALE,
+          width: CONFIG_CM.DOOR_WIDTH * SCALE,
+          height: CONFIG_CM.DOOR_THICKNESS * SCALE,
+        }}
+      >
+        <div className="plan-door plan-door-left" />
+        <div className="plan-door plan-door-right" />
+      </div>
+      {children}
+    </div>
+  );
+}
+
 
 function App() {
   const [doorState, setDoorState] = useState('CLOSED');
   const [doorCommand, setDoorCommand] = useState(null);
   const [selectedDot, setSelectedDot] = useState(null); // 클릭한 승객 말풍선 띄우기용
-  
-  /* 
-    =================================================================
-    [데이터 수집 및 전처리 팀 연동 가이드]
-    실제 4D 레이더 데이터 팀이 WebSocket이나 API로 넘겨줄 JSON 데이터 구조입니다.
-    Expected Format:
-      "timestamp": "2026-10-01T14:02:05Z",
-      "door_command": "HOLD", -> null, OPEN, HOLD, CLOSE
-      "door_state": "OPEN", -> OPEN, CLOSED, OPENING, CLOSEING
-      "passengers": [
-        { "id": 1, "x": -0.20, "y": 1.00, "state": "INSIDE","safety_state": null,"label": "Passenger #1"},
-        { "id": 2, "x": 150, "y": 320, "state": "ENTERING", "safety_state": "FALL","label": "Passenger #2"}
-         ->가능한 값 INSIDE, ENTERING, EXITING/IMMOBILE, FALL
-      ]
-    }
-    =================================================================
-  */
-
-  // ---> [지워야함] 현재 테스트를 위해 임의로 박아둔 예시 승객 데이터입니다.
-  // ---> [지워야함] 현재 테스트용 예시 승객 (x, y 좌표 m 단위입니다)
-  const [passengers] = useState([
-    { id: 1, x: 0, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },  // 정상 승객
-    { id: 2, x: 0.25, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #2' },    // 승강장 좌측 입장 중 낙상 발생
-    { id: 3, x: 0, y: 0, state: 'INSIDE', safety_state: 'IMMOBILE', label: 'Passenger #3' }, // 카빈 내부 좌측 구석 장기 미동
-    { id: 4, x: -0.25, y: 1, state: 'OUTSIDE', safety_state: 'FALL', label: 'Passenger #4' } // 승강장 대기
+  // 실제 연동에서는 빈 배열로 시작하고 서버 데이터로 채웁니다.
+  // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
+  const [passengers, setPassengers] = useState(USE_REAL_WEBSOCKET ? [] : [
+    { id: 1, x: 0, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },
+    { id: 2, x: 0.25, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #2' },  
+    { id: 3, x: 0, y: 0, state: 'ENTERING', safety_state: null, label: 'Passenger #3' },
+    { id: 4, x: -0.25, y: 1, state: 'OUTSIDE', safety_state: null, label: 'Passenger #4' }
   ]);
 
   const [systemLogs, setSystemLogs] = useState([
-    '[14:01:00] RETINA-4SN Radar 연결 대기 중...',
-    '[14:02:05] [예시 모드 작동 중] 실제 데이터 연동 전 UI 테스트 상태입니다.'
+    USE_REAL_WEBSOCKET
+      ? '[WebSocket] 서버 연결 대기 중...'
+      : '[테스트 모드] 실제 데이터 연동 전 UI 테스트 상태입니다.'
   ]);
+  const wsRef = useRef(null);
+  const doorTimerRef = useRef(null);
 
   /* 
-    =================================================================
-    [실제 넣어야 할 부분 - WebSocket 연동 영역]
-    =================================================================
-  */
-  /*
-    // --- [실제 넣어야 함] 시작 ---
-    useEffect(() => {
-      const ws = new WebSocket('ws://localhost:8080/radar'); 
-      
-      ws.onmessage = (event) => {
-        const realData = JSON.parse(event.data);
-        setDoorState(realData.door_state);
-        setPassengers(realData.passengers); 
-      };
+  ===============================================================
+  [실제 넣어야 할 부분 - WebSocket 연동 영역]
 
-      return () => ws.close();
-    }, []);
-    // --- [실제 넣어야 함] 끝 ---
+  아래 코드는 미리 구현되어 있습니다. 주석을 해제할 필요 없이
+  파일 상단의 USE_REAL_WEBSOCKET을 true로 바꾸고
+  RADAR_WS_URL을 실제 서버 주소로 바꾸면 활성화됩니다.
+
+  수신 JSON 예시:
+  {
+    "timestamp": "2026-10-01T14:02:05Z",
+    "door_state": "OPEN",
+    "door_command": null,
+    "passengers": [
+      { "id": 1, "x": 0.25, "y": 1.0, "state": "INSIDE",
+        "safety_state": null, "label": "Passenger #1" }
+    ]
+  }
+
+  door_state: OPEN / CLOSED / OPENING / CLOSING
+  door_command: null / OPEN / HOLD / CLOSE
+  state: INSIDE / OUTSIDE / ENTERING / EXITING
+  safety_state: null / FALL / IMMOBILE
+  x, y: 유한한 숫자, 단위 m, 문 중앙이 (0, 0)
+  화면에서 x 양수는 오른쪽, y 양수는 캐빈 안쪽(위쪽)입니다.
+
+  이 예제에는 자동 재연결, 인증 및 명령 응답 확인은 포함하지 않았습니다.
+  서버에서 passengers를 보내면 화면의 전체 승객 목록을 교체합니다.
+  =================================================================
   */
 
-// 💡 safety_state 유무에 따라 화면 렌더링 색상 분기
+  useEffect(() => {
+    if (!USE_REAL_WEBSOCKET) return;
+
+    const ws = new WebSocket(RADAR_WS_URL);
+    wsRef.current = ws;
+    const log = message => setSystemLogs(prev => [...prev, message]);
+
+    ws.onopen = () => log('[WebSocket] 서버 연결 완료');
+    ws.onmessage = event => {
+      try {
+        const data = JSON.parse(event.data);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new Error('JSON 객체가 필요합니다.');
+        }
+        if (['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
+          setDoorState(data.door_state);
+        }
+        if (Array.isArray(data.passengers)) {
+          // 좌표가 없거나 숫자가 아닌 항목은 도면에 표시하지 않습니다.
+          setPassengers(data.passengers.filter(p =>
+            p && (typeof p.id === 'number' || typeof p.id === 'string') &&
+            Number.isFinite(p.x) && Number.isFinite(p.y)
+          ));
+        }
+        if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
+          setDoorCommand(data.door_command);
+        }
+      } catch (error) {
+        console.error('WebSocket 수신 데이터 처리 오류:', error);
+        log('[WebSocket] 수신 데이터 형식 오류');
+      }
+    };
+    ws.onerror = () => log('[WebSocket] 연결 오류 발생');
+    ws.onclose = () => log('[WebSocket] 연결 종료');
+
+    return () => {
+      // React 개발 모드 재실행 및 화면 종료 시 기존 연결을 정리합니다.
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+      if (wsRef.current === ws) wsRef.current = null;
+      ws.close();
+    };
+  }, []);
+
+  // 테스트 도중 화면이 닫히면 남아 있는 타이머도 정리합니다.
+  useEffect(() => () => clearTimeout(doorTimerRef.current), []);
+
+  // 승객 점의 색상은 기존 안전 상태 기준을 유지합니다.
   const getTheme = (safetyState) => {
     if (safetyState === 'FALL' || safetyState === 'IMMOBILE') return 'danger';
     return 'normal';
   };
-
-  // 💡 전체 승객 중 비상 상태(FALL 또는 IMMOBILE)인 사람이 1명이라도 있는지 확인
+  // 기존 동작 유지: OUTSIDE가 아닌 승객의 IMMOBILE만 전체 경보를 활성화합니다.
+  // FALL도 전체 경보에 포함하려면 이 조건을 별도로 변경하세요.
   const isDangerActive = passengers.some(
     p => p.safety_state === 'IMMOBILE' && p.state !== 'OUTSIDE'
   );
 
 useEffect(() => {
   if (isDangerActive) {
-    // (테스트용이므로 짧은 비프음)
     const audio = new Audio('/alert-sound.mp3'); 
     audio.play().catch(e => console.log("브라우저 자동재생 정책 제한"));
   }
 }, [isDangerActive]);
-
-  // 💡 상태값에 따라 말풍선에 띄울 한글 설명을 결정하는 함수
   const getStatusLabel = (state, safetyState) => {
     if (safetyState === 'FALL') return '🚨 비상 (낙상 감지!)';
     if (safetyState === 'IMMOBILE') return '🚨 비상 (장기 미동 감지!)';
@@ -104,22 +228,43 @@ useEffect(() => {
       default: return '알 수 없음';
     }
   };
-
-  // 수동 명령어 전송 및 시뮬레이션
-  const handleDoorCommand = (command) => {
-    setDoorCommand(command);
-    // 실제 백엔드 연동 시: ws.send(JSON.stringify({ door_command: command }));
-
+  // 실제 모드에서는 명령만 전송하고, 문의 실제 상태는 서버 수신값으로 표시합니다.
+  const handleDoorCommand = command => {
     const timeStr = new Date().toLocaleTimeString();
-    setSystemLogs(prev => [...prev, `[${timeStr}] 📤 백엔드로 Door Command 전송: [${command}]`]);
 
-    // 시뮬레이션을 위해 프론트 UI 상태 즉시 변경 -> 실전에선 아래 코드 3줄 삭제
-    if (command === 'OPEN') setDoorState('OPEN');
-    if (command === 'HOLD') setDoorState('OPEN');
-    if (command === 'CLOSE') setDoorState('CLOSED');
+    if (USE_REAL_WEBSOCKET) {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setSystemLogs(prev => [...prev, `[${timeStr}] 연결되지 않아 명령을 전송하지 못했습니다.`]);
+        return;
+      }
+      try {
+        // [실제 명령 전송 영역] 백엔드와 이 JSON 형식을 맞추세요.
+        ws.send(JSON.stringify({ door_command: command }));
+        setDoorCommand(command);
+        setSystemLogs(prev => [...prev, `[${timeStr}] 📤명령 송신: ${command} (서버 처리 확인 전)`]);
+      } catch (error) {
+        console.error('명령 전송 오류:', error);
+        setSystemLogs(prev => [...prev, `[${timeStr}] 명령 전송 실패`]);
+      }
+      return;
+    }
+
+    // [테스트 전용] 실제 모드에서는 위에서 return하므로 실행되지 않습니다.
+    // 새 명령이 오면 이전 타이머를 취소하여 상태가 뒤늦게 덮이는 것을 방지합니다.
+    clearTimeout(doorTimerRef.current);
+    setDoorCommand(command);
+    setSystemLogs(prev => [...prev, `[${timeStr}] 테스트 명령: ${command}`]);
+    if (command === 'HOLD') {
+      setDoorState('OPEN');
+    } else {
+      const opening = command === 'OPEN';
+      setDoorState(opening ? 'OPENING' : 'CLOSING');
+      doorTimerRef.current = setTimeout(() => {
+        setDoorState(opening ? 'OPEN' : 'CLOSED');
+      }, 1200);
+    }
   };
-
-  // 배경 클릭 시 말풍선 닫기
   const handleBackgroundClick = () => {
     setSelectedDot(null);
   };
@@ -137,7 +282,6 @@ useEffect(() => {
 
       <div className="main-content">
 
-        {/* 좌측 패널: 승객 상세 정보 */}
         <div className="left-panel" onClick={(e) => e.stopPropagation()}>
           <h2>승객 상세 정보</h2>
           {selectedPassenger ? (
@@ -156,62 +300,22 @@ useEffect(() => {
             </div>
           )}
         </div>
-        
-        {/* 좌측: 2D 도면 (Blueprint) 시각화 영역 */}
+
         <div className="visualization-section">
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
 
-            {/* SCALE을 곱해서 실제 화면 픽셀 크기로 자동 변환 */}
-            <div className="blueprint-wrapper" style={{ width: CONFIG_CM.ELEV_WIDTH * SCALE }}> 
-             
-              {/* 1. 캐빈 내부 (Cabin) */}
-              <div 
-                className="blueprint-cabin" 
-                style={{ 
-                  width: CONFIG_CM.ELEV_WIDTH * SCALE, 
-                  height: CONFIG_CM.ELEV_DEPTH * SCALE 
-                }}
-              >
-                <span className="cad-label">캐빈 내부 (Cabin)</span>
-              </div>
+            <FloorPlan doorState={doorState}>
 
-              {/* 2. 출입구 (Door Zone) */}
-              <div className="blueprint-doors" style={{ width: CONFIG_CM.ELEV_WIDTH * SCALE, height: CONFIG_CM.DOOR_THICKNESS*SCALE }}>
-                <div className="door-frame" style={{ width: CONFIG_CM.DOOR_WIDTH * SCALE, height: '100%' }}>
-                  <div className={`door left-door ${doorState}`}></div>
-                  <div className={`door right-door ${doorState}`}></div>
-                </div>
-              </div>
-
-              {/* 3. 승강장 대기 구역 (Waiting Area) */}
-              <div 
-                className="blueprint-waiting" 
-                style={{ 
-                  width: CONFIG_CM.ELEV_WIDTH * SCALE, 
-                  height: CONFIG_CM.WAITING_DEPTH * SCALE 
-                }}
-              >
-                <span className="cad-label">승강장 (Waiting Area)</span>
-              </div>
-
-              {/* 4. 승객(점) 렌더링 및 말풍선 툴팁 */}
               {passengers.map(p => {
                 const theme = getTheme(p.safety_state);
-
-                // [단위 및 좌표 변환 핵심 로직]
-                // 1. 미터(m)를 센티미터(cm)로 변환
+                // 수신 좌표 m를 cm로 바꾼 뒤 화면 배율을 적용합니다.
                 const x_cm = p.x * 100;
                 const y_cm = p.y * 100;
-
-                // [좌표 변환 핵심 로직]
-                // X축: 중앙에서 카 내부를 기준으로 왼쪽(+)이면 화면 우측으로 더함
-                const leftPos = (CONFIG_CM.ELEV_WIDTH / 2 + x_cm) * SCALE;
-                // Y축: 도면의 문턱 위치(ELEV_DEPTH)에서 Y값이 양수(+)면 위로 빼주고, 음수(-)면 아래로 더해짐
-                // y=0일때 정확히 문 두께의 중앙에 오도록 맞춤.
+                const leftPos = (MAX_WIDTH / 2 + x_cm) * SCALE;
+                // y=0은 문 두께 중앙, y 양수는 화면 위쪽입니다.
                 const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm + (CONFIG_CM.DOOR_THICKNESS / 2)) * SCALE;
-                // 선택된 점에 추가할 하이라이트
                 const isSelected = selectedDot === p.id ? 'selected-glow' : '';
 
                 return (
@@ -224,17 +328,16 @@ useEffect(() => {
                     setSelectedDot(p.id);
                   }}
                 >
-                  {/* 점 안의 코어 색상 */}
+
                   <div className="dot-core"></div>
                 </div>
               );
             })}
 
-            </div>
+            </FloorPlan>
           </div>
         </div>
 
-        {/* 우측: 제어 및 로그 패널 */}
         <div className="side-panel">
           
           <div className="control-panel">
@@ -247,8 +350,7 @@ useEffect(() => {
                 {doorState === 'OPENING' && '⏳ DOOR OPENING (열리는 중)'}
                 {doorState === 'CLOSING' && '⏳ DOOR CLOSING (닫히는 중)'}
               </div>
-              
-              {/* 제어 명령 상태 표시 추가[cite: 1, 2] */}
+
               <div className="command-display">
                 최근 제어 명령 (door_command) : 
                 <span className={doorCommand === 'HOLD' ? 'text-danger' : 'text-normal'}>
@@ -257,7 +359,7 @@ useEffect(() => {
               </div>
 
               <div className="control-buttons">
-                {/* 닫혀있거나 닫히는 중일 때만 OPEN 명령, 그 외(열려있을 때)는 HOLD 명령 */}
+
                 {doorState === 'CLOSED' || doorState === 'CLOSING' ? (
                   <button onClick={() => handleDoorCommand('OPEN')} className="btn-open">강제 OPEN</button>
                 ) : (
