@@ -24,6 +24,7 @@ add_library(radar_core
   src/preprocessing/background_subtractor.cpp
   src/preprocessing/door_state_estimator.cpp
   src/clustering/dbscan.cpp
+  src/pipeline/signal_pipeline.cpp
 )
 # radar_core를 쓰는 쪽은 include/ 를 기준으로 헤더를 찾음
 target_include_directories(radar_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
