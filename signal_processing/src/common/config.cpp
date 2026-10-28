@@ -21,6 +21,12 @@ bool Config::load(const std::string& path){
         return false;
     }
 
+    // 설정 파일이 있는 폴더 기억 (Mac·Linux 는 '/', Windows 는 '\\' 도 쓰므로 둘 다 찾음)
+    // 예: "config/elevator_1st.cfg" → "config"
+    //     "elevator_1st.cfg"        → ""   (현재 폴더)
+    const auto slash = path.find_last_of("/\\");
+    base_dir_ = (slash == std::string::npos) ? "" : path.substr(0, slash);
+
     std::string line;
     while(std::getline(file, line)){
         // '#' 위치를 찾아 그 뒤를 잘라내기 
@@ -67,4 +73,21 @@ float Config::getFloat(const std::string& key, float default_value) const {
 std::string Config::getString(const std::string& key, const std::string& default_value)const{
     auto it = values_.find(key);
     return it == values_.end() ? default_value : it->second;
+}
+
+// 경로 값 읽기: 상대 경로면 "이 설정 파일이 있는 폴더" 기준으로 바꿔서 돌려준다.
+std::string Config::getPath(const std::string& key, const std::string& default_value) const {
+    const std::string value = getString(key, default_value);
+    if (value.empty()) return value;
+
+    // 절대 경로는 그대로
+    const bool absolute =
+        value[0] == '/' ||                          // Mac, Linux: /Users/...
+        value[0] == '\\' ||                         // Windows 네트워크 경로: \\server\...
+        (value.size() >= 2 && value[1] == ':');     // Windows 드라이브: C:/... , C:\...
+    if (absolute) return value;
+
+    // 설정 파일이 현재 폴더에 있으면 그대로, 아니면 그 폴더를 앞에 붙임
+    if (base_dir_.empty()) return value;
+    return base_dir_ + "/" + value;
 }

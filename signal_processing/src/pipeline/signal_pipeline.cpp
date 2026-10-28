@@ -21,7 +21,7 @@ SignalPipeline::SignalPipeline(const Config& cfg)
     ok_ = roi_.config().isValid() && DoorStateConfig::fromConfig(cfg).isValid();
 
     // 배경 맵: 경로가 있고 불러오기에 성공했을 때만 사용
-    const std::string map_path = cfg.getString("background.map_path", "");
+    const std::string map_path = cfg.getPath("background.map_path", "");
     use_bg_ = !map_path.empty() && bg_.load(map_path);
 }
 
