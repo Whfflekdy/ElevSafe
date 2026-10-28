@@ -39,7 +39,7 @@ struct Cluster {
     // z_top (float, 덩어리 점 높이의 상위 95%. 머리 높이 추정)
     float z_top = 0.0f;
     
-    float mean_doppler = 0.0f; // 평균 속도(m/s, 다가오면 +)
+    float mean_doppler = 0.0f; // 평균 속도(m/s, 센서 시선 방향: 다가오면 -, 멀어지면 +)
     int num_points = 0;        // 덩어리에 속한 점 수
     Zone zone = Zone::NONE;    // 덩어리 점 중 가장 많은 zone(DOOR/CABIN)
     bool maybe_merged = false; // 여러 사람이 합쳐졌을 수 있음(1차는 항상 false, 봉우리 분할은 이후)
