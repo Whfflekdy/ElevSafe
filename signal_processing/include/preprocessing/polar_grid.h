@@ -13,6 +13,8 @@
 #include "common/config.h"
 #include "common/radar_point.h"
 
+namespace elevsafe::sp {
+
 struct PolarGridConfig {
     float range_res = 0.071565f;
     float uv_res = 0.015938f;
@@ -32,3 +34,5 @@ public:
 private:
     PolarGridConfig config_;
 };
+
+}  // namespace elevsafe::sp

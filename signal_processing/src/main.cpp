@@ -15,6 +15,8 @@
 #include "io/csv_io.h"
 #include "pipeline/signal_pipeline.h"
 
+using namespace elevsafe::sp;
+
 // output.csv → output<suffix>.csv  (예: "_door")
 static std::string withSuffix(const std::string& path, const std::string& suffix) {
     std::string base = path;

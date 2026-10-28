@@ -21,6 +21,8 @@
 #include "preprocessing/door_state_estimator.h"
 #include "clustering/dbscan.h"
 
+namespace elevsafe::sp {
+
 // A → B: 센서 데이터가 아닌 상황 정보 (필요해지면 칸만 추가)
 struct FrameContext {
     DoorState door_state = DoorState::UNKNOWN;  // 백엔드가 정한 문 상태 (지금은 B 가 참고만)
@@ -93,3 +95,5 @@ private:
     DoorStateEstimator door_est_;   // 프레임 사이 상태를 기억 → process 는 const 아님
     PipelineStats stats_;
 };
+
+}  // namespace elevsafe::sp

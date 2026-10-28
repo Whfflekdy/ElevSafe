@@ -12,6 +12,8 @@
 #include "common/config.h"
 #include "common/door_state.h"
 
+namespace elevsafe::sp {
+
 struct DoorStateConfig {
     Box3D view_zone;              // 문 너머를 보는 상자 (공통 좌표)
     std::size_t window = 10;      // 최근 몇 프레임을 평균낼지
@@ -42,3 +44,5 @@ private:
     std::size_t last_count_ = 0;
     float average_ = 0.0f;
 };
+
+}  // namespace elevsafe::sp

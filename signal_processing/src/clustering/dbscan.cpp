@@ -2,6 +2,8 @@
 
 #include <deque>
 
+namespace elevsafe::sp {
+
 namespace {
 constexpr int UNVISITED = -2;   // 아직 안 본 점
 constexpr int NOISE = -1;       // 노이즈
@@ -80,3 +82,5 @@ ClusteringResult DBSCAN::cluster(const Frame& points) const {
     result.num_clusters = cid;
     return result;
 }
+
+}  // namespace elevsafe::sp

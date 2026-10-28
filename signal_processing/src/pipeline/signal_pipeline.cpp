@@ -5,6 +5,8 @@
 #include <cmath>
 #include <string>
 
+namespace elevsafe::sp {
+
 // ---------------------------------------------------------------------------
 // 생성자: 설정으로 부품을 한 번 준비
 // 멤버는 헤더에 선언한 순서대로 초기화된다 (순서가 다르면 컴파일러가 경고)
@@ -141,3 +143,5 @@ std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const Cluste
     }
     return out;
 }
+
+}  // namespace elevsafe::sp

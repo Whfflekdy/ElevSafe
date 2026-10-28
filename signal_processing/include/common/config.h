@@ -5,6 +5,8 @@
 #include <string>
 #include <unordered_map>
 
+namespace elevsafe::sp {
+
 
 // ROI 값과 센서 자세를 엘리베이터가 바뀔 때마다 재컴파일하지 않도록
 // 설정 파일로 분리하여 읽어들이는 클래스. (elevator_default.cfg)
@@ -25,3 +27,5 @@ private:
     std::unordered_map<std::string, std::string> values_;   // key -> value 문자열
     std::string base_dir_;   // 설정 파일이 있는 폴더 (load 때 기억, 끝에 '/' 없음)
 };
+
+}  // namespace elevsafe::sp

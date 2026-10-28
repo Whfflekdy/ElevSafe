@@ -15,6 +15,8 @@
 #include "common/box3d.h"
 #include "common/config.h"
 
+namespace elevsafe::sp {
+
 // ROI 설정: 두 영역
 struct ROIConfig{
     Box3D door_zone;  // 출입구 영역
@@ -58,3 +60,5 @@ public:
 private:
     ROIConfig config_;
 };
+
+}  // namespace elevsafe::sp

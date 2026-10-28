@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iostream>
 
+namespace elevsafe::sp {
+
 namespace { // 이 파일에서만 쓰는 함수여서 다른 파일에 trim과 같은 이름이 있어도 충돌하지 않도록
 // 앞뒤 공백(space, tab, \r, \n) 제거
 std::string trim(const std::string& s){
@@ -91,3 +93,5 @@ std::string Config::getPath(const std::string& key, const std::string& default_v
     if (base_dir_.empty()) return value;
     return base_dir_ + "/" + value;
 }
+
+}  // namespace elevsafe::sp
