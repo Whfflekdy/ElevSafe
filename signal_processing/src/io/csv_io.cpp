@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath> // for llround()
 
+namespace elevsafe::sp {
+
 namespace {
 std::string trim(const std::string& s) {
     const char* ws = " \t\r\n";
@@ -139,3 +141,5 @@ bool writeFramesCSV(const std::string& path, const std::vector<FrameData>& frame
     }
     return true;
 }
+
+}  // namespace elevsafe::sp

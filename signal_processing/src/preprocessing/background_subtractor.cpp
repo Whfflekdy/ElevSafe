@@ -6,6 +6,8 @@
 #include <iostream>
 #include <sstream>
 
+namespace elevsafe::sp {
+
 BackgroundConfig BackgroundConfig::fromConfig(const Config& cfg) {
     BackgroundConfig c;
     c.occupancy_threshold = cfg.getFloat("background.occupancy_threshold", c.occupancy_threshold);
@@ -137,3 +139,5 @@ Frame BackgroundSubtractor::filter(const Frame& points, BGStats* stats) const {
     if (stats) *stats = local;
     return out;
 }
+
+}  // namespace elevsafe::sp

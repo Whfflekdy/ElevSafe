@@ -36,6 +36,8 @@
 #include "common/radar_point.h"
 #include "common/config.h"
 
+namespace elevsafe::sp {
+
 // 센서의 설치 위치와 자세(엘리베이터 좌표계 기준)
 //
 // [회전 부호 규칙] 이 코드는 R = Rz(yaw) * Ry(pitch) * Rx(roll) 을 사용한다.
@@ -73,3 +75,5 @@ private:
     float R_[3][3]; // 회전행렬
     float t_[3];    // 이동벡터    
 };
+
+}  // namespace elevsafe::sp

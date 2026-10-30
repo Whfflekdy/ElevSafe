@@ -4,6 +4,8 @@
 
 #include "common/radar_point.h"
 
+namespace elevsafe::sp {
+
 struct Box3D {
     float x_min=0.0f, x_max=0.0f; // 좌우 폭 범위
     float y_min=0.0f, y_max=0.0f; // 전방 거리 범위
@@ -28,3 +30,5 @@ struct Box3D {
     float depth() const { return y_max - y_min; };
     float height() const { return z_max - z_min; };
 };
+
+}  // namespace elevsafe::sp

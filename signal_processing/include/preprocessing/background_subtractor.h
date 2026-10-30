@@ -15,6 +15,8 @@
 #include "common/config.h"
 #include "common/radar_point.h"
 
+namespace elevsafe::sp {
+
 struct BackgroundConfig {
     float occupancy_threshold = 0.2f;  // 전체 프레임 중 이 비율 이상 점이 찍힌 칸 = 배경
     int dilation = 1;                  // 배경 칸 주변 몇 칸까지 배경으로 넓힐지 (0 = 넓히지 않음)
@@ -53,3 +55,5 @@ private:
     BackgroundConfig config_;
     std::unordered_set<std::int64_t> background_;   // 배경으로 등록된 칸들의 열쇠
 };
+
+}  // namespace elevsafe::sp

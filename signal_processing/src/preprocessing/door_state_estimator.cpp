@@ -1,6 +1,8 @@
 // door_state_estimator.cpp
 #include "preprocessing/door_state_estimator.h"
 
+namespace elevsafe::sp {
+
 const char* doorStateToString(DoorState s) {
     switch(s){
         case DoorState::OPEN:    return "OPEN";
@@ -66,3 +68,5 @@ DoorState DoorStateEstimator::update(const Frame& points) {
 
     return state_;
 }
+
+}  // namespace elevsafe::sp

@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iostream>
 
+namespace elevsafe::sp {
+
 namespace { // 이 파일에서만 쓰는 함수여서 다른 파일에 trim과 같은 이름이 있어도 충돌하지 않도록
 // 앞뒤 공백(space, tab, \r, \n) 제거
 std::string trim(const std::string& s){
@@ -20,6 +22,12 @@ bool Config::load(const std::string& path){
         std::cerr<< "[Config] 파일을 열 수 없음: " << path << "\n";
         return false;
     }
+
+    // 설정 파일이 있는 폴더 기억 (Mac·Linux 는 '/', Windows 는 '\\' 도 쓰므로 둘 다 찾음)
+    // 예: "config/elevator_1st.cfg" → "config"
+    //     "elevator_1st.cfg"        → ""   (현재 폴더)
+    const auto slash = path.find_last_of("/\\");
+    base_dir_ = (slash == std::string::npos) ? "" : path.substr(0, slash);
 
     std::string line;
     while(std::getline(file, line)){
@@ -68,3 +76,22 @@ std::string Config::getString(const std::string& key, const std::string& default
     auto it = values_.find(key);
     return it == values_.end() ? default_value : it->second;
 }
+
+// 경로 값 읽기: 상대 경로면 "이 설정 파일이 있는 폴더" 기준으로 바꿔서 돌려준다.
+std::string Config::getPath(const std::string& key, const std::string& default_value) const {
+    const std::string value = getString(key, default_value);
+    if (value.empty()) return value;
+
+    // 절대 경로는 그대로
+    const bool absolute =
+        value[0] == '/' ||                          // Mac, Linux: /Users/...
+        value[0] == '\\' ||                         // Windows 네트워크 경로: \\server\...
+        (value.size() >= 2 && value[1] == ':');     // Windows 드라이브: C:/... , C:\...
+    if (absolute) return value;
+
+    // 설정 파일이 현재 폴더에 있으면 그대로, 아니면 그 폴더를 앞에 붙임
+    if (base_dir_.empty()) return value;
+    return base_dir_ + "/" + value;
+}
+
+}  // namespace elevsafe::sp

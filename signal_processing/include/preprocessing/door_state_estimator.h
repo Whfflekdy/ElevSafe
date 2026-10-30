@@ -10,10 +10,9 @@
 #include "common/radar_point.h"
 #include "common/box3d.h"
 #include "common/config.h"
+#include "common/door_state.h"
 
-// 나중에 SignalPipeline 헤더(elevsafe::sp)로 옮길 예정
-enum class DoorState { UNKNOWN, OPEN, CLOSED };
-const char* doorStateToString(DoorState s);
+namespace elevsafe::sp {
 
 struct DoorStateConfig {
     Box3D view_zone;              // 문 너머를 보는 상자 (공통 좌표)
@@ -45,3 +44,5 @@ private:
     std::size_t last_count_ = 0;
     float average_ = 0.0f;
 };
+
+}  // namespace elevsafe::sp

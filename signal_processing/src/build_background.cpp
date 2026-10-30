@@ -12,6 +12,8 @@
 #include "preprocessing/background_subtractor.h"
 #include "preprocessing/polar_grid.h"
 
+using namespace elevsafe::sp;
+
 int main(int argc, char** argv) {
     const std::string config_path = argc > 1 ? argv[1] : "config/elevator_default.cfg";
     const std::string empty_path  = argc > 2 ? argv[2] : "data/raw/empty.csv";

@@ -9,8 +9,12 @@
 #include <vector>
 #include "common/radar_point.h"
 
+namespace elevsafe::sp {
+
 // frame 번호 순으로 정렬된 프레임 목록 (실패 시 빈 벡터)
 std::vector<FrameData> readFramesCSV(const std::string& path);
 
 // 프레임 목록을 CSV로 저장 (성공 시 true)
 bool writeFramesCSV(const std::string& path, const std::vector<FrameData>& frames);
+
+}  // namespace elevsafe::sp

@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+namespace elevsafe::sp {
+
 PolarGridConfig PolarGridConfig::fromConfig(const Config& cfg) {
     PolarGridConfig c;
     // TODO: cfg 에서 "polar.range_res", "polar.uv_res" 읽기 (기본값은 c 의 현재 값)
@@ -35,3 +37,5 @@ void PolarGrid::assignBins(RadarPoint& p) const {
 void PolarGrid::assignBins(Frame& points) const {
     for (auto& p : points) assignBins(p);
 }
+
+}  // namespace elevsafe::sp

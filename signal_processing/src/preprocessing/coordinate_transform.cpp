@@ -1,6 +1,8 @@
 #include "preprocessing/coordinate_transform.h"
 #include <cmath>
 
+namespace elevsafe::sp {
+
 namespace { // 익명 네임스페이스: 이 파일 안에서만 쓰이는 상수 정의
     //
 constexpr float kDegToRad = 3.14159265358979323846f / 180.0f; // degree -> radian 변환 상수
@@ -67,3 +69,5 @@ void CoordinateTransform::apply(Frame& points) const{
         apply(p);
     }
 }
+
+}  // namespace elevsafe::sp

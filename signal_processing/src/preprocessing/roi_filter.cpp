@@ -2,6 +2,8 @@
 #include <iostream>
 #include <string>
 
+namespace elevsafe::sp {
+
 namespace{
 // 설정 파일에서 박스 하나(6개 값)을 읽어 Box3D로 변환하는 함수
 Box3D readBox(const Config& cfg, const std::string& prefix, const Box3D& def){
@@ -77,3 +79,5 @@ Frame ROIFilter::filter(const Frame& points, ROIStats* stats) const{
     if(stats) *stats = local;
     return out;
 }
+
+}  // namespace elevsafe::sp

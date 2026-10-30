@@ -1,153 +1,126 @@
 // main.cpp
-// 정제 파이프라인 실행기
-// 현재: 격자 번호 -> 좌표 변환 -> ROI 필터 -> 정적 배경 제거 (Step 1~2)
-// 현재: 격자 번호 -> 좌표 변환 -> ROI 필터 -> 정적 배경 제거 -> DBSCAN (Step 1, 2, 4)
-// 이후: SOR/RCS (Step 3), BBox (Step 5)
+// 오프라인 실행기: CSV 를 SignalPipeline 에 한 프레임씩 넣고 결과를 파일로 남긴다.
+// 백엔드도 같은 SignalPipeline 을 쓰므로, 여기서 확인한 결과가 곧 실시간 결과다.
 //
 // 사용법: ./build/radar_pipeline [config] [input.csv] [output.csv]
+// 출력: output.csv (점 단위), output_door.csv (문 상태), output_clusters.csv (덩어리 요약, B→C 형식)
 
-#include <iostream>
-#include <string>
-#include <iomanip>
-#include <sstream>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
 
 #include "common/config.h"
 #include "io/csv_io.h"
-#include "preprocessing/coordinate_transform.h"
-#include "preprocessing/roi_filter.h"
-#include "preprocessing/polar_grid.h"
-#include "preprocessing/background_subtractor.h"
-#include "clustering/dbscan.h"
-#include "preprocessing/door_state_estimator.h"
+#include "pipeline/signal_pipeline.h"
+
+using namespace elevsafe::sp;
+
+// output.csv → output<suffix>.csv  (예: "_door")
+static std::string withSuffix(const std::string& path, const std::string& suffix) {
+    std::string base = path;
+    const std::string ext = ".csv";
+    if (base.size() >= ext.size() &&
+        base.compare(base.size() - ext.size(), ext.size(), ext) == 0) {
+        base.erase(base.size() - ext.size());   // 끝의 ".csv" 떼기
+    }
+    return base + suffix + ext;
+}
 
 int main(int argc, char** argv) {
-    // 실행할 때 경로를 넘기면 그걸 쓰고, 안 넘기면 기본 경로 사용
     const std::string config_path = argc > 1 ? argv[1] : "config/elevator_default.cfg";
     const std::string input_path  = argc > 2 ? argv[2] : "data/sample/tiny.csv";
     const std::string output_path = argc > 3 ? argv[3] : "data/output/roi_out.csv";
 
-    // 1. 설정 읽기
+    // 1. 설정과 파이프라인 (한 번)
     Config cfg;
     if (!cfg.load(config_path)) return 1;
+    SignalPipeline pipeline(cfg);
+    if (!pipeline.ok()) { std::cerr << "설정이 올바르지 않습니다: " << config_path << "\n"; return 1; }
+    if (pipeline.usesBackground()) std::cout << "[배경 제거] 배경 맵 사용\n";
+    else                           std::cout << "[배경 제거] 배경 맵 없음 → 건너뜀\n";
 
-    // 2. 부품 준비 (한 번만)
-    const CoordinateTransform transform(SensorPose::fromConfig(cfg)); // 설정파일 -> 센서 자세 -> 변환기
-    const ROIConfig roi_cfg = ROIConfig::fromConfig(cfg);             // 설정 파일 -> ROI 영역
-    if(!roi_cfg.isValid()) return 1;                                  // 범위가 잘못됐으면 종료
-    const DoorStateConfig door_cfg = DoorStateConfig::fromConfig(cfg);
-    if (!door_cfg.isValid()) return 1;
-    DoorStateEstimator door_est(door_cfg);   // 상태를 기억하므로 const 아님
-
-    // 프레임별 문 상태 기록 (출력 파일 이름 뒤에 _door 를 붙여 따로 저장)
-    // output_path 의 ".csv" 를 "_door.csv" 로 바꾼 경로 만들기
-    std::string door_path = output_path;
-    const std::string ext = ".csv";
-    if (door_path.size() >= ext.size() &&
-        door_path.compare(door_path.size() - ext.size(), ext.size(), ext) == 0) {
-        door_path.erase(door_path.size() - ext.size());   // 끝의 ".csv" 떼기
-    }
-    door_path += "_door.csv";
-
-    // 그 경로로 std::ofstream 열고 머리글 "frame_id,timestamp_us,count,average,state" 쓰기
-    std::ofstream door_file(door_path);
-    if (!door_file.is_open()) {
-        std::cerr << "[문 상태] 파일을 쓸 수 없음: " << door_path << "\n";
-        return 1;
-    }
-
-    door_file << "frame_id,timestamp_us,count,average,state\n";
-    door_file << std::fixed << std::setprecision(2);   // average 를 소수 둘째 자리까지 (정수 칸에는 영향 없음)
-
-    std::size_t open_frames = 0, transitions = 0;
-    DoorState prev_state = DoorState::UNKNOWN;
-    
-    const PolarGrid polar(PolarGridConfig::fromConfig(cfg));
-    BackgroundSubtractor bg(BackgroundConfig::fromConfig(cfg));
-    const std::string map_path = cfg.getString("background.map_path", "");
-    const bool use_bg = !map_path.empty() && bg.load(map_path);
-    if (use_bg) std::cout << "[배경 제거] 배경 칸 " << bg.backgroundCellCount() << "개 사용\n";
-    else        std::cout << "[배경 제거] 배경 맵 없음 → 건너뜀\n";
-    const DBSCAN dbscan(DBSCANConfig::fromConfig(cfg));
-    const Clusterer& clusterer = dbscan; // 파이프라인은 공통 틀(Clusterer)로만 사용. (추후 새로운 알고리즘 도입 및 DBSCAN과 비교 예정)
-        // 나중에 이렇게만 바꾸면 됨
-    //const MyClusterer mine(MyClustererConfig::fromConfig(cfg));
-    //const Clusterer& clusterer = mine;
-
-    const ROIFilter roi(roi_cfg);
-    // 3. 데이터 읽기
+    // 2. 데이터
     std::vector<FrameData> frames = readFramesCSV(input_path);
-    if (frames.empty()) {
-        std::cerr << "입력 프레임이 없습니다: " << input_path << "\n";
+    if (frames.empty()) { std::cerr << "입력 프레임이 없습니다: " << input_path << "\n"; return 1; }
+
+    // 3. 출력 파일 두 개 (문 상태, 덩어리 요약)
+    const std::string door_path = withSuffix(output_path, "_door");
+    const std::string cl_path   = withSuffix(output_path, "_clusters");
+
+    // door_file 열고 머리글 "frame_id,timestamp_us,state" (count·average 는 이제 파이프라인 안이라 빠짐)
+    std::ofstream door_file(door_path);
+    std::ofstream cl_file(cl_path);
+    // 둘 다 열기 실패하면 에러 메시지 후 return 1
+    if (!door_file.is_open() || !cl_file.is_open()) {
+        std::cerr << "출력 파일을 쓸 수 없음: " << door_path << " / " << cl_path << "\n";
         return 1;
     }
+    // 두 파일 모두 std::fixed << std::setprecision(3)
+    door_file << "frame_id,timestamp_us,state\n";
+    cl_file << "frame_id,timestamp_us,cluster_id,cx,cy,cz,x_min,x_max,y_min,y_max,"
+               "z_min,z_max,z_top,mean_doppler,num_points,zone,maybe_merged\n";
+    door_file << std::fixed << std::setprecision(3);
+    cl_file   << std::fixed << std::setprecision(3);   // m 기준 mm 까지. 정수 칸에는 영향 없음
 
-    // 4. 프레임마다 파이프라인 실행
+    // 4. 프레임마다
     std::vector<FrameData> outputs;
     outputs.reserve(frames.size());
-    ROIStats total;
-    BGStats bg_total;
+    std::size_t open_frames = 0, transitions = 0;
+    DoorState prev_state = DoorState::UNKNOWN;
+    const FrameContext ctx;   // 오프라인에는 백엔드 문 상태가 없으니 기본값(UNKNOWN)
 
-    std::size_t total_clusters = 0;   // 모든 프레임의 덩어리 수 합
-    std::size_t total_noise = 0;      // 노이즈로 분류된 점 수
+    for (const auto& fd : frames) {
+        Frame pts;
+        const PipelineResult r = pipeline.process(fd, ctx, &pts);
 
-    for (auto& fd : frames) {
-        polar.assignBins(fd.points); // 격자 번호(센서 좌표)
-        transform.apply(fd.points);  // 좌표 변환.
-
-        const DoorState ds = door_est.update(fd.points);  // ROI 전에!
-        // door 파일에 frame_id, timestamp_us, lastCount(), average(), 상태 문자열 한 줄 쓰기
-        door_file << fd.frame_id << ',' << fd.timestamp_us << ','
-                  << door_est.lastCount() << ',' << door_est.average() << ','
-                  << doorStateToString(ds) << '\n';
-        // ds 가 OPEN 이면 open_frames++
-        if (ds == DoorState::OPEN) ++open_frames;
-        // prev_state 가 UNKNOWN 이 아니고 ds 와 다르면 transitions++, prev_state = ds
-        //       (prev_state 가 UNKNOWN 이면 그냥 prev_state = ds)
-        if (prev_state != DoorState::UNKNOWN && ds != prev_state) ++transitions;
-        prev_state = ds;   // 처음 UNKNOWN → 첫 판단은 전환으로 세지 않음
-
-        ROIStats stats;
-        Frame kept = roi.filter(fd.points, &stats); // ROI
-        total+= stats;
-
-        if(use_bg){                 // 정적 배경 제거
-            BGStats bs;
-            kept = bg.filter(kept, &bs);
-            bg_total.input += bs.input;
-            bg_total.removed += bs.removed;
-        }
-
-        // Step 3: outlier_filter (RCS, SOR)
-
-        // Step 4: dbscan = 점마다 덩어리 번호 기록
-        const ClusteringResult cr = clusterer.cluster(kept);
-        for (std::size_t i = 0; i < kept.size(); ++i) {
-            kept[i].cluster_id = cr.labels[i];
-            if(cr.labels[i]==-1)  // 노이즈인 개수를 total에 더하기
-                total_noise++;
-        }
-        total_clusters += cr.num_clusters;
-        
-        // TODO(Step 5): bbox 후처리
-
+        // 점 단위 출력 (기존과 같은 파일)
         FrameData out;
-        out.frame_id = fd.frame_id;
-        out.timestamp_us = fd.timestamp_us;
-        out.points = std::move(kept);
+        out.frame_id = r.frame_id;
+        out.timestamp_us = r.timestamp_us;
+        out.points = std::move(pts);
         outputs.push_back(std::move(out));
+
+        // TODO: 문 상태 한 줄 쓰기, open_frames·transitions 세기 (기존 코드와 같은 규칙)
+        const DoorState ds = r.estimated_door_state;
+        door_file << r.frame_id << ',' << r.timestamp_us << ',' << doorStateToString(ds) << '\n';
+        if (ds == DoorState::OPEN) ++open_frames;
+        if (prev_state != DoorState::UNKNOWN && ds != prev_state) ++transitions;
+        prev_state = ds;
+
+        // 덩어리 요약 (C 와 합의: 덩어리가 0개인 프레임도 frame_id, timestamp_us 만 있는 줄로 남김)
+        if (r.clusters.empty()) {
+            cl_file << r.frame_id << ',' << r.timestamp_us << '\n';
+        }
+        //   아니면 덩어리마다 한 줄. zone 은 zoneToString, maybe_merged 는 0/1
+        for (const Cluster& c : r.clusters) {
+            cl_file << r.frame_id << ',' << r.timestamp_us << ',' << c.cluster_id << ','
+                    << c.cx << ',' << c.cy << ',' << c.cz << ','
+                    << c.x_min << ',' << c.x_max << ','
+                    << c.y_min << ',' << c.y_max << ','
+                    << c.z_min << ',' << c.z_max << ','
+                    << c.z_top << ',' << c.mean_doppler << ',' << c.num_points << ','
+                    << zoneToString(c.zone) << ',' << (c.maybe_merged ? 1 : 0) << '\n';
+        }
+
     }
 
-    // 5. 결과 요약 출력 및 저장
+    // 5. 요약 (기존과 같은 형식, 숫자는 pipeline.stats() 에서)
+    const PipelineStats& s = pipeline.stats();
+    // 기존 main.cpp 의 "=== 결과 ===" 블록을 옮기되,
+    // total → s.roi, bg_total → s.bg, total_clusters → s.clusters, total_noise → s.noise
+    // 배경 제거 줄은 pipeline.usesBackground() 일 때만
+    // DBSCAN 줄의 clusterer.name() 은 "DBSCAN" 으로 직접
     std::cout << "=== 결과 (" << frames.size() << " frames) ===\n"
-              << "입력 포인트 : " << total.input   << "\n"
-              << "DOOR        : " << total.door    << "\n"
-              << "CABIN       : " << total.cabin   << "\n"
-              << "ROI 제거    : " << total.dropped << "\n";
-    if (use_bg) {
-        std::cout << "배경 제거   : " << bg_total.removed;
-        if (bg_total.input > 0) {
-            const double ratio = static_cast<double>(bg_total.removed) / bg_total.input * 100.0;
+              << "입력 포인트 : " << s.roi.input   << "\n"
+              << "DOOR        : " << s.roi.door    << "\n"
+              << "CABIN       : " << s.roi.cabin   << "\n"
+              << "ROI 제거    : " << s.roi.dropped << "\n";
+    if (pipeline.usesBackground()) {
+        std::cout << "배경 제거   : " << s.bg.removed;
+        if (s.bg.input > 0) {
+            const double ratio = static_cast<double>(s.bg.removed) / s.bg.input * 100.0;
             std::ostringstream pct;
             pct << std::fixed << std::setprecision(1) << ratio;
             std::cout << " (ROI 통과 점의 " << pct.str() << "%)";
@@ -156,12 +129,14 @@ int main(int argc, char** argv) {
         }
         std::cout << "\n";
     }
-    std::cout << "[" << clusterer.name() << "] 프레임당 평균 덩어리 "
-      << static_cast<double>(total_clusters) / frames.size()
-      << "개, 노이즈 점 " << total_noise << "개\n";
+    std::cout << "[DBSCAN] 프레임당 평균 덩어리 "
+              << static_cast<double>(s.clusters) / frames.size()
+              << "개, 노이즈 점 " << s.noise << "개\n";
+
     if (!writeFramesCSV(output_path, outputs)) return 1;
     std::cout << "출력 저장: " << output_path << "\n";
     std::cout << "[문 상태] OPEN 프레임 " << open_frames << " / " << frames.size()
-      << ", 상태 전환 " << transitions << "번 → " << door_path << "\n";
+              << ", 상태 전환 " << transitions << "번 → " << door_path << "\n";
+    std::cout << "[덩어리 요약] → " << cl_path << "\n";
     return 0;
 }

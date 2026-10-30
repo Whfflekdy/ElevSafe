@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+namespace elevsafe::sp {
+
 // 포인트가 속한 감지 영역
 enum class Zone: std::uint8_t{
     NONE = 0,  // ROI 밖 (제거 대상) 
@@ -58,3 +60,5 @@ inline const char* zoneToString(Zone zone){
     }
     return "UNKNOWN"; // 값이 잘못 들어온 경우 대비. 
 }
+
+}  // namespace elevsafe::sp

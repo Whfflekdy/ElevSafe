@@ -6,6 +6,8 @@
 #include "clustering/clusterer.h"
 #include "common/config.h"
 
+namespace elevsafe::sp {
+
 struct DBSCANConfig {
     float epsilon = 0.3f;   // 이웃 거리 [m] // 격자 간격이 7.16cm라서, epsilon이 그보다 충분히 커야 같은 사람 점끼리 이어짐. 
     int min_pts = 10;        // 핵심 점이 되기 위한 최소 이웃 수 (자기 자신 포함)
@@ -27,3 +29,5 @@ private:
 
     DBSCANConfig config_;
 };
+
+}  // namespace elevsafe::sp
