@@ -107,12 +107,7 @@ function App() {
   const [selectedDot, setSelectedDot] = useState(null); // 클릭한 승객 말풍선 띄우기용
   // 실제 연동에서는 빈 배열로 시작하고 서버 데이터로 채웁니다.
   // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
-  const [passengers, setPassengers] = useState(USE_REAL_WEBSOCKET ? [] : [
-    { id: 1, x: 0, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #1' },
-    { id: 2, x: 0.25, y: 1, state: 'INSIDE', safety_state: null, label: 'Passenger #2' },  
-    { id: 3, x: 0, y: 0, state: 'ENTERING', safety_state: null, label: 'Passenger #3' },
-    { id: 4, x: -0.25, y: 1, state: 'OUTSIDE', safety_state: null, label: 'Passenger #4' }
-  ]);
+  const [passengers, setPassengers] = useState([]);
 
   const [systemLogs, setSystemLogs] = useState([
     USE_REAL_WEBSOCKET
@@ -154,47 +149,104 @@ function App() {
   */
 
   useEffect(() => {
-    if (!USE_REAL_WEBSOCKET) return;
+    const log = message =>
+      setSystemLogs(prev => [...prev, message]);
 
-    const ws = new WebSocket(RADAR_WS_URL);
-    wsRef.current = ws;
-    const log = message => setSystemLogs(prev => [...prev, message]);
-
-    ws.onopen = () => log('[WebSocket] 서버 연결 완료');
-    ws.onmessage = event => {
+    // 테스트 데이터와 실제 서버 데이터를 똑같이 처리합니다.
+    const receiveMessage = message => {
       try {
-        const data = JSON.parse(event.data);
+        const data = JSON.parse(message);
+
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
           throw new Error('JSON 객체가 필요합니다.');
         }
-        if (['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
+
+        if (
+          ['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(
+            data.door_state
+          )
+        ) {
           setDoorState(data.door_state);
         }
+
         if (Array.isArray(data.passengers)) {
-          // 좌표가 없거나 숫자가 아닌 항목은 도면에 표시하지 않습니다.
-          setPassengers(data.passengers.filter(p =>
-            p && (typeof p.id === 'number' || typeof p.id === 'string') &&
-            Number.isFinite(p.x) && Number.isFinite(p.y)
-          ));
+          setPassengers(
+            data.passengers.filter(p =>
+              p &&
+              (typeof p.id === 'number' || typeof p.id === 'string') &&
+              Number.isFinite(p.x) &&
+              Number.isFinite(p.y)
+            )
+          );
         }
+
         if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
           setDoorCommand(data.door_command);
         }
       } catch (error) {
-        console.error('WebSocket 수신 데이터 처리 오류:', error);
-        log('[WebSocket] 수신 데이터 형식 오류');
+        console.error('수신 데이터 처리 오류:', error);
+        log('[데이터] 수신 데이터 형식 오류');
       }
     };
+
+    // 서버가 없을 때: 시험용 JSON을 직접 넣습니다.
+    if (!USE_REAL_WEBSOCKET) {
+      const sampleData = {
+        door_state: 'OPEN',
+        door_command: 'OPEN',
+        passengers: [
+          {
+            id: 1,
+            x: 0.25,
+            y: 1.0,
+            state: 'INSIDE',
+            safety_state: null,
+            label: 'Passenger #1'
+          },
+          {
+            id: 2,
+            x: 0.0,
+            y: 0.0,
+            state: 'ENTERING',
+            safety_state: 'FALL',
+            label: 'Passenger #2'
+          }
+        ]
+      };
+
+      receiveMessage(JSON.stringify(sampleData));
+      log('[테스트] 샘플 JSON을 화면에 적용했습니다.');
+      return;
+    }
+
+    // 서버가 준비됐을 때: 실제로 받은 JSON을 넣습니다.
+    const ws = new WebSocket(RADAR_WS_URL);
+    wsRef.current = ws;
+
+    ws.onopen = () => log('[WebSocket] 서버 연결 완료');
+
+    ws.onmessage = event => {
+      receiveMessage(event.data);
+    };
+
     ws.onerror = () => log('[WebSocket] 연결 오류 발생');
     ws.onclose = () => log('[WebSocket] 연결 종료');
 
     return () => {
-      // React 개발 모드 재실행 및 화면 종료 시 기존 연결을 정리합니다.
-      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
-      if (wsRef.current === ws) wsRef.current = null;
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
+
       ws.close();
     };
   }, []);
+
+
 
   // 테스트 도중 화면이 닫히면 남아 있는 타이머도 정리합니다.
   useEffect(() => () => clearTimeout(doorTimerRef.current), []);
