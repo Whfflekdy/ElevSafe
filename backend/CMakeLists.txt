@@ -78,3 +78,11 @@ add_test(NAME signal_integration_test COMMAND signal_integration_test
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg
     ${CMAKE_CURRENT_SOURCE_DIR}/../signal_processing/data/sample/tiny.csv
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/invalid_signal.cfg)
+
+add_executable(signal_replay_compare tests/signal_replay_compare.cpp)
+target_link_libraries(signal_replay_compare PRIVATE elevsafe_signal_adapter)
+add_test(NAME signal_replay_compare_self_test COMMAND signal_replay_compare --self-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
+add_test(NAME signal_tcp_compare_self_test COMMAND signal_replay_compare --tcp-self-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
+set_tests_properties(signal_tcp_compare_self_test PROPERTIES TIMEOUT 30)

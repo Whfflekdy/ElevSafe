@@ -202,7 +202,7 @@ cmake --build backend/build --config Release
 ctest --test-dir backend/build -C Release --output-on-failure
 ```
 
-현재 CMake에 등록된 테스트는 다음 6개입니다.
+현재 CMake에 등록된 테스트는 다음 8개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
 - `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
@@ -211,12 +211,111 @@ ctest --test-dir backend/build -C Release --output-on-failure
 - `signal_adapter_test`: 데이터/순서/기본값 보존, 빈 frame, 정수 경계 및 범위 초과
 - `signal_integration_test`: 설정/초기화, 기존 enqueue/drain에서 B 호출, 빈 frame,
   오류 후 다음 frame 처리, B sample CSV 직접 입력과 Adapter 경로 결과 비교
+- `signal_replay_compare_self_test`: 검증용 역변환, 정수 범위/비정상 입력 거부,
+  누락·중복·순서 및 상세 필드 불일치 검출, 빈 frame의 enqueue/drain 검증
+- `signal_tcp_compare_self_test`: 무작위 꼬리 구간 제외, 논리 프레임 동기화,
+  누락·중복·순서·point bit 변경·지문 모호성·EOF·deadline 및 완료 후 동결 검증
 
 테스트용 설정은 외부 배경 맵을 사용하지 않습니다. 실제 센서 설치 설정과 구분하세요.
 
+### 오프라인 Adapter 비교
+
+`signal_replay_compare`는 같은 `readFramesCSV()` 입력을 B 직접 경로와
+`RadarFrame -> BackendPipeline -> toSignalFrame() -> B` 경로로 처리합니다.
+독립적인 B 객체 두 개를 유지하고, capacity 1에서 매 frame 즉시 drain하여 이력과 순서를 보존합니다.
+설정, 기존 Adapter 및 B 알고리즘은 변경하지 않습니다. TCP/Emulator 검증은 아닙니다.
+
+```powershell
+$base = '.\backend\build\s0-3-b-baseline-20261031_014816' # 확보한 검증 자료 폴더
+$inputCsv = "$base\S0-3_t01.csv"
+$baselineCsv = "$base\b_frames.csv"
+$outputDir = '.\backend\build\s0-3-compare' # 새 디렉터리 또는 빈 디렉터리
+.\backend\build\Release\signal_replay_compare.exe `
+  signal_processing/config/elevator_1st.cfg `
+  $inputCsv $baselineCsv $outputDir --s0-3
+```
+
+입력은 PCR 변환기의 raw 8컬럼 `frame,timestamp_us,x,y,z,doppler,power,target_id` 형식입니다.
+정수 µs와 유한한 float32 값만 허용하며, 반복 frame 구간·순서 역행·frame 내부 시간 불일치는
+B Reader의 정렬/병합 전에 거부합니다. 빈 frame은 메모리 경로에서 허용하지만 point 단위 CSV로
+복원할 수 없으므로 가짜 point를 추가하지 않습니다. B 처리 후 CSV는 입력으로 사용하지 않습니다.
+
+두 경로 모두 배경 제거 비활성인 비교만 지원합니다. `--s0-3`은 close threshold 0.5와
+1,673 frame / 381,730 point / 333 cluster / 전환 7 / OPEN 1,175 / CLOSED 489 / UNKNOWN 9를
+추가 검증합니다. 옵션을 생략하면 다른 raw CSV와 해당 기준 결과에도 사용할 수 있습니다.
+이 수치는 로컬 B 단독 재현 기준이며 B 팀원의 프레임별 원본 결과와 직접 대조한 것은 아닙니다.
+
+새 디렉터리 또는 빈 디렉터리만 출력 대상으로 허용합니다. `backend/build/` 아래 새 경로를
+사용하면 Git에서 제외되며 기존 기준 파일을 덮어쓰지 않습니다. 생성 파일은
+`direct_frames.csv`, `adapter_frames.csv`, `frame_diff.csv`, `comparison_summary.json`입니다.
+프레임 CSV는 `frame_id,num_clusters,door_state`이며 timestamp 보존도 내부에서 비교합니다.
+입력 값과 cluster 상세 float는 동일 코드의 직접 복사를 검증하므로 허용 오차 없이 float32 비트로
+비교합니다. 누락·중복·순서·기준 결과 차이를 검출하면 최초 차이를 출력하고 종료 코드 1을 반환합니다.
+입력/초기화 오류는 stderr와 종료 코드 1로 보고하며 완료 결과 JSON을 생성하지 않을 수 있습니다.
+
+### Radar Emulator TCP 비교 모드
+
+기존 Radar Emulator는 최초 활성화 위치가 무작위이고 PCR 원본 frame ID를 stream 번호로
+바꿉니다. `Restart from beginning`은 끝에 도달한 뒤의 반복 시작점만 0으로 바꾸며 단발 재생은
+제공하지 않습니다. 아래 모드는 전체 point의 순서·float32/int32 비트로 논리 프레임을 찾습니다.
+FNV-1a 지문은 후보 검색에만 사용하고 전체 값을 다시 대조합니다. 기준 지문 중복/충돌은
+시작 전에 거부하며, 다른 데이터로 조용히 재동기화하지 않습니다.
+
+Emulator에서 S0-3 파일을 Default record로 선택하고 Loop mode를 `Restart from beginning`으로
+설정하세요. Launchpad/키보드로 파일을 전환하거나 창을 최소화하지 마세요. 서버가 HTTP 8000과
+TCP 29172를 정상 개방한 다음, ElevSafe 루트에서 새 출력 디렉터리를 지정합니다.
+
+```powershell
+$base = '.\backend\build\s0-3-b-baseline-20261031_014816'
+$out = ".\backend\build\s0-3-emulator-e2e-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+.\backend\build\Release\signal_replay_compare.exe --tcp 127.0.0.1 29172 `
+  --config signal_processing/config/elevator_1st.cfg `
+  --input "$base\S0-3_t01.csv" --baseline "$base\b_frames.csv" `
+  --output $out --sync-timeout 120 --total-timeout 240 --s0-3
+$LASTEXITCODE
+Get-Content "$out\tcp_comparison_summary.json"
+```
+
+입력 CSV와 기준 결과는 Git에 포함되지 않습니다. 기존 검증 자료를 확보한 뒤 `$base`를
+해당 폴더로 지정하세요. 출력은 실행마다 새 경로를 사용하고 기존 결과는 보존합니다.
+
+timeout은 1~86400초이며 기본값은 동기화 120초, 전체 240초입니다. 두 제한 모두 TCP 연결
+시작부터 계산합니다. 제한을 보장하기 위해 숫자 IPv4/IPv6 주소만 허용하며 DNS 조회는 하지 않습니다.
+일반 Backend의 `RetinaClient::run(log)`는 기존 blocking 동작을 유지합니다. 검증 도구만 deadline
+오버로드에서 같은 수신 thread의 non-blocking socket/select를 사용하며 별도 watchdog thread는 없습니다.
+
+초기 꼬리 구간은 B에 넣지 않습니다. 원본 index 0 확인 시 새 B 객체를 생성하고 이후 한 순환을
+연속 비교합니다. 수신 RadarFrame을 기존 BackendPipeline/Adapter로 전달하고 stream ID와 host
+timestamp가 B까지 보존되는지 검사합니다. 원본 ID/PCR 시간은 매핑용이며 수신 값을 덮어쓰지 않습니다.
+클러스터/문 상태 비교에서만 논리 ID로 대응합니다. PCR 시간과 host 시간의 동일성을 요구하지 않습니다.
+
+마지막 논리 프레임까지 비교하면 동일 thread callback에서 `stop()`을 호출합니다. join/detach는 없고,
+같은 feed의 추가 callback은 완료 결과를 변경하지 않습니다. `received_tcp_frames`는 완료 전 callback
+수이며 Parser 통계는 제외 구간과 같은 feed의 추가 packet까지 포함한 연결 전체 통계입니다.
+부분 수신·EOF·동기화/전체 timeout·데이터/B 결과 차이·소켓 오류는 실패 종료 코드 1로 기록합니다.
+Parser 거부 packet이 있는 실행도 PASS로 처리하지 않습니다. 연결 재시도는 하지 않습니다.
+`complete`는 한 순환 비교 완료, `passed`는 Parser 거부 여부까지 포함한 최종 판정입니다.
+`processed_frames`에는 비교 중 실패한 frame도 포함될 수 있고 `verified_frames`는 일치한 frame 수입니다.
+차이 개수는 처음 실패하기까지 발견한 차이 기록 수이며 실패 후 나머지 데이터를 계속 비교하지 않습니다.
+
+출력은 `tcp_frame_mapping.csv`, `tcp_frames.csv`, `tcp_frame_diff.csv`, `tcp_point_diff.csv`,
+`tcp_comparison_summary.json`, `tcp_stdout.log`, `tcp_stderr.log`입니다. 매핑에는 논리 index,
+원본/stream ID, PCR/host 시간, point 수와 일치 여부를 남깁니다. 초기화 실패 시에는 오류 요약과
+stderr만 남을 수 있습니다. 숫자 오류 코드 10014는 환경 진단 대상으로 별도 확인하세요.
+Emulator가 Listen에 실패한 원인은 클라이언트 연결 실패만으로 확정할 수 없으므로 GUI 로그도 확보해야 합니다.
+
+자가 테스트는 매핑 로직과 실제 Parser의 one-byte/multiple packet 입력에서 BackendPipeline/B까지
+검증합니다. 이미 만료된 deadline의 RetinaClient 경로도 검사하지만 실제 TCP/Emulator 성공을 뜻하지는
+않습니다. 장비/GUI 실행 결과는 별도 확인해야 하며, 기존 오프라인 비교 성공을 E2E 성공으로 간주하지 않습니다.
+
+추가 로컬 소켓 fixture에서 기존 RetinaClient 경로의 정상 완료·추가 packet 무시·조기 EOF·truncated
+packet·동기화/전체 timeout을 확인했습니다. 별도 연결 실패 시험에서는 Winsock 10014도 관찰되었습니다.
+이는 작은 테스트 입력에 대한 검증이며 S0-3 전체 Radar Emulator E2E 성공을 뜻하지 않습니다.
+별도로 완료한 S0-3 전체 Emulator TCP E2E 결과는 아래 검증 상태에 기록합니다.
+
 ## 검증 상태
 
-Radar Emulator에 대해서는 다음을 확인했습니다.
+기존 A 수신·파싱 범위에서 Radar Emulator에 대해 다음을 확인했습니다.
 
 - TCP `29172` 연결 성공
 - Emulator Clients `0 -> 1` 확인
@@ -225,13 +324,61 @@ Radar Emulator에 대해서는 다음을 확인했습니다.
 - `x/y/z/doppler/power/targetId` 정상 파싱 확인
 
 실제 RETINA-4SN에 대해서는 AP Mode 및 TCP `29172` 연결 후
-frame 연속 수신과 parsing을 확인했습니다.
+frame 연속 수신과 parsing을 확인했습니다. 이는 B까지 포함한 물리 센서 E2E 검증은 아닙니다.
 
-A-B 연결은 Release CTest `6/6`과 오프라인 비교로 검증했습니다. 기존 `front_man.pcr`을
+### 오프라인 B 및 A-B Adapter 비교
+
+기존 `front_man.pcr`을
 별도 CSV로 변환한 164 frame / 106,024 point에서 B 직접 입력과 Adapter 경로의
 메타데이터·문 상태·cluster 결과가 일치했습니다. 이 비교는 외부 배경 맵 없는 테스트
-설정을 사용했습니다. 위의 기존 센서 수신 검증과 달리, 이번 A-B 연결에 대한
-Emulator TCP E2E 및 실제 센서 검증은 아직 수행하지 않았습니다.
+설정을 사용했습니다.
+
+S0-3 로컬 PCR 변환 CSV(1,673 frame / 381,730 point)를 기존 `elevator_1st.cfg`와
+배경 제거 비활성 조건에서 처리했습니다. B 단독 실행기로 아래 집계값을 재현한 뒤,
+동일 입력의 B 직접 경로와 BackendPipeline/Adapter 경로를 비교했습니다.
+두 경로는 기존 로컬 B 기준 CSV의 모든 frame 결과와 일치했고, cluster 333개의 상세 필드도
+float32 비트 단위로 일치했습니다.
+OPEN 1,175 / CLOSED 489 / UNKNOWN 9 / 전환 7회이며 누락·중복·순서 및 timestamp 차이는
+없었습니다. 이 단계는 TCP 수신을 포함하지 않는 오프라인 비교입니다.
+
+### S0-3 전체 Radar Emulator TCP E2E PASS
+
+2026-10-31 Windows PowerShell에서 실제 Radar Emulator로 실행한 결과를 확인했습니다.
+검증 입력은 Session 1개의 `S0-3_t01.csv`(1,673 frame / 381,730 point)이며,
+기존 `signal_processing/config/elevator_1st.cfg`, `door_state.close_threshold = 0.5`, 배경 맵 비활성 조건을 사용했습니다.
+
+```text
+Radar Emulator -> TCP 29172 -> RetinaClient -> RetinaStreamParser -> RadarFrame
+  -> BackendPipeline::onFrame() -> FrameBuffer -> BackendPipeline::drain()
+  -> SignalAdapter (toSignalFrame) -> SignalPipeline
+```
+
+Emulator가 원본 frame ID를 stream ID로 바꾸므로 전체 point 데이터로 논리 프레임을
+대응시켰습니다. 수신 2,143 frame 중 처음 470 frame은 동기화 이전 구간으로 제외했고,
+원본 index 0~1672의 완전한 한 순환 1,673 frame을 검증했습니다.
+해당 구간의 TCP stream ID는 1517~3189이며 원본 ID와 같은 값으로 취급하지 않습니다.
+
+| 항목 | 결과 |
+| --- | ---: |
+| 검증/처리 frame | 1,673 / 1,673 |
+| 검증 point | 381,730 |
+| cluster 합계 / 상세 비교 | 333 / 333 |
+| OPEN / CLOSED / UNKNOWN | 1,175 / 489 / 9 |
+| 문 상태 전환 | 7 |
+| point / frame / cluster / 문 상태 불일치 | 모두 0 |
+| Parser 처리 / 거부 packet | 2,143 / 0 |
+| Parser 잔여 byte | 0 |
+
+종료 코드 0, `complete=true`, `passed=true`, `termination_reason=complete`, `error_code=0`으로
+정상 완료했습니다. 프레임 매핑과 결과 CSV도 기존 로컬 B 기준 결과와 대조했습니다.
+검증 기록은 로컬 `backend/build/s0-3-emulator-e2e-20261031_131708/`에 보존하며 Git에는 포함하지 않습니다.
+
+### 남은 제한 사항
+
+- 이번 전체 E2E는 Radar Emulator 기반이며 실제 RETINA-4SN 물리 센서의 A-B E2E 검증은 아닙니다.
+- Windows Winsock 10014의 근본 원인은 미확정입니다. 이번 1회 성공이 반복 연결 안정성을 보장하지 않습니다.
+- 기준은 로컬 B 단독 재현 결과이며 B 팀원이 생성한 프레임별 원본 결과와 직접 비교한 것은 아닙니다.
+- C/D 시스템 통합과 실제 현장 승객 상태 인식 정확성은 이번 검증 범위 밖입니다.
 
 ## 실행
 
