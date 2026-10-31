@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../signal_processing signal_processing)
+
 add_library(elevsafe_backend_core
     src/retina_protocol.cpp
     src/retina_client.cpp
@@ -26,7 +28,11 @@ add_executable(elevsafe_backend
     src/main.cpp
 )
 
-target_link_libraries(elevsafe_backend PRIVATE elevsafe_backend_core)
+add_library(elevsafe_signal_adapter src/signal_adapter.cpp)
+target_link_libraries(elevsafe_signal_adapter PUBLIC elevsafe_backend_core radar_core)
+target_compile_options(elevsafe_signal_adapter PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+
+target_link_libraries(elevsafe_backend PRIVATE elevsafe_signal_adapter)
 
 enable_testing()
 
@@ -61,3 +67,22 @@ add_executable(relative_frame_clock_test
 target_link_libraries(relative_frame_clock_test PRIVATE elevsafe_backend_core)
 
 add_test(NAME relative_frame_clock_test COMMAND relative_frame_clock_test)
+
+add_executable(signal_adapter_test tests/signal_adapter_test.cpp)
+target_link_libraries(signal_adapter_test PRIVATE elevsafe_signal_adapter)
+add_test(NAME signal_adapter_test COMMAND signal_adapter_test)
+
+add_executable(signal_integration_test tests/signal_integration_test.cpp)
+target_link_libraries(signal_integration_test PRIVATE elevsafe_signal_adapter)
+add_test(NAME signal_integration_test COMMAND signal_integration_test
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg
+    ${CMAKE_CURRENT_SOURCE_DIR}/../signal_processing/data/sample/tiny.csv
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/invalid_signal.cfg)
+
+add_executable(signal_replay_compare tests/signal_replay_compare.cpp)
+target_link_libraries(signal_replay_compare PRIVATE elevsafe_signal_adapter)
+add_test(NAME signal_replay_compare_self_test COMMAND signal_replay_compare --self-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
+add_test(NAME signal_tcp_compare_self_test COMMAND signal_replay_compare --tcp-self-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
+set_tests_properties(signal_tcp_compare_self_test PROPERTIES TIMEOUT 30)
