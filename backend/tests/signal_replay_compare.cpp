@@ -37,6 +37,23 @@ namespace
         if (!condition) throw std::runtime_error(message);
     }
 
+    void requireBackground(bool actual, bool required, const std::string& where)
+    {
+        require(actual==required, where+": expected background "+(required?"ON":"OFF")
+            +" but usesBackground()="+(actual?"true":"false")
+            +(required?" (map missing/unreadable or OFF fallback)":""));
+    }
+
+    void writeBackground(std::ostream& out, std::optional<bool> enabled, const sp::PipelineStats& stats)
+    {
+        out<<"{\"enabled\":"<<(enabled?(*enabled?"true":"false"):"null")
+            <<",\"input_points\":"<<stats.bg.input<<",\"removed_points\":"<<stats.bg.removed
+            <<",\"removal_rate_percent\":";
+        if(stats.bg.input) out<<100.0*static_cast<double>(stats.bg.removed)/stats.bg.input;
+        else out<<"null";
+        out<<",\"processed_frames\":"<<stats.frames<<'}';
+    }
+
     std::string trim(const std::string& text)
     {
         const auto first = text.find_first_not_of(" \t\r\n");
@@ -302,8 +319,10 @@ namespace
     }
 
     int compare(const std::string& cfgPath, const std::string& inputPath, const std::string& baselinePath,
-        const fs::path& directory, bool s03)
+        const fs::path& directory, bool s03, bool backgroundRequired=false)
     {
+        require(backgroundRequired ? baselinePath.empty() : !baselinePath.empty(),
+            "ON mode generates its own reference; omit external baseline with --require-background");
         require(!fs::exists(directory) || (fs::is_directory(directory) && fs::is_empty(directory)),
             "Output directory must be new or empty; baseline files will not be overwritten");
         fs::create_directories(directory);
@@ -311,11 +330,16 @@ namespace
         sp::SignalPipeline direct(cfg), adapter(cfg);
         require(direct.ok() && adapter.ok(),"SignalPipeline initialization failed");
         require(direct.usesBackground()==adapter.usesBackground(),"Background activation differs");
-        require(!direct.usesBackground(),"This comparison requires background disabled");
+        requireBackground(direct.usesBackground(),backgroundRequired,"B direct");
+        requireBackground(adapter.usesBackground(),backgroundRequired,"Adapter");
         if(s03) require(cfg.getFloat("door_state.close_threshold",1.0f)==0.5f,"S0-3 requires close_threshold=0.5");
         const auto frames=readInput(inputPath);
-        std::ifstream baseline(baselinePath); require(baseline.is_open(),"Cannot open baseline");
-        const auto reference=readBaseline(baseline);
+        std::vector<Record> reference;
+        if(!backgroundRequired)
+        {
+            std::ifstream baseline(baselinePath); require(baseline.is_open(),"Cannot open baseline");
+            reference=readBaseline(baseline);
+        }
         std::vector<Record> expected, actual; Diffs diffs;
         std::size_t points=0, detailed=0;
         elevsafe::BackendPipeline backend(1); // Enqueue -> immediate drain, as in main.cpp.
@@ -342,7 +366,7 @@ namespace
             points+=source.points.size();
         }
         compareRecords(expected,actual,"direct-adapter",diffs);
-        compareRecords(reference,expected,"baseline-direct",diffs);
+        if(!backgroundRequired) compareRecords(reference,expected,"baseline-direct",diffs);
         const auto left=totals(expected), right=totals(actual);
         const bool official=!s03 || (left.frames==1673 && points==381730 && left.clusters==333
             && left.transitions==7 && left.open==1175 && left.closed==489 && left.unknown==9);
@@ -363,9 +387,17 @@ namespace
             if(d.field.starts_with("cluster[")) ++detailedDifferences;
         }
         summary<<"{\n  \"passed\":"<<(diffs.empty()?"true":"false")<<",\n  \"input_points\":"<<points
-            <<",\n  \"background_direct\":false,\n  \"background_adapter\":false,\n  \"direct\":";
+            <<",\n  \"background_required\":"<<(backgroundRequired?"true":"false")
+            <<",\n  \"background_direct\":"<<(direct.usesBackground()?"true":"false")
+            <<",\n  \"background_adapter\":"<<(adapter.usesBackground()?"true":"false")
+            <<",\n  \"background_stats_direct\":";
+        writeBackground(summary,direct.usesBackground(),direct.stats());
+        summary<<",\n  \"background_stats_adapter\":";
+        writeBackground(summary,adapter.usesBackground(),adapter.stats());
+        summary<<",\n  \"baseline_source\":\""<<(backgroundRequired?"generated_background_on":"external_csv")
+            <<"\",\n  \"external_baseline_compared\":"<<(backgroundRequired?"false":"true")<<",\n  \"direct\":";
         writeTotals(summary,left); summary<<",\n  \"adapter\":"; writeTotals(summary,right);
-        summary<<",\n  \"baseline_frames\":"<<reference.size()<<",\n  \"difference_count\":"<<diffs.size()
+        summary<<",\n  \"baseline_frames\":"<<(backgroundRequired?expected.size():reference.size())<<",\n  \"difference_count\":"<<diffs.size()
             <<",\n  \"mismatched_frame_count\":"<<mismatchedFrames.size()
             <<",\n  \"baseline_difference_count\":"<<baselineDifferences
             <<",\n  \"cluster_detail_difference_count\":"<<detailedDifferences
@@ -373,7 +405,8 @@ namespace
             <<",\n  \"float_comparison\":\"bit-exact float32\",\n  \"official_s03_checked\":"<<(s03?"true":"false")<<"\n}\n";
         summary.close();
         std::cout<<"direct="; writeTotals(std::cout,left); std::cout<<"\nadapter="; writeTotals(std::cout,right);
-        std::cout<<"\npoints="<<points<<" detailedClusters="<<detailed<<" differences="<<diffs.size()<<" background=disabled\n";
+        std::cout<<"\npoints="<<points<<" detailedClusters="<<detailed<<" differences="<<diffs.size()
+            <<" background="<<(direct.usesBackground()?"enabled":"disabled")<<'\n';
         if(!diffs.empty())
         {
             const auto& d=diffs.front();
@@ -455,6 +488,10 @@ namespace
         std::optional<std::uint64_t> previousTime;
         bool synchronized=false;
         std::vector<Record> results;
+        bool backgroundRequired=false;
+        std::optional<bool> referenceBackground, liveBackground;
+        sp::PipelineStats referenceStats;
+        std::vector<Record> referenceRecords;
 
         void fail(const std::string& why, std::size_t index)
         {
@@ -474,12 +511,24 @@ namespace
         TcpComparison(const std::vector<sp::FrameData>& frames, const sp::Config& cfg,
             const std::vector<Record>& baseline, std::chrono::seconds syncSeconds,
             std::chrono::seconds totalSeconds, bool official,
-            std::function<std::uint64_t(const elevsafe::RadarFrame&)> hash=pointFingerprint) :
-            source(frames), config(cfg), fingerprint(std::move(hash)), syncLimit(syncSeconds), totalLimit(totalSeconds)
+            std::function<std::uint64_t(const elevsafe::RadarFrame&)> hash=pointFingerprint,
+            bool requireBackgroundOn=false) :
+            source(frames), config(cfg), fingerprint(std::move(hash)), syncLimit(syncSeconds), totalLimit(totalSeconds),
+            backgroundRequired(requireBackgroundOn)
         {
             require(!source.empty(),"TCP reference is empty");
+            require(backgroundRequired ? baseline.empty() : !baseline.empty(),
+                "ON TCP mode generates its own reference; external OFF baselines are not accepted");
             sp::SignalPipeline direct(config);
-            require(direct.ok() && !direct.usesBackground(),"TCP reference requires valid config and background disabled");
+            require(direct.ok(),"TCP reference requires valid config");
+            referenceBackground=direct.usesBackground();
+            if(*referenceBackground!=backgroundRequired)
+            {
+                std::cerr<<"TCP reference: expected background "<<(backgroundRequired?"ON":"OFF")
+                    <<" but usesBackground()="<<(*referenceBackground?"true":"false")
+                    <<" (check background.map_path and load warnings)\n";
+                fail("background_requirement_not_met",0); return;
+            }
             std::vector<Record> records;
             std::size_t points=0;
             for(std::size_t i=0;i<source.size();++i)
@@ -492,7 +541,8 @@ namespace
                     "Offline B metadata changed");
                 records.push_back(record(expected.back())); points+=source[i].points.size();
             }
-            compareRecords(baseline,records,"baseline-direct",frameDiffs);
+            referenceStats=direct.stats(); referenceRecords=records;
+            if(!backgroundRequired) compareRecords(baseline,records,"baseline-direct",frameDiffs);
             if(!frameDiffs.empty()) fail("offline_baseline_mismatch",0);
             if(official)
             {
@@ -542,7 +592,10 @@ namespace
             if(!synchronized)
             {
                 live=std::make_unique<sp::SignalPipeline>(config);
-                require(live->ok() && !live->usesBackground(),"TCP B initialization/background differs at synchronization");
+                require(live->ok(),"TCP B initialization failed at synchronization");
+                liveBackground=live->usesBackground();
+                requireBackground(*liveBackground,backgroundRequired,"TCP live");
+                require(liveBackground==referenceBackground,"TCP direct/live background activation differs");
                 synchronized=true; reason="validating";
             }
             mapping.push_back({index,source[index].frame_id,frame.frameCount,source[index].timestamp_us,frame.timestampUs,frame.points.size(),true});
@@ -620,6 +673,7 @@ namespace
 
         void save(const fs::path& directory, const elevsafe::RetinaClient::RunDiagnostics& diagnostic) const
         {
+            writeRecords(directory/"tcp_reference_frames.csv",referenceRecords);
             auto mapFile=output(directory/"tcp_frame_mapping.csv");
             mapFile<<"logical_index,original_frame_id,tcp_frame_id,offline_timestamp_us,host_timestamp_us,point_count,points_match\n";
             for(const auto& m : mapping) mapFile<<m.index<<','<<m.originalId<<','<<m.tcpId<<','<<m.offlineTime<<','<<m.hostTime<<','<<m.points<<','<<(m.matched?1:0)<<'\n';
@@ -651,7 +705,17 @@ namespace
                 <<",\n\"point_difference_count\":"<<pointDiffs.size()<<",\n\"frame_difference_count\":"<<frameDiffs.size()
                 <<",\n\"cluster_difference_count\":"<<clusterDiff<<",\n\"door_state_difference_count\":"<<doorDiff
                 <<",\n\"detailed_clusters_compared\":"<<detailedClusters<<",\n\"first_failure_logical_index\":"<<(firstFailure?show(*firstFailure):"null")
-                <<",\n\"background_enabled\":false,\n\"parser_packets_parsed\":"<<diagnostic.parser.packetsParsed
+                <<",\n\"background_enabled\":"<<(referenceBackground?(*referenceBackground?"true":"false"):"null")
+                <<",\n\"background_required\":"<<(backgroundRequired?"true":"false")
+                <<",\n\"background_direct\":"<<(referenceBackground?(*referenceBackground?"true":"false"):"null")
+                <<",\n\"background_live\":"<<(liveBackground?(*liveBackground?"true":"false"):"null")
+                <<",\n\"baseline_source\":\""<<(backgroundRequired?"generated_background_on":"external_csv")
+                <<"\",\n\"external_baseline_compared\":"<<(backgroundRequired?"false":"true")
+                <<",\n\"background_stats_direct\":";
+            writeBackground(summary,referenceBackground,referenceStats);
+            summary<<",\n\"background_stats_live\":";
+            writeBackground(summary,liveBackground,live?live->stats():sp::PipelineStats{});
+            summary<<",\n\"parser_packets_parsed\":"<<diagnostic.parser.packetsParsed
                 <<",\n\"parser_packets_rejected\":"<<diagnostic.parser.packetsRejected<<",\n\"parser_buffered_bytes\":"<<diagnostic.bufferedBytes
                 <<",\n\"totals\":"; writeTotals(summary,totals(results)); summary<<"\n}\n"; summary.close();
         }
@@ -684,17 +748,21 @@ namespace
         const std::string host=argv[2];
         const auto port=integer<unsigned>(argv[3]); require(port>0 && port<=65535,"Invalid TCP port");
         std::map<std::string,std::string> options;
-        bool official=false;
+        bool official=false, backgroundRequired=false;
         for(int i=4;i<argc;++i)
         {
             const std::string key=argv[i];
             if(key=="--s0-3") { require(!official,"Duplicate --s0-3"); official=true; continue; }
+            if(key=="--require-background")
+            { require(!backgroundRequired,"Duplicate --require-background"); backgroundRequired=true; continue; }
             require(key=="--config" || key=="--input" || key=="--baseline" || key=="--output"
                 || key=="--sync-timeout" || key=="--total-timeout","Unknown TCP option: "+key);
             require(i+1<argc && !std::string(argv[i+1]).starts_with("--"),"Missing value for "+key);
             require(options.emplace(key,argv[++i]).second,"Duplicate TCP option: "+key);
         }
-        for(const auto* key : {"--config","--input","--baseline","--output"}) require(options.contains(key) && !options[key].empty(),"Missing option: "+std::string(key));
+        for(const auto* key : {"--config","--input","--output"}) require(options.contains(key) && !options[key].empty(),"Missing option: "+std::string(key));
+        require(backgroundRequired ? !options.contains("--baseline") : options.contains("--baseline") && !options.at("--baseline").empty(),
+            "OFF TCP mode requires --baseline; ON mode generates a new reference and forbids --baseline");
         const auto seconds=[&](const char* key,unsigned fallback)
         {
             const auto value=options.contains(key)?integer<unsigned>(options.at(key)):fallback;
@@ -711,9 +779,13 @@ namespace
         {
         sp::Config config; require(config.load(options.at("--config")),"TCP config load failed");
         const auto frames=readInput(options.at("--input"));
-        std::ifstream baselineFile(options.at("--baseline")); require(baselineFile.is_open(),"Cannot open TCP baseline");
-        const auto baseline=readBaseline(baselineFile);
-        TcpComparison comparison(frames,config,baseline,sync,total,official);
+        std::vector<Record> baseline;
+        if(!backgroundRequired)
+        {
+            std::ifstream baselineFile(options.at("--baseline")); require(baselineFile.is_open(),"Cannot open TCP baseline");
+            baseline=readBaseline(baselineFile);
+        }
+        TcpComparison comparison(frames,config,baseline,sync,total,official,pointFingerprint,backgroundRequired);
         elevsafe::RetinaClient client(host,static_cast<std::uint16_t>(port));
         elevsafe::RetinaClient::RunDiagnostics diagnostic;
         comparison.start(Clock::now());
@@ -754,7 +826,9 @@ namespace
             std::cerr<<"Initialization/output error: "<<error.what()<<'\n';
             auto summary=output(directory/"tcp_comparison_summary.json");
             summary<<"{\"complete\":false,\"passed\":false,\"termination_reason\":\"initialization_or_output_error\",\"error_code\":0,"
-                <<"\"received_tcp_frames\":0,\"excluded_before_sync\":0,\"verified_frames\":0,\"verified_points\":0,\"first_failure_logical_index\":null}\n";
+                <<"\"received_tcp_frames\":0,\"excluded_before_sync\":0,\"verified_frames\":0,\"verified_points\":0,\"first_failure_logical_index\":null,"
+                <<"\"background_required\":"<<(backgroundRequired?"true":"false")
+                <<",\"background_enabled\":null,\"background_direct\":null,\"background_live\":null}\n";
             summary.close();
             return 1;
         }
@@ -767,11 +841,13 @@ namespace
         require(rejected,"Self-test expected rejection");
     }
 
-    void tcpSelfTest(const char* cfgPath)
+    void tcpSelfTest(const char* cfgPath, bool backgroundRequired=false, const std::optional<fs::path>& directory=std::nullopt)
     {
         sp::Config cfg; require(cfg.load(cfgPath),"TCP self-test config failed");
         std::vector<sp::FrameData> frames(3);
         sp::SignalPipeline direct(cfg);
+        require(direct.ok(),"TCP self-test config invalid");
+        requireBackground(direct.usesBackground(),backgroundRequired,"TCP self-test");
         std::vector<Record> baseline;
         for(std::size_t i=0;i<frames.size();++i)
         {
@@ -779,8 +855,9 @@ namespace
             for(int j=0;j<12;++j) f.points.push_back({static_cast<float>(i)*0.4f+static_cast<float>(j)*0.01f,0.6f,1.0f,-0.5f,100.0f,255});
             baseline.push_back(record(direct.process(f,{})));
         }
+        const auto external=backgroundRequired?std::vector<Record>{}:baseline;
         const auto origin=Clock::now();
-        const auto make=[&]{return std::make_unique<TcpComparison>(frames,cfg,baseline,std::chrono::seconds(5),std::chrono::seconds(10),false);};
+        const auto make=[&]{return std::make_unique<TcpComparison>(frames,cfg,external,std::chrono::seconds(5),std::chrono::seconds(10),false,pointFingerprint,backgroundRequired);};
         const auto send=[&](TcpComparison& c,std::size_t index,unsigned counter)
         { auto f=toRadarFrame(frames[index]); f.frameCount=500+counter; f.timestampUs=counter*50000ull; c.accept(f,origin+std::chrono::milliseconds(counter)); };
         auto complete=make(); complete->start(origin);
@@ -789,6 +866,17 @@ namespace
             && complete->verifiedPoints==36 && complete->frameDiffs.empty() && complete->pointDiffs.empty(),"Tail/synchronization/full cycle failed");
         send(*complete,0,5);
         require(complete->passed && complete->received==5 && complete->mapping.size()==3 && complete->completed()==3,"Completed metrics changed");
+        if(directory)
+        {
+            require(!fs::exists(*directory) || (fs::is_directory(*directory) && fs::is_empty(*directory)),"Self-test output must be new or empty");
+            fs::create_directories(*directory);
+            complete->save(*directory,{});
+            auto input=output(*directory/"self_test_input.csv");
+            input<<inputHeader<<'\n'<<std::setprecision(std::numeric_limits<float>::max_digits10);
+            for(const auto& f : frames) for(const auto& p : f.points)
+                input<<f.frame_id<<','<<f.timestamp_us<<','<<p.x<<','<<p.y<<','<<p.z<<','<<p.doppler<<','<<p.power<<','<<p.target_id<<'\n';
+            input.close();
+        }
         elevsafe::RetinaClient::RunDiagnostics rejected; rejected.parser.packetsRejected=1;
         require(!complete->success(rejected) && complete->terminationReason(rejected)=="parser_rejections","Parser rejection accepted");
         auto missing=make(); missing->start(origin); send(*missing,0,0); send(*missing,2,1);
@@ -807,15 +895,15 @@ namespace
             changed->accept(f,origin+std::chrono::milliseconds(1));
             require(changed->finished && !changed->passed && !changed->pointDiffs.empty(),"Point bit/order/count change not detected");
         }
-        rejects([&]{TcpComparison collision(frames,cfg,baseline,std::chrono::seconds(5),std::chrono::seconds(10),false,
-            [](const auto&){return std::uint64_t{1};});});
+        rejects([&]{TcpComparison collision(frames,cfg,external,std::chrono::seconds(5),std::chrono::seconds(10),false,
+            [](const auto&){return std::uint64_t{1};},backgroundRequired);});
         auto broken=std::make_shared<bool>(false);
-        TcpComparison badHash(frames,cfg,baseline,std::chrono::seconds(5),std::chrono::seconds(10),false,
-            [broken](const auto& f){return pointFingerprint(f)^(*broken?1ull:0ull);});
+        TcpComparison badHash(frames,cfg,external,std::chrono::seconds(5),std::chrono::seconds(10),false,
+            [broken](const auto& f){return pointFingerprint(f)^(*broken?1ull:0ull);},backgroundRequired);
         badHash.start(origin); *broken=true; send(badHash,0,0);
         require(badHash.finished && !badHash.passed,"Incorrect fingerprint not detected");
         auto repeated=frames; repeated[1].points=repeated[0].points;
-        rejects([&]{TcpComparison ambiguous(repeated,cfg,baseline,std::chrono::seconds(5),std::chrono::seconds(10),false);});
+        rejects([&]{TcpComparison ambiguous(repeated,cfg,external,std::chrono::seconds(5),std::chrono::seconds(10),false,pointFingerprint,backgroundRequired);});
         elevsafe::RetinaClient::RunDiagnostics eof; eof.stage="eof";
         auto partial=make(); partial->start(origin); send(*partial,0,0); partial->transportEnded(eof,origin+std::chrono::seconds(1));
         require(partial->reason=="early_eof" && partial->completed()==1 && !partial->passed,"Partial EOF accepted");
@@ -911,14 +999,44 @@ int main(int argc,char** argv)
     try
     {
         if(argc==3 && std::string(argv[1])=="--self-test") { selfTest(argv[2]); return 0; }
-        if(argc==3 && std::string(argv[1])=="--tcp-self-test") { tcpSelfTest(argv[2]); return 0; }
+        if(argc>=3 && std::string(argv[1])=="--tcp-self-test")
+        {
+            bool backgroundRequired=false; std::optional<fs::path> directory;
+            for(int i=3;i<argc;++i)
+            {
+                const std::string option=argv[i];
+                if(option=="--require-background")
+                { require(!backgroundRequired,"Duplicate --require-background"); backgroundRequired=true; }
+                else if(option=="--output")
+                {
+                    require(!directory && i+1<argc && !std::string(argv[i+1]).starts_with("--"),"Invalid --output");
+                    directory=argv[++i];
+                }
+                else require(false,"Unknown self-test option: "+option);
+            }
+            tcpSelfTest(argv[2],backgroundRequired,directory); return 0;
+        }
         if(argc>=2 && std::string(argv[1])=="--tcp") return tcpCompare(argc,argv);
-        if(argc!=5 && argc!=6) { std::cerr<<"Usage: signal_replay_compare CONFIG INPUT_CSV BASELINE_CSV NEW_OUTPUT_DIR [--s0-3]\n"
-            <<"       signal_replay_compare --tcp IP PORT --config CFG --input CSV --baseline CSV --output NEW_DIR"
-            <<" [--sync-timeout SECONDS] [--total-timeout SECONDS] [--s0-3]\n"; return 2; }
-        const bool s03=argc==6;
-        require(!s03 || std::string(argv[5])=="--s0-3","Unknown option");
-        return compare(argv[1],argv[2],argv[3],argv[4],s03);
+        bool s03=false, backgroundRequired=false; std::vector<std::string> positional;
+        for(int i=1;i<argc;++i)
+        {
+            const std::string option=argv[i];
+            if(option=="--s0-3") { require(!s03,"Duplicate --s0-3"); s03=true; }
+            else if(option=="--require-background")
+            { require(!backgroundRequired,"Duplicate --require-background"); backgroundRequired=true; }
+            else { require(!option.starts_with("--"),"Unknown option: "+option); positional.push_back(option); }
+        }
+        if(positional.size()!=(backgroundRequired?3u:4u))
+        {
+            std::cerr<<"Usage: signal_replay_compare CONFIG INPUT_CSV BASELINE_CSV NEW_OUTPUT_DIR [--s0-3]\n"
+                <<"       signal_replay_compare CONFIG INPUT_CSV NEW_OUTPUT_DIR --require-background [--s0-3]\n"
+                <<"       signal_replay_compare --tcp IP PORT --config CFG --input CSV --output NEW_DIR"
+                <<" (--baseline CSV | --require-background) [--sync-timeout SECONDS] [--total-timeout SECONDS] [--s0-3]\n"
+                <<"ON mode generates a new B-direct reference; do not supply an external OFF baseline.\n";
+            return 2;
+        }
+        return compare(positional[0],positional[1],backgroundRequired?"":positional[2],
+            positional[backgroundRequired?2:3],s03,backgroundRequired);
     }
     catch(const std::exception& error) { std::cerr<<"signal_replay_compare failed: "<<error.what()<<'\n'; return 1; }
 }
