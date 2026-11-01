@@ -26,7 +26,7 @@ function Make-Packet([uint32]$frameId) {
     } finally { $writer.Dispose(); $bytes.Dispose() }
 }
 
-foreach ($mode in @('radar', 'radar-websocket-failed')) {
+foreach ($mode in @('radar', 'radar-websocket-failed', 'radar-profile')) {
     $listener = $null; $peer = $null; $process = $null; $stage = 'fixture.open'
     $stdout = Join-Path $outputDirectory ($mode + '-stdout.log')
     $stderr = Join-Path $outputDirectory ($mode + '-stderr.log')
@@ -42,6 +42,7 @@ foreach ($mode in @('radar', 'radar-websocket-failed')) {
         $accept = $listener.BeginAccept($null, $null)
         $arguments = @('127.0.0.1', [string]$port, '--signal-config', ('"' + $SignalConfig + '"'))
         if ($mode -eq 'radar-websocket-failed') { $arguments += @('--websocket', '--ws-bind', 'invalid-ip') }
+        if ($mode -eq 'radar-profile') { $arguments += @('--ab-profile', '--ab-profile-max-frames', '2') }
         $stage = 'backend.start'
         $process = Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -56,7 +57,8 @@ foreach ($mode in @('radar', 'radar-websocket-failed')) {
         $peer = $listener.EndAccept($accept)
         $peer.SendTimeout = 1000
         $stage = 'fixture.send'
-        foreach ($frameId in @([uint32]41, [uint32]42)) {
+        $frameIds = if ($mode -eq 'radar-profile') { @(41..49) } else { @(41,42) }
+        foreach ($frameId in $frameIds) {
             $packet = Make-Packet $frameId
             $offset = 0
             while ($offset -lt $packet.Length) {
@@ -71,6 +73,21 @@ foreach ($mode in @('radar', 'radar-websocket-failed')) {
         $text = [IO.File]::ReadAllText($stdout) + "`n" + [IO.File]::ReadAllText($stderr)
         if ($text -match '\bcode=10014\b|\[system:10014\b|\(10014\)') { throw 'Winsock 10014; not retried' }
         if ($process.ExitCode -ne 0) { throw "Backend exit code $($process.ExitCode)" }
+        if ($mode -eq 'radar-profile') {
+            $profileLine = [regex]::Match($text, '(?m)^AB_PROFILE_JSON (.+)\r?$')
+            if (-not $profileLine.Success) { throw 'Missing profile JSON' }
+            $profile = ConvertFrom-Json -InputObject $profileLine.Groups[1].Value
+            if (-not $profile.clean_eof -or -not $profile.run_returned -or $profile.exit_code -ne 0 -or
+                $profile.parser_packets_parsed -ne 9 -or $profile.parser_packets_rejected -ne 0 -or
+                $profile.metrics.observed_frames -ne 9 -or $profile.metrics.observed_points -ne 18 -or
+                $profile.metrics.successful_frames -ne 9 -or $profile.metrics.failed_frames -ne 0 -or
+                $profile.metrics.warmup_excluded -ne 5 -or $profile.metrics.stored_samples -ne 2 -or
+                $profile.metrics.omitted_after_limit -ne 2 -or $profile.metrics.b_ms.samples -ne 2 -or
+                $profile.metrics.all_run_buffer_replacements -ne 0 -or $profile.metrics.all_run_id_discontinuities -ne 0 -or
+                $text -match '(?m)^frameCount=|^signal frame_id=') { throw 'Profile bounds, quiet mode or actual frame processing failed' }
+            Write-Host 'PASS mode=radar-profile frames=9 points=18 warmup=5 stored=2 omitted=2 B_success=9 EOF=true exit=0'
+            continue
+        }
         foreach ($pattern in @('SignalPipeline ready:', 'Connected to 127.0.0.1:', 'Remote endpoint closed',
             'signal frame_id=41 timestamp_us=0 inputPoints=2 clusters=1',
             'signal frame_id=42 timestamp_us=\d+ inputPoints=2 clusters=1',

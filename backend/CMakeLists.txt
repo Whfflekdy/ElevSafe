@@ -51,6 +51,10 @@ target_link_libraries(elevsafe_backend PRIVATE elevsafe_signal_adapter elevsafe_
 
 enable_testing()
 
+add_executable(ab_profile_test tests/ab_profile_test.cpp)
+target_link_libraries(ab_profile_test PRIVATE elevsafe_backend_core)
+add_test(NAME ab_profile_test COMMAND ab_profile_test)
+
 add_executable(retina_protocol_test
     tests/retina_protocol_test.cpp
 )
@@ -93,6 +97,9 @@ add_test(NAME signal_integration_test COMMAND signal_integration_test
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg
     ${CMAKE_CURRENT_SOURCE_DIR}/../signal_processing/data/sample/tiny.csv
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/invalid_signal.cfg)
+add_test(NAME ab_profile_replay_test COMMAND signal_integration_test --ab-profile
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg
+    ${CMAKE_CURRENT_SOURCE_DIR}/../signal_processing/data/sample/tiny.csv)
 
 add_executable(signal_replay_compare tests/signal_replay_compare.cpp)
 target_link_libraries(signal_replay_compare PRIVATE elevsafe_signal_adapter)
@@ -122,4 +129,5 @@ add_test(NAME websocket_server_test COMMAND websocket_server_test)
 set_tests_properties(websocket_server_test PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
 add_test(NAME websocket_cli_test COMMAND ${CMAKE_COMMAND}
     -DBACKEND_EXE=$<TARGET_FILE:elevsafe_backend> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/websocket_cli_test.cmake)
-set_tests_properties(websocket_message_test websocket_cli_test PROPERTIES TIMEOUT 30)
+set_tests_properties(websocket_message_test PROPERTIES TIMEOUT 30)
+set_tests_properties(websocket_cli_test PROPERTIES TIMEOUT 40)

@@ -1,4 +1,5 @@
 #include "elevsafe/backend_pipeline.h"
+#include "elevsafe/ab_profile.h"
 #include "elevsafe/retina_client.h"
 #include "elevsafe/signal_adapter.h"
 #include "pipeline/signal_pipeline.h"
@@ -58,6 +59,7 @@ namespace
     void printUsage()
     {
         std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N] [--signal-config PATH]\n"
+                     "       [--ab-profile [--ab-profile-max-frames N] [--ab-profile-warmup N]]\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
                      "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
@@ -129,6 +131,8 @@ int main(int argc, char** argv)
     int positionals = 0;
     bool benchmarkMode = false;
     std::optional<std::size_t> benchmarkFrameLimit;
+    bool abProfileEnabled = false, profileLimitSpecified = false, profileWarmupSpecified = false;
+    std::size_t profileLimit = 10000, profileWarmup = 5;
     bool websocketEnabled = false;
     bool mockMode = false;
     bool websocketSettings = false;
@@ -139,6 +143,26 @@ int main(int argc, char** argv)
     for (int argument = 1; argument < argc;)
     {
         const std::string_view option(argv[argument]);
+        if (option == "--ab-profile")
+        {
+            if (abProfileEnabled) { std::cerr << "Duplicate --ab-profile\n"; return 2; }
+            abProfileEnabled = true; ++argument; continue;
+        }
+        if (option == "--ab-profile-max-frames" || option == "--ab-profile-warmup")
+        {
+            const bool limit = option == "--ab-profile-max-frames";
+            if (argument + 1 >= argc || (limit ? profileLimitSpecified : profileWarmupSpecified))
+            { std::cerr << "Missing or duplicate " << option << '\n'; return 2; }
+            const std::string_view value(argv[argument + 1]);
+            std::size_t parsed = 0;
+            const auto conversion = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (conversion.ec != std::errc{} || conversion.ptr != value.data() + value.size()
+                || (limit && parsed == 0) || parsed > elevsafe::AbProfile::kMaximumSamples)
+            { std::cerr << "Invalid " << option << ": maximum 100000; sample limit must be positive\n"; return 2; }
+            if (limit) { profileLimit = parsed; profileLimitSpecified = true; }
+            else { profileWarmup = parsed; profileWarmupSpecified = true; }
+            argument += 2; continue;
+        }
         if (option == "--signal-config")
         {
             if (signalConfigPath.has_value() || argument + 1 >= argc
@@ -256,6 +280,14 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    if (((profileLimitSpecified || profileWarmupSpecified) && !abProfileEnabled)
+        || (abProfileEnabled && (mockMode || benchmarkMode || !signalConfigPath)))
+    {
+        std::cerr << "--ab-profile requires --signal-config; cannot combine with Mock or --benchmark. "
+                     "Profile settings require --ab-profile.\n";
+        return 2;
+    }
+
     std::unique_ptr<elevsafe::sp::SignalPipeline> signal;
     if (signalConfigPath.has_value())
     {
@@ -282,6 +314,15 @@ int main(int argc, char** argv)
             return 1;
         }
     }
+
+    std::unique_ptr<elevsafe::AbProfile> abProfile;
+    if (abProfileEnabled)
+    {
+        try { abProfile = std::make_unique<elevsafe::AbProfile>(profileLimit, profileWarmup); }
+        catch (const std::exception& error)
+        { std::cerr << "A-B profile initialization failed: " << error.what() << '\n'; return 1; }
+    }
+    const bool quietFrames = benchmarkMode || abProfileEnabled;
 
     std::unique_ptr<elevsafe::WebSocketServer> websocket;
     if (websocketEnabled)
@@ -333,19 +374,34 @@ int main(int argc, char** argv)
     client.setProcessingMetricsFrameLimit(benchmarkFrameLimit);
 
     bool summaryPrinted = false;
-    client.setFrameCallback([&pipeline, &client, &signal, benchmarkMode, &summaryPrinted](const elevsafe::RadarFrame& frame)
+    client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames, &summaryPrinted](const elevsafe::RadarFrame& frame)
     {
+        using Profile = elevsafe::AbProfile;
+        std::optional<Profile::FrameScope> profiled;
+        if (abProfile)
+            profiled.emplace(*abProfile, frame.frameCount, frame.points.size(), pipeline.pendingSize() >= kSynchronousFrameBufferCapacity);
+        const auto pipelineStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
         pipeline.onFrame(frame);
-        pipeline.drain([&signal, benchmarkMode](const elevsafe::RadarFrame& pendingFrame)
+        pipeline.drain([&signal, &profiled, quietFrames](const elevsafe::RadarFrame& pendingFrame)
         {
             if (signal)
             {
                 try
                 {
+                    const auto adapterStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
                     const auto input = elevsafe::toSignalFrame(pendingFrame);
+                    if (profiled) profiled->sample.adapter = Profile::Clock::now() - adapterStart;
                     const elevsafe::sp::FrameContext context;
+                    const auto bStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
                     const auto result = signal->process(input, context);
-                    if (!benchmarkMode)
+                    if (profiled)
+                    {
+                        const auto bEnd = Profile::Clock::now();
+                        profiled->sample.b = bEnd - bStart;
+                        profiled->sample.ab = bEnd - adapterStart;
+                        profiled->sample.success = true;
+                    }
+                    if (!quietFrames)
                         std::cout << "signal frame_id=" << result.frame_id
                                   << " timestamp_us=" << result.timestamp_us
                                   << " inputPoints=" << input.points.size()
@@ -366,7 +422,7 @@ int main(int argc, char** argv)
                 }
             }
 
-            if (benchmarkMode)
+            if (quietFrames)
                 return;
 
             std::cout << "frameCount=" << pendingFrame.frameCount
@@ -388,6 +444,7 @@ int main(int argc, char** argv)
 
             std::cout << '\n';
         });
+        if (profiled) profiled->sample.pipeline = Profile::Clock::now() - pipelineStart;
 
         if (benchmarkMode && !summaryPrinted && client.processingMetricsFrozen())
         {
@@ -398,9 +455,12 @@ int main(int argc, char** argv)
 
     std::cerr << "Connecting to " << host << ':' << port << "...\n";
     int result = 1;
+    elevsafe::RetinaClient::RunDiagnostics profileDiagnostics;
+    bool runReturned = false;
     try
     {
-        result = client.run(std::cerr);
+        result = abProfile ? client.run(std::cerr, {}, profileDiagnostics) : client.run(std::cerr);
+        runReturned = true;
     }
     catch (const std::exception& exception)
     {
@@ -409,6 +469,27 @@ int main(int argc, char** argv)
 
     if (benchmarkMode && !summaryPrinted)
         printProcessingSummary(client.processingSummary());
+
+    if (abProfile)
+    {
+        std::cout << "AB_PROFILE_JSON {\"mode\":\"tcp_callback\",\"background_enabled\":"
+                  << (signal->usesBackground() ? "true" : "false")
+                  << ",\"run_returned\":" << (runReturned ? "true" : "false")
+                  << ",\"clean_eof\":" << (runReturned && result == 0 && profileDiagnostics.stage == "eof" ? "true" : "false")
+                  << ",\"exit_code\":" << result << ",\"termination_stage\":\""
+                  << (runReturned ? profileDiagnostics.stage : "processing_exception")
+                  << "\",\"socket_error_code\":" << profileDiagnostics.errorCode
+                  << ",\"parser_statistics_finalized\":" << (runReturned ? "true" : "false")
+                  << ",\"parser_packets_parsed\":";
+        if (runReturned) std::cout << profileDiagnostics.parser.packetsParsed; else std::cout << "null";
+        std::cout << ",\"parser_packets_rejected\":";
+        if (runReturned) std::cout << profileDiagnostics.parser.packetsRejected; else std::cout << "null";
+        std::cout << ",\"parser_buffered_bytes\":";
+        if (runReturned) std::cout << profileDiagnostics.bufferedBytes; else std::cout << "null";
+        std::cout << ",\"metrics\":";
+        abProfile->writeJson(std::cout);
+        std::cout << "}\n";
+    }
 
     return result;
 }

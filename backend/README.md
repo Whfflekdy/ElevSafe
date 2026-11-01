@@ -267,7 +267,7 @@ ctest --test-dir backend/build-websocket-integration -C Release --output-on-fail
 아래 명령은 통합 실행 파일을 사용합니다. 기존 `backend/build/`의 입력 데이터와
 이전 검증 기록은 그대로 보존하며 새 통합 빌드와 구분합니다.
 
-현재 CMake에 등록된 테스트는 다음 12개입니다.
+현재 CMake에 등록된 테스트는 다음 14개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
 - `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
@@ -284,6 +284,8 @@ ctest --test-dir backend/build-websocket-integration -C Release --output-on-fail
   Parser·동기화 자가 테스트, 실제 활성화 상태·통계 JSON, 누락 맵 및 모드 불일치 거부
 
 - `websocket_message_test`: Mock Snapshot 및 수동 요청 JSON 검증
+- `ab_profile_test`: 빈 통계·분위수·warm-up·저장 상한·50ms 경계·ID 및 교체 카운터 검증
+- `ab_profile_replay_test`: 기존 오프라인 동등성 경로와 성능 Helper 연결 검증
 - `websocket_server_test`: loopback handshake, 경로, 다중 접속, 요청 FIFO,
   느린 client, 큐 교체, 큰 메시지, 연결 해제/재접속, pending I/O 종료
 - `websocket_cli_test`: 기존 CLI 오류, Mock 실패 시 Radar 미진입, WebSocket 시작 실패 후
@@ -897,6 +899,97 @@ average, nearest-rank p95, maximum을 milliseconds 단위로 출력합니다. fr
 `--signal-config`를 함께 지정하면 B 처리도 수행하지만 frame별 B 로그는 생략합니다.
 B 처리시간은 Parser Benchmark에 포함되지 않습니다. 다만 같은 thread의 B 처리는
 다음 recv 및 실행 scheduling에 영향을 주므로 기존 parser-only 비교에는 B 옵션을 생략하세요.
+
+### A-B 처리 성능 계측
+
+`--ab-profile`은 실제 Radar callback의 동기 enqueue/drain·Adapter·B 처리 시간을
+`steady_clock`으로 측정합니다. `--signal-config`가 필수이며 Mock 또는 기존 Parser 전용
+`--benchmark`와 함께 사용할 수 없습니다. 기본 실행과 Parser Benchmark의 의미는 유지합니다.
+
+```powershell
+.\build-integrated\backend\Release\elevsafe_backend.exe 127.0.0.1 29172 `
+  --signal-config signal_processing/config/elevator_1st.cfg --ab-profile `
+  --ab-profile-max-frames 10000 --ab-profile-warmup 5
+```
+
+최초 5개 callback은 통계만 제외하며 B 처리·문 상태 이력은 계속 갱신합니다.
+warm-up은 `0~100000`, 저장 상한은 `1~100000`이며 기본 상한은 warm-up 이후 10000개입니다.
+상한 이후에도 Radar/B 처리는 계속하고 전체 실행의 frame/point·오류·ID 카운터는 갱신합니다.
+저장 생략 수는 `omitted_after_limit`입니다. 프레임별 정상 console 출력은 억제하며,
+통계 배열은 수신 전에 reserve하고 정렬·집계·출력은 실행 종료 후에만 수행합니다.
+
+`AB_PROFILE_JSON `으로 시작하는 한 줄에 다음을 출력합니다. 분위수는 nearest-rank
+`ceil(p*N)-1`이며 50ms 초과는 정확히 50ms인 샘플을 포함하지 않습니다.
+
+- `adapter_ms`: `toSignalFrame()` 전후
+- `b_ms`: `SignalPipeline::process()`와 반환값 수신 전후
+- `ab_span_ms`: Adapter 시작부터 B 반환까지 (context 준비와 중간 계측 포함)
+- `pipeline_ms`: enqueue 전부터 drain 반환까지 (프레임 복사·소비·객체 정리 포함)
+- `callback_work_ms`: callback 초반부터 종료 직전까지, 통계 저장 자체는 제외
+- `callback_interval_ms`: 저장한 연속 callback의 진입 간격, 수신/센서 송신 간격과 구분
+
+처리 시간 분포는 성공한 저장 샘플만 사용합니다. 전체 실행의 실패 프레임 수와 저장 생략은
+별도로 기록하므로 성공 샘플만 보고 완전한 실행으로 판정하면 안 됩니다. window FPS/points/s는
+첫 저장 callback 진입부터 마지막 저장 callback 종료까지의 wall time과 그 구간의 성공 처리량입니다.
+이 값은 초기화·TCP 연결 대기와 warm-up을 제외하고 callback 사이 수신 공백은 포함합니다.
+`clean_eof`, `run_returned`, 종료 코드, 실패 프레임, Parser 통계도 함께 확인합니다.
+예외로 run이 반환되지 않으면 Parser 통계는 미완료/null이며, 강제 종료·Ctrl+C 중단은 JSON을
+남기지 못할 수 있습니다. 측정 후 Emulator의 서버를 정상 중지해 TCP EOF를 전달하세요.
+
+ID 불연속/인접 중복/전방 gap 추정/역행·reset은 전체 실행, 비인접 중복 ID는 저장 window에서
+집계합니다. uint32 정상 wrap은 누락으로 세지 않습니다. FrameBuffer 교체는 기존 단일 스레드·
+용량 1 조건에서 enqueue 직전 pending 크기로 관측합니다. 교체 0은 OS/TCP/송신 큐의
+대기 0을 뜻하지 않습니다. 센서 송신 시각이 없어 end-to-end 절대 지연을 측정하지 않습니다.
+계측 clock 호출과 bookkeeping도 실행 시간에 영향을 주며 hard real-time 보장은 아닙니다.
+
+오프라인 수치는 기존 B 직접 처리/Adapter 동등성 테스트를 재사용해 얻을 수 있습니다.
+
+```powershell
+.\build-integrated\backend\Release\signal_integration_test.exe --ab-profile `
+  signal_processing/config/elevator_1st.cfg `
+  backend/build/s0-3-b-baseline-20261031_014816/S0-3_t01.csv
+```
+
+오프라인 JSON의 `mode=offline_equivalence`와 실제 `background_enabled`를 확인합니다.
+Adapter/B/pipeline 구간 밖에서 입력 재구성과 B 직접 기준·결과 비교를 수행하므로 오프라인
+wall FPS에는 이 비용도 포함됩니다. 오프라인 callback 간격은 제공하지 않습니다.
+이 실행은 CSV의 처음부터 끝까지 처리하지만 실제 TCP/Emulator 성능을 뜻하지 않습니다.
+오프라인 `callback_work_ms`도 실제 네트워크 callback이 아닌 재생 계측 scope의 시간입니다.
+현재 TCP profile은 연결 후 들어오는 프레임을 측정하며 S0-3 원본 index 0 동기화 기능은 없습니다.
+전체 논리 한 주기의 정합성은 기존 `signal_replay_compare --tcp`로 별도 확인해야 합니다.
+Background ON/OFF는 실제 설정·맵 로드 상태로 구분하고 기존 파일을 덮어쓰지 마세요.
+
+2026-11-01 Windows x64 Release의 S0-3 오프라인 측정은 ON/OFF 모두 1,673프레임·
+381,730포인트를 처리하고 B 직접 기준과 동등성 검사를 통과했습니다. 각 측정에서 warm-up
+5개를 통계만 제외해 1,668개를 집계했습니다. 원본 설정·배경맵은 유지하고 OFF만 진단 폴더의
+설정 사본에서 map 경로를 비웠으며 실제 `background_enabled`를 확인했습니다.
+
+| 조건 / 구간 (ms) | 평균 | P50 | P95 | P99 | 최대 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ON / Adapter | 0.001952 | 0.001800 | 0.004100 | 0.005400 | 0.008500 |
+| ON / B | 0.010342 | 0.005600 | 0.034500 | 0.076500 | 0.241100 |
+| ON / enqueue~drain | 0.012775 | 0.008100 | 0.038500 | 0.080600 | 0.247900 |
+| OFF / Adapter | 0.001868 | 0.001700 | 0.003800 | 0.004900 | 0.009700 |
+| OFF / B | 0.009597 | 0.005600 | 0.031500 | 0.070400 | 0.160800 |
+| OFF / enqueue~drain | 0.011938 | 0.008000 | 0.034800 | 0.073100 | 0.164100 |
+
+측정한 위 구간의 50ms 초과는 모두 0건이며 FrameBuffer 교체·중복도 0건이었습니다.
+ID 점프 86회(전방 gap 추정 242)는 입력 CSV 자체와 같으며 Adapter가 새로 누락시킨
+프레임 수로 해석하지 않습니다. 이 데이터는 ROI 이후 부하가 작고 계측 오버헤드도 포함하므로
+실제 센서·고밀도 장면·장시간 TCP 처리의 지연 상한을 보장하지 않습니다.
+이 수치는 CTest와 겹치지 않게 각 모드를 한 번 실행한 결과입니다. 오프라인 원시 로그/JSON은 Git 제외 경로
+`build-integrated/diagnostics/ab-profile-20261101_210700/`에 보존했습니다.
+
+별도의 사용자 수동 TCP 계측에서는 Emulator S0-3 약 20 FPS, Background ON으로
+3,418프레임·770,463포인트를 처리했습니다. 측정 window 처리율은 20.0065 FPS였으며
+B 처리 시간은 평균 0.026453ms, P95 0.082500ms, P99 0.169700ms, 최대 0.364200ms였습니다.
+Parser 거부·처리 실패·FrameBuffer 교체는 모두 0건이었고 정상 TCP EOF, 종료 코드 0을
+확인했습니다. 이 실행은 원본 논리 프레임 0에 동기화한 한 주기 검증이 아니므로 기존
+S0-3 전체 정합성 검증과 구분합니다. 버퍼 교체 0건이 네트워크 대기나 절대 지연 0을 뜻하지 않습니다.
+
+계측 구현 검증에서는 루트·Backend 독립 Release Build가 통과했고, 루트 CTest는 14/14,
+Backend 독립 CTest는 12/14가 통과했습니다. Backend의 WebSocket 서버·CLI 테스트
+2건에서는 기존 Winsock 10014가 재현됐으며, 이 문제의 해결을 의미하지 않습니다.
 
 ## 현재 구현 범위
 
