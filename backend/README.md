@@ -196,6 +196,20 @@ cmake -S backend -B backend/build
 cmake --build backend/build --config Release
 ```
 
+Repository 루트의 CMake 진입점으로도 같은 Backend와 B `radar_core`를 빌드할 수 있습니다.
+기존 독립 빌드 디렉터리는 그대로 유지합니다.
+
+```powershell
+cmake -S . -B build-integrated -G "Visual Studio 17 2022" -A x64
+cmake --build build-integrated --config Release
+ctest --test-dir build-integrated -C Release --output-on-failure
+```
+
+루트 빌드의 실행 파일은 `build-integrated/backend/Release/`에 생성됩니다.
+아래의 기존 실행 예제를 루트 빌드로 사용할 때는 exe 경로만 이 위치로 바꾸고,
+작업 디렉터리는 Repository 루트로 유지합니다. 의존성 소스 재사용 옵션은
+[루트 README](../README.md#windows-루트-빌드-및-테스트)를 참고하세요.
+
 ## Test
 
 ```powershell
