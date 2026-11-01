@@ -22,22 +22,47 @@ reject(2 --ws-mock --ws-duration 0)
 reject(2 --ws-mock --ws-duration 86401)
 reject(2 --websocket --ws-duration 1)
 reject(2 --ws-mock --ws-bind)
-reject(1 --ws-mock --ws-bind invalid-ip --ws-duration 1)
-reject(1 --mock-websocket --ws-bind invalid-ip --ws-duration 1)
+foreach(mock_option --ws-mock --mock-websocket)
+    execute_process(COMMAND "${BACKEND_EXE}" ${mock_option} --ws-bind invalid-ip --ws-duration 1
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
+    if(NOT "${result}" STREQUAL "1" OR NOT error MATCHES "startup/runtime failed"
+        OR error MATCHES "Connecting to|continuing radar processing"
+        OR output MATCHES "frameCount=|signal frame_id=")
+        message(FATAL_ERROR "Mock failure entered Radar or lost diagnostics: ${result}: ${output} ${error}")
+    endif()
+endforeach()
 reject(2 --ws-mock --signal-config unused.cfg)
 reject(2 --mock-websocket --signal-config unused.cfg)
 reject(2 --websocket --signal-config)
 reject(2 --websocket --signal-config a.cfg --signal-config b.cfg)
 reject(1 127.0.0.1 29172 --websocket --signal-config missing-signal-config.cfg)
 
-# A valid B configuration must initialize before transport startup. A numeric-IP
-# parse failure avoids depending on the host's intermittent native socket errors.
+# The Windows fixture uses ephemeral ports and real Radar packets, then EOF.
+# Invalid WebSocket IP parsing fails deterministically without a socket call.
 get_filename_component(backend_dir "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-execute_process(COMMAND "${BACKEND_EXE}" 127.0.0.1 29172 --websocket
-    --signal-config "${backend_dir}/tests/data/signal_integration.cfg" --ws-bind invalid-ip
-    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
-if(NOT "${result}" STREQUAL "1" OR NOT error MATCHES "SignalPipeline ready:"
-    OR NOT error MATCHES "startup/runtime failed")
-    message(FATAL_ERROR "Combined A-B/WebSocket initialization failed: ${result}: ${output} ${error}")
+if(WIN32)
+    foreach(value BACKEND_EXE backend_dir)
+        string(REPLACE "'" "''" ${value}_ps "${${value}}")
+    endforeach()
+    # Inline invocation uses the existing Windows diagnostic workflow without
+    # changing execution policy or requiring a new test runtime.
+    execute_process(COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${backend_dir_ps}/tests/websocket_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '${BACKEND_EXE_ps}' -SignalConfig '${backend_dir_ps}/tests/data/signal_integration.cfg'"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 23)
+    if(NOT "${result}" STREQUAL "0")
+        message(FATAL_ERROR "Radar/WebSocket isolation fixture failed: ${result}: ${output} ${error}")
+    endif()
+    message(STATUS "${output}")
+else()
+    # Empty host fails resolution locally instead of depending on port 29172.
+    execute_process(COMMAND "${BACKEND_EXE}" "" 29172 --websocket
+        --signal-config "${backend_dir}/tests/data/signal_integration.cfg" --ws-bind invalid-ip
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
+    if(NOT "${result}" STREQUAL "1" OR NOT error MATCHES "SignalPipeline ready:"
+        OR NOT error MATCHES "startup failed" OR NOT error MATCHES "continuing radar processing"
+        OR NOT error MATCHES "Connecting to")
+        message(FATAL_ERROR "Radar fallback did not reach TCP: ${result}: ${output} ${error}")
+    endif()
 endif()
 message(STATUS "WebSocket and existing CLI rejection tests passed")

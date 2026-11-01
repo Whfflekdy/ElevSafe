@@ -286,7 +286,12 @@ ctest --test-dir backend/build-websocket-integration -C Release --output-on-fail
 - `websocket_message_test`: Mock Snapshot 및 수동 요청 JSON 검증
 - `websocket_server_test`: loopback handshake, 경로, 다중 접속, 요청 FIFO,
   느린 client, 큐 교체, 큰 메시지, 연결 해제/재접속, pending I/O 종료
-- `websocket_cli_test`: 기존 CLI와 신규 옵션의 잘못된 입력 및 종료 코드 검증
+- `websocket_cli_test`: 기존 CLI 오류, Mock 실패 시 Radar 미진입, WebSocket 시작 실패 후
+  Radar 계속 실행을 검증합니다. Windows 기본 PowerShell/.NET fixture가 임시 loopback 포트로
+  두 프레임을 보내 Radar-only 및 WebSocket 실패 모드의 B 처리·정상 EOF를 확인합니다.
+  기존 Parser 테스트의 패킷 형식을 사용하며 외부 29172 서버나 새 런타임 설치에 의존하지 않습니다.
+  fixture 소켓 오류는 실제 코드와 함께 실패 처리하며 재시도하지 않습니다. 개별 자식 프로세스는
+  제한 시간 내에 끝나야 하며 fixture 실패 로그는 실행 파일 옆 `cli-radar-fixture/`에 보존합니다.
 
 테스트는 로컬의 실제 배경 맵에 의존하지 않습니다. Background 테스트만 빌드 폴더의
 새 임시 디렉터리에 작은 맵과 설정 사본을 만들며 실제 센서 설치 설정/맵은 변경하지 않습니다.
@@ -412,8 +417,16 @@ benchmark 및 `--signal-config`와 함께 사용할 수 없습니다.
 
 이 모드는 기존 TCP/Parser/FrameBuffer/console 경로와 WebSocket 접속·요청 수신을
 함께 실행합니다. C 결과가 없으므로 **실시간 Snapshot은 생성하지 않습니다.**
-옵션을 생략하면 서버를 시작하지 않고 기존 동작을 유지합니다. 서버 초기화 실패는
-레이더 연결 전에 종료 코드 1로 끝나며, TCP 실패/정상 EOF로 run이 반환하면 서버도 정리합니다.
+옵션을 생략하면 서버를 시작하지 않고 기존 동작을 유지합니다. Radar 모드에서 WebSocket
+시작이 실패하면 원래 예외 정보를 `[ws] startup failed:`로 출력하고 실패 객체를 정리합니다.
+`[ws] disabled for this run; continuing radar processing`을 기록한 뒤 활성 WebSocket 없이
+Radar TCP 수신과 선택적 B 처리를 계속합니다. 재시도는 하지 않으며 최종 종료 코드는
+기존 Radar 실행 결과를 따릅니다. TCP 실패/정상 EOF로 run이 반환하면 서버도 정리합니다.
+Mock 전용 모드의 시작/실행 실패는 기존처럼 종료 코드 1이며 Radar 연결을 시도하지 않습니다.
+CLI 오류와 B 초기화 실패 정책은 유지합니다. 메모리 할당 실패와 표준 라이브러리의
+thread/mutex 오류는 치명적 오류로 종료하며 Radar 계속 실행 대상으로 취급하지 않습니다.
+이 정책은 시작 실패의 전파 범위만 제한합니다. 기존 서버 정리의 무제한 대기 가능성이나
+Winsock 10014의 근본 원인을 해결한 것이 아닙니다.
 레이더 모드의 기존 Ctrl+C 종료 처리는 변경하지 않았으므로 그 경로의 graceful shutdown은
 보장하지 않습니다. WebSocket thread에서 `RetinaClient::stop()`을 호출하지 않습니다.
 

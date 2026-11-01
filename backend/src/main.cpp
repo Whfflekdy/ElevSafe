@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 
 namespace
@@ -287,16 +288,39 @@ int main(int argc, char** argv)
     {
         try
         {
-            websocket = std::make_unique<elevsafe::WebSocketServer>(wsConfig, std::cerr);
-            websocket->start();
-            if (mockMode) return runMock(*websocket, mockSeconds);
-            std::cerr << "[ws] transport only: no C result, no live snapshot generation or door control\n";
+            auto candidate = std::make_unique<elevsafe::WebSocketServer>(wsConfig, std::cerr);
+            candidate->start();
+            websocket = std::move(candidate);
+        }
+        catch (const std::bad_alloc& error)
+        {
+            std::cerr << "[ws] fatal allocation failure: " << error.what() << '\n';
+            return 1;
+        }
+        catch (const std::system_error& error)
+        {
+            // Standard-library thread/mutex failures are not optional transport failures.
+            std::cerr << "[ws] fatal runtime failure: " << error.what() << '\n';
+            return 1;
         }
         catch (const std::exception& error)
         {
-            std::cerr << "[ws] startup/runtime failed: " << error.what() << '\n';
-            return 1;
+            std::cerr << (mockMode ? "[ws] startup/runtime failed: " : "[ws] startup failed: ")
+                      << error.what() << '\n';
+            if (mockMode) return 1;
+            std::cerr << "[ws] disabled for this run; continuing radar processing\n";
         }
+        if (mockMode)
+        {
+            try { return runMock(*websocket, mockSeconds); }
+            catch (const std::exception& error)
+            {
+                std::cerr << "[ws] startup/runtime failed: " << error.what() << '\n';
+                return 1;
+            }
+        }
+        if (websocket)
+            std::cerr << "[ws] transport only: no C result, no live snapshot generation or door control\n";
     }
 
     // Capacity 1 is only the minimum needed for synchronous enqueue -> immediate drain.
