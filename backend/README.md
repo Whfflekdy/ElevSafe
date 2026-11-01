@@ -267,9 +267,14 @@ ctest --test-dir backend/build-websocket-integration -C Release --output-on-fail
 아래 명령은 통합 실행 파일을 사용합니다. 기존 `backend/build/`의 입력 데이터와
 이전 검증 기록은 그대로 보존하며 새 통합 빌드와 구분합니다.
 
-현재 CMake에 등록된 테스트는 다음 14개입니다.
+Windows CMake에 등록된 테스트는 다음 16개입니다. 비 Windows에서는 PowerShell 재연결
+fixture를 제외한 15개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
+- `retina_reconnect_test`: 재시도 횟수·복구 예산, 10014 제외, 사전 취소·만료 기한,
+  실제 loopback 연결 후 무응답 수신 대기의 owner-thread 취소
+- `radar_reconnect_cli_test` (Windows): 제어된 포트의 연결 거부·재시작·FIN/RST·부분 패킷,
+  새 세션의 timestamp/B/계측 초기화, Radar 복구 중 WebSocket 유지
 - `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
 - `backend_pipeline_test`: frame enqueue, FIFO drain, consumer 동작 및 overflow 전달 검증
 - `relative_frame_clock_test`: connection-relative timestamp 계산 및 reset 검증
@@ -423,7 +428,9 @@ benchmark 및 `--signal-config`와 함께 사용할 수 없습니다.
 시작이 실패하면 원래 예외 정보를 `[ws] startup failed:`로 출력하고 실패 객체를 정리합니다.
 `[ws] disabled for this run; continuing radar processing`을 기록한 뒤 활성 WebSocket 없이
 Radar TCP 수신과 선택적 B 처리를 계속합니다. 재시도는 하지 않으며 최종 종료 코드는
-기존 Radar 실행 결과를 따릅니다. TCP 실패/정상 EOF로 run이 반환하면 서버도 정리합니다.
+기본 모드는 기존 Radar 실행 결과를 따릅니다. TCP 실패/정상 EOF로 run이 반환하면 서버도
+정리합니다. 아래 선택적 재연결 모드에서는 복구 대기 중 같은 WebSocket 객체를 유지하고,
+최종 종료할 때 정리합니다.
 Mock 전용 모드의 시작/실행 실패는 기존처럼 종료 코드 1이며 Radar 연결을 시도하지 않습니다.
 CLI 오류와 B 초기화 실패 정책은 유지합니다. 메모리 할당 실패와 표준 라이브러리의
 thread/mutex 오류는 치명적 오류로 종료하며 Radar 계속 실행 대상으로 취급하지 않습니다.
@@ -900,6 +907,73 @@ average, nearest-rank p95, maximum을 milliseconds 단위로 출력합니다. fr
 B 처리시간은 Parser Benchmark에 포함되지 않습니다. 다만 같은 thread의 B 처리는
 다음 recv 및 실행 scheduling에 영향을 주므로 기존 parser-only 비교에는 B 옵션을 생략하세요.
 
+### 선택적 Radar TCP 재연결
+
+기본 실행은 한 연결만 처리하며 정상 EOF는 0, 연결·수신 실패는 1로 종료합니다.
+`--radar-reconnect`를 명시한 경우에만 다음 정책을 적용합니다. 기존 TCP 정합성 검증 도구
+`signal_replay_compare --tcp`의 단일 세션 동작에는 적용하지 않습니다.
+
+```powershell
+.\build-integrated\backend\Release\elevsafe_backend.exe 127.0.0.1 29172 `
+  --signal-config signal_processing/config/elevator_1st.cfg --websocket --radar-reconnect
+# 정상 EOF까지 자동 복구하려는 경우에만 --radar-reconnect-eof를 추가합니다.
+```
+
+- 최초 연결 실패 또는 연결 거부/reset/aborted/timeout/net-down/reset/unreachable/host-unreachable
+  오류 중 선정한 native 코드만 복구 대상으로 삼습니다. resolve·설정·초기화·처리 예외와
+  Winsock 10014/10048 등 다른 오류는 재시도하지 않습니다. 실제 stage/code는 보존합니다.
+- 최초 시도 외에 **프로세스 전체 최대 3회**, 매회 1초 대기합니다. 연결 성공으로 횟수를
+  초기화하지 않습니다. 한도 소진은 종료 코드 1이며 성공할 때까지 반복하지 않습니다.
+- 개별 연결은 nonblocking connect와 select/SO_ERROR로 3초 기한을 적용합니다.
+  DNS의 무제한 대기를 피하려고 이 모드는 숫자 IPv4/IPv6만 받으며 hostname은 실패합니다.
+  기존 기본 모드의 host 처리와 blocking 동작은 유지합니다.
+- 복구 예산은 단절 이후 15초이며 대기·세션 재초기화·연결 시도에 적용합니다. 연결 제한은
+  남은 복구 예산과 3초 중 작은 값입니다. 연결에 성공한 수신 시간은 복구 예산에 포함하지
+  않고 다음 단절 때 새 15초 예산을 시작하지만, 전체 재시도 횟수는 그대로 유지합니다.
+- 기한은 steady clock으로 다음 연결 및 대기 진행 시 검사합니다. Windows scheduling,
+  동기 설정/배경맵 파일 I/O, B 처리 및 기존 WebSocket 종료를 강제로 선점하지는 못하므로
+  전체 프로세스가 정확히 15초 내 종료한다는 hard wall-clock 보장은 아닙니다.
+- 정상 EOF는 이 모드에서도 기본적으로 코드 0 종료입니다. `--radar-reconnect-eof`는
+  `--radar-reconnect`와 함께만 사용할 수 있으며, EOF 복구도 동일한 전체 3회 한도를 씁니다.
+- 재연결 모드에서 Ctrl+C(SIGINT)/SIGTERM은 lock-free 종료 플래그만 설정합니다.
+  소켓 정리와 callback 중단은 owner thread에서 수행합니다. select 중에는 최대 100ms,
+  재시도 대기 중에는 최대 50ms 간격으로 확인하며 명시적 취소는 코드 0으로 종료합니다.
+  진행 중인 B 처리·파일 I/O의 즉시 취소나 강제 종료 시 통계 출력은 보장하지 않습니다.
+- **무응답 TCP의 수신 idle timeout/heartbeat는 구현하지 않았습니다.** 연결 후 데이터가
+  없어도 계속 기다리지만 재연결 모드의 명시적 취소 확인은 유지됩니다.
+
+매 연결 시도마다 새 RetinaClient·Parser·RelativeFrameClock·BackendPipeline(용량 1)을
+사용합니다. 같은 Config로 새 SignalPipeline을 생성해 문 추정 이력과 누적 통계를 초기화하고
+배경맵을 다시 로드합니다. 최초 실행과 실제 `usesBackground()`가 달라지면 실패 종료합니다.
+첫 유효 프레임의 `timestamp_us`는 다시 0이며 frameCount는 원본 그대로 전달합니다.
+이전 연결의 partial packet은 buffered byte 수만 기록한 뒤 버리고 다음 연결로 넘기지 않습니다.
+
+`--ab-profile`/Parser Benchmark도 시도별 새 샘플·warm-up·ID 상태로 집계합니다.
+재연결 모드의 `AB_PROFILE_JSON.session_id`는 연결 시도 번호이며, 연결에 실패한 시도는
+프레임 0개로 기록될 수 있습니다. 세션 로그의 connected/stage/parsed/buffered/B_frames와
+함께 판단해야 합니다. 네트워크 복구 대기는 프레임 성능 window에 합치지 않습니다.
+
+WebSocket은 Radar 재연결 루프 밖에 유지하며 transport/JSON/FIFO는 바꾸지 않습니다.
+현재 실제 C Snapshot·문 제어는 없으며 Radar 단절 중 데이터 최신성·수동 명령 만료나
+C Tracking ID 복구 정책도 구현하지 않았습니다. 새 Radar 세션을 D에 알리는 JSON 규격은
+임의로 추가하지 않았으므로 실제 C/D 연결 전 별도 합의가 필요합니다.
+
+2026-11-01 Windows x64 Release에서 루트·Backend 독립 Build를 통과했습니다.
+각각 전체 CTest는 15/16이었으며 루트는 기존 `websocket_server_test`의 client.connect,
+Backend는 기존 `websocket_cli_test`의 Radar connect에서 Winsock 10014로 실패했습니다.
+두 빌드 모두 신규 재연결 단위·CLI 테스트는 통과했습니다. 기존 Make-Packet을 재사용하고,
+서버 재시작은 격리 fixture 프로세스의 종료를 확인한 뒤 같은 포트에 새 프로세스를 띄워
+검증했습니다. 10-byte partial packet 폐기, 다음 연결 timestamp 0, B CLOSED → 새 세션
+UNKNOWN 및 B_frames 1, 세션별 warm-up과 같은 WebSocket 연결의 명령 수신을 확인했습니다.
+이 TCP fixture는 Background OFF이며 실제 Emulator/물리 센서 재시작 검증은 미실시입니다.
+기존 Background ON/OFF 자동 회귀와 Mock 두 클라이언트의 동일 JSON 21개 수신·명령 순서·
+오류 요청 거부도 통과했습니다. Mock 평균 source 간격은 100.246ms였습니다.
+
+기한 만료의 사전 차단·재시도 예산과 실제 무응답 수신 중 취소는 자동 검증했습니다.
+SYN 무응답을 강제한 연결 3초 timeout 실측 및 콘솔 Ctrl+C의 모든 단계별 실행 시험은
+아직 수행하지 않았습니다. 이전 fixture 실패와 모든 10014 로그는 덮어쓰지 않았으며 이번
+기록은 `build-integrated/diagnostics/radar-reconnect-20261101_215129/`에 보존했습니다.
+
 ### A-B 처리 성능 계측
 
 `--ab-profile`은 실제 Radar callback의 동기 enqueue/drain·Adapter·B 처리 시간을
@@ -1008,6 +1082,7 @@ Backend 독립 CTest는 12/14가 통과했습니다. Backend의 WebSocket 서버
 - `BackendPipeline` enqueue/drain skeleton
 - frameCount, timestampUs, pointCount, 첫 point console 출력
 - 선택적 A-B Adapter 및 SignalPipeline 호출/결과 진단 출력
+- 명시적 Radar 재연결 옵션, 제한된 복구 및 연결별 B/시각/계측 상태 초기화
 - WebSocket transport, 명시적 Mock JSON 송신 및 수동 요청 FIFO 수신
 
 ## 현재 구현되지 않음
@@ -1016,7 +1091,7 @@ Backend 독립 CTest는 12/14가 통과했습니다. Backend의 WebSocket 서버
 - 실제 B/C 결과의 WebSocket Snapshot 생성 및 전송
 - 수동 문 제어 실행 및 ACK
 - Radar 처리의 producer/consumer multithreading
-- Automatic Reconnect
+- 무응답 TCP 수신 idle timeout / heartbeat
 - Device Discovery
 - Target Section 상세 Parsing
 

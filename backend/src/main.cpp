@@ -1,5 +1,6 @@
 #include "elevsafe/backend_pipeline.h"
 #include "elevsafe/ab_profile.h"
+#include "elevsafe/radar_reconnect.h"
 #include "elevsafe/retina_client.h"
 #include "elevsafe/signal_adapter.h"
 #include "pipeline/signal_pipeline.h"
@@ -60,6 +61,7 @@ namespace
     {
         std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N] [--signal-config PATH]\n"
                      "       [--ab-profile [--ab-profile-max-frames N] [--ab-profile-warmup N]]\n"
+                     "       [--radar-reconnect [--radar-reconnect-eof]] (numeric radar IP only)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
                      "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
@@ -80,6 +82,34 @@ namespace
     std::atomic<bool> mockStop{false};
     static_assert(std::atomic<bool>::is_always_lock_free);
     void stopMock(int) { mockStop.store(true, std::memory_order_relaxed); }
+
+    std::atomic<bool> radarStop{false};
+    void stopRadar(int) { radarStop.store(true, std::memory_order_relaxed); }
+    class RadarSignals
+    {
+        using Handler = void(*)(int);
+        bool enabled;
+        Handler interrupt = SIG_ERR, terminate = SIG_ERR;
+    public:
+        explicit RadarSignals(bool active) : enabled(active)
+        {
+            if (!enabled) return;
+            radarStop.store(false, std::memory_order_relaxed);
+            interrupt = std::signal(SIGINT, stopRadar);
+            terminate = std::signal(SIGTERM, stopRadar);
+            if (interrupt == SIG_ERR || terminate == SIG_ERR)
+            {
+                if (interrupt != SIG_ERR) std::signal(SIGINT, interrupt);
+                if (terminate != SIG_ERR) std::signal(SIGTERM, terminate);
+                throw std::runtime_error("Cannot install Radar cancellation handlers");
+            }
+        }
+        ~RadarSignals()
+        {
+            if (enabled && interrupt != SIG_ERR) std::signal(SIGINT, interrupt);
+            if (enabled && terminate != SIG_ERR) std::signal(SIGTERM, terminate);
+        }
+    };
 
     int runMock(elevsafe::WebSocketServer& server, std::size_t seconds)
     {
@@ -130,6 +160,7 @@ int main(int argc, char** argv)
     std::uint16_t port = 29172;
     int positionals = 0;
     bool benchmarkMode = false;
+    bool reconnectEnabled = false, reconnectEof = false;
     std::optional<std::size_t> benchmarkFrameLimit;
     bool abProfileEnabled = false, profileLimitSpecified = false, profileWarmupSpecified = false;
     std::size_t profileLimit = 10000, profileWarmup = 5;
@@ -143,6 +174,12 @@ int main(int argc, char** argv)
     for (int argument = 1; argument < argc;)
     {
         const std::string_view option(argv[argument]);
+        if (option == "--radar-reconnect" || option == "--radar-reconnect-eof")
+        {
+            auto& value = option == "--radar-reconnect" ? reconnectEnabled : reconnectEof;
+            if (value) { std::cerr << "Duplicate " << option << '\n'; return 2; }
+            value = true; ++argument; continue;
+        }
         if (option == "--ab-profile")
         {
             if (abProfileEnabled) { std::cerr << "Duplicate --ab-profile\n"; return 2; }
@@ -288,6 +325,13 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    if ((reconnectEof && !reconnectEnabled) || (reconnectEnabled && mockMode))
+    {
+        std::cerr << "--radar-reconnect-eof requires --radar-reconnect; reconnect is Radar-only\n";
+        return 2;
+    }
+
+    std::optional<elevsafe::sp::Config> sessionConfig;
     std::unique_ptr<elevsafe::sp::SignalPipeline> signal;
     if (signalConfigPath.has_value())
     {
@@ -299,7 +343,8 @@ int main(int argc, char** argv)
                 std::cerr << "Signal config load failed: " << *signalConfigPath << '\n';
                 return 1;
             }
-            signal = std::make_unique<elevsafe::sp::SignalPipeline>(config);
+            sessionConfig = config;
+            signal = std::make_unique<elevsafe::sp::SignalPipeline>(*sessionConfig);
             if (!signal->ok())
             {
                 std::cerr << "SignalPipeline initialization failed: invalid config: " << *signalConfigPath << '\n';
@@ -364,132 +409,212 @@ int main(int argc, char** argv)
             std::cerr << "[ws] transport only: no C result, no live snapshot generation or door control\n";
     }
 
-    // Capacity 1 is only the minimum needed for synchronous enqueue -> immediate drain.
-    // It is not a production tuning value and must be revisited for a separated producer/consumer design.
-    constexpr std::size_t kSynchronousFrameBufferCapacity = 1;
-    elevsafe::BackendPipeline pipeline(kSynchronousFrameBufferCapacity);
-
-    elevsafe::RetinaClient client(host, port);
-    client.setProcessingMetricsEnabled(benchmarkMode);
-    client.setProcessingMetricsFrameLimit(benchmarkFrameLimit);
-
-    bool summaryPrinted = false;
-    client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames, &summaryPrinted](const elevsafe::RadarFrame& frame)
-    {
-        using Profile = elevsafe::AbProfile;
-        std::optional<Profile::FrameScope> profiled;
-        if (abProfile)
-            profiled.emplace(*abProfile, frame.frameCount, frame.points.size(), pipeline.pendingSize() >= kSynchronousFrameBufferCapacity);
-        const auto pipelineStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
-        pipeline.onFrame(frame);
-        pipeline.drain([&signal, &profiled, quietFrames](const elevsafe::RadarFrame& pendingFrame)
-        {
-            if (signal)
-            {
-                try
-                {
-                    const auto adapterStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
-                    const auto input = elevsafe::toSignalFrame(pendingFrame);
-                    if (profiled) profiled->sample.adapter = Profile::Clock::now() - adapterStart;
-                    const elevsafe::sp::FrameContext context;
-                    const auto bStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
-                    const auto result = signal->process(input, context);
-                    if (profiled)
-                    {
-                        const auto bEnd = Profile::Clock::now();
-                        profiled->sample.b = bEnd - bStart;
-                        profiled->sample.ab = bEnd - adapterStart;
-                        profiled->sample.success = true;
-                    }
-                    if (!quietFrames)
-                        std::cout << "signal frame_id=" << result.frame_id
-                                  << " timestamp_us=" << result.timestamp_us
-                                  << " inputPoints=" << input.points.size()
-                                  << " clusters=" << result.clusters.size()
-                                  << " estimated_door_state="
-                                  << elevsafe::sp::doorStateToString(result.estimated_door_state) << '\n';
-                }
-                catch (const std::bad_alloc&)
-                {
-                    throw;
-                }
-                catch (const std::exception& exception)
-                {
-                    // drain already owns/popped this frame; skip it without retrying B's stateful process.
-                    std::cerr << "Signal frame failed: frameCount=" << pendingFrame.frameCount
-                              << " timestampUs=" << pendingFrame.timestampUs
-                              << ": " << exception.what() << '\n';
-                }
-            }
-
-            if (quietFrames)
-                return;
-
-            std::cout << "frameCount=" << pendingFrame.frameCount
-                      << " timestampUs=" << pendingFrame.timestampUs
-                      << " pointCount=" << pendingFrame.points.size();
-
-            if (!pendingFrame.points.empty())
-            {
-                const auto& point = pendingFrame.points.front();
-                std::cout << std::fixed << std::setprecision(3)
-                          << " firstPoint=(x=" << point.x
-                          << ", y=" << point.y
-                          << ", z=" << point.z
-                          << ", doppler=" << point.doppler
-                          << ", power=" << point.power
-                          << ", targetId=" << point.targetId
-                          << ')';
-            }
-
-            std::cout << '\n';
-        });
-        if (profiled) profiled->sample.pipeline = Profile::Clock::now() - pipelineStart;
-
-        if (benchmarkMode && !summaryPrinted && client.processingMetricsFrozen())
-        {
-            printProcessingSummary(client.processingSummary());
-            summaryPrinted = true;
-        }
-    });
-
-    std::cerr << "Connecting to " << host << ':' << port << "...\n";
+    // WebSocket remains outside the Radar session lifetime; no live C snapshots are invented.
+    const bool initialBackground = signal && signal->usesBackground();
     int result = 1;
-    elevsafe::RetinaClient::RunDiagnostics profileDiagnostics;
-    bool runReturned = false;
     try
     {
-        result = abProfile ? client.run(std::cerr, {}, profileDiagnostics) : client.run(std::cerr);
-        runReturned = true;
+        RadarSignals signals(reconnectEnabled);
+        elevsafe::RadarReconnectBudget retryBudget;
+        for (std::size_t session = 1;; ++session)
+        {
+            if (reconnectEnabled && radarStop.load(std::memory_order_relaxed)) return 0;
+            if (session > 1)
+            {
+                // Fresh B history/statistics and background load; do not modify B's public API.
+                if (sessionConfig)
+                {
+                    signal = std::make_unique<elevsafe::sp::SignalPipeline>(*sessionConfig);
+                    if (!signal->ok()) throw std::runtime_error("SignalPipeline reinitialization failed");
+                    if (signal->usesBackground() != initialBackground)
+                        throw std::runtime_error("Background activation changed across Radar sessions");
+                    std::cerr << "SignalPipeline ready: config=" << *signalConfigPath
+                              << " background=" << (signal->usesBackground() ? "enabled" : "disabled") << '\n';
+                }
+                if (abProfileEnabled) abProfile = std::make_unique<elevsafe::AbProfile>(profileLimit, profileWarmup);
+            }
+            if (reconnectEnabled) std::cerr << "[radar] session=" << session << " begin\n";
+            // Capacity 1 is only the minimum needed for synchronous enqueue -> immediate drain.
+            // It is not a production tuning value and must be revisited for a separated producer/consumer design.
+            constexpr std::size_t kSynchronousFrameBufferCapacity = 1;
+            elevsafe::BackendPipeline pipeline(kSynchronousFrameBufferCapacity);
+
+            elevsafe::RetinaClient client(host, port);
+            client.setProcessingMetricsEnabled(benchmarkMode);
+            client.setProcessingMetricsFrameLimit(benchmarkFrameLimit);
+
+            bool summaryPrinted = false;
+            std::optional<std::uint64_t> firstTimestamp;
+            auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
+            client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
+                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState](const elevsafe::RadarFrame& frame)
+            {
+                if (reconnectEnabled && !firstTimestamp) firstTimestamp = frame.timestampUs;
+                using Profile = elevsafe::AbProfile;
+                std::optional<Profile::FrameScope> profiled;
+                if (abProfile)
+                    profiled.emplace(*abProfile, frame.frameCount, frame.points.size(), pipeline.pendingSize() >= kSynchronousFrameBufferCapacity);
+                const auto pipelineStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
+                pipeline.onFrame(frame);
+                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState](const elevsafe::RadarFrame& pendingFrame)
+                {
+                    if (signal)
+                    {
+                        try
+                        {
+                            const auto adapterStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
+                            const auto input = elevsafe::toSignalFrame(pendingFrame);
+                            if (profiled) profiled->sample.adapter = Profile::Clock::now() - adapterStart;
+                            const elevsafe::sp::FrameContext context;
+                            const auto bStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
+                            const auto result = signal->process(input, context);
+                            if (reconnectEnabled) lastDoorState = result.estimated_door_state;
+                            if (profiled)
+                            {
+                                const auto bEnd = Profile::Clock::now();
+                                profiled->sample.b = bEnd - bStart;
+                                profiled->sample.ab = bEnd - adapterStart;
+                                profiled->sample.success = true;
+                            }
+                            if (!quietFrames)
+                                std::cout << "signal frame_id=" << result.frame_id
+                                          << " timestamp_us=" << result.timestamp_us
+                                          << " inputPoints=" << input.points.size()
+                                          << " clusters=" << result.clusters.size()
+                                          << " estimated_door_state="
+                                          << elevsafe::sp::doorStateToString(result.estimated_door_state) << '\n';
+                        }
+                        catch (const std::bad_alloc&)
+                        {
+                            throw;
+                        }
+                        catch (const std::exception& exception)
+                        {
+                            // drain already owns/popped this frame; skip it without retrying B's stateful process.
+                            std::cerr << "Signal frame failed: frameCount=" << pendingFrame.frameCount
+                                      << " timestampUs=" << pendingFrame.timestampUs
+                                      << ": " << exception.what() << '\n';
+                            if (reconnectEnabled) throw; // Processing errors never trigger transport recovery.
+                        }
+                    }
+
+                    if (quietFrames)
+                        return;
+
+                    std::cout << "frameCount=" << pendingFrame.frameCount
+                              << " timestampUs=" << pendingFrame.timestampUs
+                              << " pointCount=" << pendingFrame.points.size();
+
+                    if (!pendingFrame.points.empty())
+                    {
+                        const auto& point = pendingFrame.points.front();
+                        std::cout << std::fixed << std::setprecision(3)
+                                  << " firstPoint=(x=" << point.x
+                                  << ", y=" << point.y
+                                  << ", z=" << point.z
+                                  << ", doppler=" << point.doppler
+                                  << ", power=" << point.power
+                                  << ", targetId=" << point.targetId
+                                  << ')';
+                    }
+
+                    std::cout << '\n';
+                });
+                if (profiled) profiled->sample.pipeline = Profile::Clock::now() - pipelineStart;
+
+                if (benchmarkMode && !summaryPrinted && client.processingMetricsFrozen())
+                {
+                    printProcessingSummary(client.processingSummary());
+                    summaryPrinted = true;
+                }
+            });
+
+            std::cerr << "Connecting to " << host << ':' << port << "...\n";
+            result = 1;
+            elevsafe::RetinaClient::RunDiagnostics profileDiagnostics;
+            bool runReturned = false;
+            try
+            {
+                if (reconnectEnabled)
+                {
+                    elevsafe::RetinaClient::SessionControl control;
+                    control.connectNotAfter = retryBudget.deadline();
+                    control.cancelRequested = [] { return radarStop.load(std::memory_order_relaxed); };
+                    result = client.runSession(std::cerr, control, profileDiagnostics);
+                }
+                else result = abProfile ? client.run(std::cerr, {}, profileDiagnostics) : client.run(std::cerr);
+                runReturned = true;
+            }
+            catch (const std::exception& exception)
+            {
+                if (reconnectEnabled) profileDiagnostics.stage = "processing_exception";
+                std::cerr << "Backend stopped: " << exception.what() << '\n';
+            }
+
+            if (benchmarkMode && !summaryPrinted)
+                printProcessingSummary(client.processingSummary());
+
+            if (abProfile)
+            {
+                std::cout << "AB_PROFILE_JSON {\"mode\":\"tcp_callback\",\"background_enabled\":"
+                          << (signal->usesBackground() ? "true" : "false");
+                if (reconnectEnabled) std::cout << ",\"session_id\":" << session;
+                std::cout << ",\"run_returned\":" << (runReturned ? "true" : "false")
+                          << ",\"clean_eof\":" << (runReturned && result == 0 && profileDiagnostics.stage == "eof" ? "true" : "false")
+                          << ",\"exit_code\":" << result << ",\"termination_stage\":\""
+                          << (runReturned ? profileDiagnostics.stage : "processing_exception")
+                          << "\",\"socket_error_code\":" << profileDiagnostics.errorCode
+                          << ",\"parser_statistics_finalized\":" << (runReturned ? "true" : "false")
+                          << ",\"parser_packets_parsed\":";
+                if (runReturned) std::cout << profileDiagnostics.parser.packetsParsed; else std::cout << "null";
+                std::cout << ",\"parser_packets_rejected\":";
+                if (runReturned) std::cout << profileDiagnostics.parser.packetsRejected; else std::cout << "null";
+                std::cout << ",\"parser_buffered_bytes\":";
+                if (runReturned) std::cout << profileDiagnostics.bufferedBytes; else std::cout << "null";
+                std::cout << ",\"metrics\":";
+                abProfile->writeJson(std::cout);
+                std::cout << "}\n";
+            }
+
+            if (reconnectEnabled)
+            {
+                std::cerr << "[radar] session=" << session << " end stage=" << profileDiagnostics.stage
+                          << " code=" << profileDiagnostics.errorCode
+                          << " connected=" << profileDiagnostics.connected
+                          << " parsed=" << profileDiagnostics.parser.packetsParsed
+                          << " rejected=" << profileDiagnostics.parser.packetsRejected
+                          << " buffered=" << profileDiagnostics.bufferedBytes;
+                if (signal) std::cerr << " B_frames=" << signal->stats().frames
+                                      << " background=" << signal->usesBackground()
+                                      << " last_door_state=" << elevsafe::sp::doorStateToString(lastDoorState);
+                if (firstTimestamp) std::cerr << " first_timestamp_us=" << *firstTimestamp;
+                std::cerr << '\n';
+            }
+            if (!reconnectEnabled || !runReturned) break;
+            if (radarStop.load(std::memory_order_relaxed) || profileDiagnostics.cancelled)
+            { result = 0; break; }
+            if (!elevsafe::RetinaClient::retryable(profileDiagnostics, reconnectEof)) break;
+            const auto next = retryBudget.schedule(elevsafe::RadarReconnectBudget::Clock::now(), profileDiagnostics.connected);
+            if (!next)
+            {
+                std::cerr << "[radar] recovery exhausted retries=" << retryBudget.retries() << " (limit=3, budget=15s)\n";
+                result = 1; break;
+            }
+            std::cerr << "[radar] retry=" << retryBudget.retries() << "/3 wait_ms=1000 connect_timeout_ms=3000\n";
+            while (elevsafe::RadarReconnectBudget::Clock::now() < *next && !radarStop.load(std::memory_order_relaxed))
+                std::this_thread::sleep_until(std::min(*next,
+                    elevsafe::RadarReconnectBudget::Clock::now() + std::chrono::milliseconds(50)));
+            if (radarStop.load(std::memory_order_relaxed))
+            {
+                std::cerr << "[radar] cancelled during retry wait\n";
+                return 0;
+            }
+        }
     }
-    catch (const std::exception& exception)
+    catch (const std::exception& error)
     {
-        std::cerr << "Backend stopped: " << exception.what() << '\n';
+        std::cerr << "Radar session initialization/reporting failed: " << error.what() << '\n';
+        return 1;
     }
-
-    if (benchmarkMode && !summaryPrinted)
-        printProcessingSummary(client.processingSummary());
-
-    if (abProfile)
-    {
-        std::cout << "AB_PROFILE_JSON {\"mode\":\"tcp_callback\",\"background_enabled\":"
-                  << (signal->usesBackground() ? "true" : "false")
-                  << ",\"run_returned\":" << (runReturned ? "true" : "false")
-                  << ",\"clean_eof\":" << (runReturned && result == 0 && profileDiagnostics.stage == "eof" ? "true" : "false")
-                  << ",\"exit_code\":" << result << ",\"termination_stage\":\""
-                  << (runReturned ? profileDiagnostics.stage : "processing_exception")
-                  << "\",\"socket_error_code\":" << profileDiagnostics.errorCode
-                  << ",\"parser_statistics_finalized\":" << (runReturned ? "true" : "false")
-                  << ",\"parser_packets_parsed\":";
-        if (runReturned) std::cout << profileDiagnostics.parser.packetsParsed; else std::cout << "null";
-        std::cout << ",\"parser_packets_rejected\":";
-        if (runReturned) std::cout << profileDiagnostics.parser.packetsRejected; else std::cout << "null";
-        std::cout << ",\"parser_buffered_bytes\":";
-        if (runReturned) std::cout << profileDiagnostics.bufferedBytes; else std::cout << "null";
-        std::cout << ",\"metrics\":";
-        abProfile->writeJson(std::cout);
-        std::cout << "}\n";
-    }
-
     return result;
 }

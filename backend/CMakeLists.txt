@@ -63,6 +63,18 @@ target_link_libraries(retina_protocol_test PRIVATE elevsafe_backend_core)
 
 add_test(NAME retina_protocol_test COMMAND retina_protocol_test)
 
+add_executable(retina_reconnect_test tests/retina_reconnect_test.cpp)
+target_link_libraries(retina_reconnect_test PRIVATE elevsafe_backend_core elevsafe_boost_headers Threads::Threads)
+target_compile_definitions(retina_reconnect_test PRIVATE $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>)
+add_test(NAME retina_reconnect_test COMMAND retina_reconnect_test)
+set_tests_properties(retina_reconnect_test PROPERTIES TIMEOUT 10)
+if(WIN32)
+    add_test(NAME radar_reconnect_cli_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/radar_reconnect_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg'")
+    set_tests_properties(radar_reconnect_cli_test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endif()
+
 add_executable(frame_buffer_test
     tests/frame_buffer_test.cpp
 )

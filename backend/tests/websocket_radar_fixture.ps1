@@ -1,10 +1,9 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig)
+param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig,
+    [switch]$FunctionsOnly)
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
-$outputDirectory = Join-Path (Split-Path $BackendExe) ('cli-radar-fixture/' + [guid]::NewGuid().ToString('N'))
-$null = New-Item -ItemType Directory -Path $outputDirectory
 
 function Make-Packet([uint32]$frameId) {
     # Same little-endian layout as retina_protocol_test.cpp::makePacket:
@@ -25,6 +24,10 @@ function Make-Packet([uint32]$frameId) {
         return ,$bytes.ToArray()
     } finally { $writer.Dispose(); $bytes.Dispose() }
 }
+
+if ($FunctionsOnly) { return }
+$outputDirectory = Join-Path (Split-Path $BackendExe) ('cli-radar-fixture/' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $outputDirectory
 
 foreach ($mode in @('radar', 'radar-websocket-failed', 'radar-profile')) {
     $listener = $null; $peer = $null; $process = $null; $stage = 'fixture.open'
