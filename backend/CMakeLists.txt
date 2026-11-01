@@ -86,3 +86,9 @@ add_test(NAME signal_replay_compare_self_test COMMAND signal_replay_compare --se
 add_test(NAME signal_tcp_compare_self_test COMMAND signal_replay_compare --tcp-self-test
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
 set_tests_properties(signal_tcp_compare_self_test PROPERTIES TIMEOUT 30)
+add_test(NAME signal_background_test COMMAND ${CMAKE_COMMAND}
+    -DCOMPARE_EXE=$<TARGET_FILE:signal_replay_compare>
+    -DOFF_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg
+    -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/background-self-tests
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/signal_background_test.cmake)
+set_tests_properties(signal_background_test PROPERTIES TIMEOUT 60)

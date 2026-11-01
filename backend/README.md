@@ -202,7 +202,7 @@ cmake --build backend/build --config Release
 ctest --test-dir backend/build -C Release --output-on-failure
 ```
 
-현재 CMake에 등록된 테스트는 다음 8개입니다.
+현재 CMake에 등록된 테스트는 다음 9개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
 - `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
@@ -215,8 +215,11 @@ ctest --test-dir backend/build -C Release --output-on-failure
   누락·중복·순서 및 상세 필드 불일치 검출, 빈 frame의 enqueue/drain 검증
 - `signal_tcp_compare_self_test`: 무작위 꼬리 구간 제외, 논리 프레임 동기화,
   누락·중복·순서·point bit 변경·지문 모호성·EOF·deadline 및 완료 후 동결 검증
+- `signal_background_test`: 기존 OFF CLI, ON 직접 기준 생성/Adapter 비교, ON/OFF의
+  Parser·동기화 자가 테스트, 실제 활성화 상태·통계 JSON, 누락 맵 및 모드 불일치 거부
 
-테스트용 설정은 외부 배경 맵을 사용하지 않습니다. 실제 센서 설치 설정과 구분하세요.
+테스트는 로컬의 실제 배경 맵에 의존하지 않습니다. Background 테스트만 빌드 폴더의
+새 임시 디렉터리에 작은 맵과 설정 사본을 만들며 실제 센서 설치 설정/맵은 변경하지 않습니다.
 
 ### 오프라인 Adapter 비교
 
@@ -240,7 +243,25 @@ $outputDir = '.\backend\build\s0-3-compare' # 새 디렉터리 또는 빈 디렉
 B Reader의 정렬/병합 전에 거부합니다. 빈 frame은 메모리 경로에서 허용하지만 point 단위 CSV로
 복원할 수 없으므로 가짜 point를 추가하지 않습니다. B 처리 후 CSV는 입력으로 사용하지 않습니다.
 
-두 경로 모두 배경 제거 비활성인 비교만 지원합니다. `--s0-3`은 close threshold 0.5와
+옵션 생략 시 두 경로 모두 실제 배경 제거 비활성 상태를 요구합니다. `--require-background`는
+두 경로 모두 `usesBackground()==true`를 요구하며, 로드 실패로 OFF fallback되면 실패합니다.
+설정/맵을 켜거나 끄는 옵션은 아닙니다. 현재 `elevator_1st.cfg`의 맵이 로컬에 있으면 위 OFF
+예시는 거부될 수 있습니다. OFF 재검증은 `background.map_path`가 빈 검증용 설정 사본으로
+진행하고, 원본 설정이나 맵을 수정·이동·삭제하지 마세요.
+
+ON 모드는 OFF 기준 `b_frames.csv`를 받지 않습니다. 아래처럼 외부 baseline 인자를 생략하면
+실제 ON인 B 직접 처리로 새 `direct_frames.csv`를 생성하고 Adapter 경로와 비교합니다.
+
+```powershell
+$base = '.\backend\build\s0-3-b-baseline-20261031_014816'
+$out = ".\backend\build\validation\s0-3-bg-on-offline-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+.\backend\build\Release\signal_replay_compare.exe `
+  signal_processing/config/elevator_1st.cfg "$base\S0-3_t01.csv" $out --require-background --s0-3
+$LASTEXITCODE
+Get-Content "$out\comparison_summary.json"
+```
+
+`--s0-3`은 close threshold 0.5와
 1,673 frame / 381,730 point / 333 cluster / 전환 7 / OPEN 1,175 / CLOSED 489 / UNKNOWN 9를
 추가 검증합니다. 옵션을 생략하면 다른 raw CSV와 해당 기준 결과에도 사용할 수 있습니다.
 이 수치는 로컬 B 단독 재현 기준이며 B 팀원의 프레임별 원본 결과와 직접 대조한 것은 아닙니다.
@@ -288,6 +309,49 @@ timeout은 1~86400초이며 기본값은 동기화 120초, 전체 240초입니�
 연속 비교합니다. 수신 RadarFrame을 기존 BackendPipeline/Adapter로 전달하고 stream ID와 host
 timestamp가 B까지 보존되는지 검사합니다. 원본 ID/PCR 시간은 매핑용이며 수신 값을 덮어쓰지 않습니다.
 클러스터/문 상태 비교에서만 논리 ID로 대응합니다. PCR 시간과 host 시간의 동일성을 요구하지 않습니다.
+
+### Background ON TCP 검증
+
+`--require-background` 지정 시 TCP 연결 전에 같은 입력/설정으로 **실제 ON인 B 직접 처리**를
+한 번 순차 실행해 기준을 생성합니다. 기존 OFF `b_frames.csv`를 재사용하지 않도록 이 모드에서는
+`--baseline`을 거부합니다. 생략 시 기존 OFF CLI와 외부 baseline 비교 동작을 유지합니다.
+
+```powershell
+$base = '.\backend\build\s0-3-b-baseline-20261031_014816'
+$out = ".\backend\build\validation\s0-3-bg-on-tcp-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+.\backend\build\Release\signal_replay_compare.exe --tcp 127.0.0.1 29172 `
+  --config signal_processing/config/elevator_1st.cfg --input "$base\S0-3_t01.csv" `
+  --output $out --require-background --s0-3 --sync-timeout 120 --total-timeout 240
+$LASTEXITCODE
+Get-Content "$out\tcp_comparison_summary.json"
+```
+
+새 기준은 `tcp_reference_frames.csv`에 저장합니다.
+기준 측 `background_direct`와 논리 index 0에서 초기화한 `background_live`는 실제
+`usesBackground()` 값입니다. 어느 쪽이든 요구 모드와 다르면 실패하며, live 미생성 시 `null`입니다.
+기존 `background_enabled`는 기준 측 실제 값을 기록합니다.
+`baseline_source=generated_background_on`, `external_baseline_compared=false`는 새 ON 기준을 뜻합니다.
+
+`background_stats_direct`는 입력 전체, `background_stats_live`는 동기화 후 B에 전달한 구간만의
+`input_points`, `removed_points`, `removal_rate_percent`, `processed_frames`를 기록합니다.
+제거율 분모는 ROI 통과 점이며 입력 0이면 `null`입니다. 동기화 전 제외 frame은 live 통계에 섞이지 않습니다.
+오프라인에서는 대응 항목을 `background_stats_direct` / `background_stats_adapter`에 기록합니다.
+
+현재 설정과 제공된 맵으로 수행한 S0-3 ON 오프라인 비교에서는 양쪽 실제 ON,
+1,673 frame / 381,730 point / 333 cluster / OPEN 1,175 / 전환 7, 모든 비교 차이 0을 확인했습니다.
+두 경로의 배경 입력은 ROI 통과 점 8,829개, 제거는 0개(0%)였습니다. 기존 OFF 기준 결과와의
+오프라인 회귀도 통과했으며, 이 결과는 실제 TCP/Emulator ON 검증과 구분합니다.
+
+S0-3은 ROI에서 정적 배경이 제거되어 ON이어도 제거율 0%가 정상일 수 있습니다.
+ON/OFF 출력 일치를 배경 제거 기능의 효과 검증으로 취급하지 않으며, 다른 시나리오의 효과 검증과 구분합니다.
+사용자가 격리된 backlog 1 Radar Emulator GUI로 수행한 ON TCP E2E 결과도 확인했습니다.
+수신 3,137 frame 중 동기화 전 1,464개를 제외하고 1,673 frame / 381,730 point를 검증했으며,
+직접/live 모두 실제 ON, cluster 333개, Parser 거부 및 point/frame/cluster/문 상태 차이는 모두 0이었습니다.
+`complete=true`, `passed=true`, `termination_reason=complete`, `error_code=0`으로 완료됐습니다.
+기록은 `backend/build-websocket-integration/validation/s0-3-bg-on-tcp-20261101_113453/`에 보존합니다.
+이는 격리된 Emulator 실행 파일의 사용자 검증이며 정식 소스 반영 후 GUI를 새로 검증한 결과나
+물리 RETINA-4SN 검증은 아닙니다. Winsock 10014의 근본 원인도 해결됐다고 판단하지 않습니다.
+기존 OFF 기록과 구분하고, 다음 실행의 동기화 전 제외 수를 470 또는 1,464로 고정하지 마세요.
 
 마지막 논리 프레임까지 비교하면 동일 thread callback에서 `stop()`을 호출합니다. join/detach는 없고,
 같은 feed의 추가 callback은 완료 결과를 변경하지 않습니다. `received_tcp_frames`는 완료 전 callback
