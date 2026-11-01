@@ -442,6 +442,51 @@ Winsock 10014의 근본 원인을 해결한 것이 아닙니다.
 Benchmark와 함께 사용할 수 없습니다. 설정 오류는 종료 코드 2입니다.
 기존 `--benchmark`/`--benchmark-frames`의 Parser 측정 범위는 변경하지 않았습니다.
 
+### 같은 PC 및 LAN PC에서 접속
+
+기본 bind는 `127.0.0.1:8080`이며 경로는 `/radar`입니다. 기본값은 같은 PC의
+클라이언트용으로 유지합니다. 같은 LAN의 다른 PC에서 접속하려면 Backend PC에 실제로
+할당된 LAN IPv4를 `--ws-bind`로 지정합니다. 이 옵션에는 호스트명이 아닌 IP를 사용합니다.
+
+```powershell
+# Backend PC: 먼저 활성 네트워크 어댑터의 IPv4를 확인합니다.
+Get-NetIPConfiguration
+$backendLanIp = '<Backend PC의 실제 LAN IPv4>' # 확인한 주소로 교체
+.\build-integrated\backend\Release\elevsafe_backend.exe --ws-mock `
+  --ws-bind $backendLanIp --ws-port 8080 --ws-duration 60
+```
+
+Backend 독립 빌드는 실행 파일 경로를 `backend/build-websocket-integration/Release/`로
+바꾸면 됩니다. `--ws-port`를 바꾸면 클라이언트 URL의 포트도 함께 바꿉니다.
+
+| Backend bind | 같은 PC의 URL | 다른 LAN PC의 URL |
+| --- | --- | --- |
+| `127.0.0.1` (기본) | `ws://127.0.0.1:8080/radar` | 접속 불가 |
+| Backend의 LAN IPv4 | `ws://<Backend LAN IPv4>:8080/radar` | 같은 URL 사용 |
+| `0.0.0.0` (명시적으로 선택할 때만) | loopback 또는 Backend LAN IPv4 URL | Backend LAN IPv4 URL |
+
+`localhost`와 `127.0.0.1`은 브라우저/클라이언트가 실행되는 PC 자신을 가리킵니다.
+Frontend를 여는 PC가 Backend와 다르면 Backend의 LAN IP를 사용해야 합니다.
+`0.0.0.0`은 모든 IPv4 인터페이스의 수신 주소이며 클라이언트 접속 URL로 사용하지 않습니다.
+실제 LAN IP만 bind하면 loopback URL에서는 수신하지 않습니다. DHCP나 네트워크 변경으로
+LAN IP가 바뀌면 실행 인자와 클라이언트 URL을 다시 맞춰야 합니다.
+
+동일 LAN이어도 Windows 방화벽, 활성 네트워크 프로필, 단말 격리 등에 따라 원격 연결이
+차단될 수 있습니다. 필요한 인바운드 허용은 별도 승인 후 Backend 실행 파일·TCP 포트·
+허용할 D PC IP·실제 적용 프로필로 제한합니다. Private 전용 규칙은 Public 프로필에
+적용되지 않습니다. 서버는 방화벽/프로필을 자동 변경하지 않습니다.
+같은 PC에서 LAN IP로 접속한 성공은 다른 PC에서의 접속 성공을 뜻하지 않습니다.
+
+2026-11-01에는 기존 Release 실행 파일을 활성 LAN IPv4의 8080에 bind해 동일 PC에서
+검증했습니다. 두 클라이언트의 handshake와 동일 v6 JSON 21개 수신, 증가하는 정수
+`timestamp_us`, 평균 Mock 시간 간격 99.68ms(수신 간격 90.78ms)를 확인했습니다.
+초기 수신 큐와 스케줄링이 있으므로 이 짧은 표본은 정확한 실시간 주기 보장이 아닙니다.
+한 연결 종료 후 다른 연결의 수신 유지, OPEN/HOLD/CLOSE 순서의 요청 수신,
+잘못된 요청 거부 및 서버/클라이언트 종료 코드 0을 확인했습니다. 실제 문 제어는 없습니다.
+이 실행에서는 10014가 없었으며 반복 안정성이나 다른 PC의 방화벽/라우팅/D GUI 접속은
+미검증입니다. 원시 로그와 결과는 Git 제외 경로
+`build-integrated/diagnostics/ws-lan-20261101-01/`에 보존했습니다.
+
 ### JSON 및 수동 요청
 
 v6 송신은 `timestamp`, `timestamp_us`, `door_command`, `door_state`, `passengers`를
@@ -501,14 +546,21 @@ Mock에서는 수신 큐를 비우지만 요청에 따라 Mock 상태를 바꾸�
 
 ### D Frontend 수동 연결 절차
 
-D 코드 변경은 이번 작업에 포함하지 않습니다. D 담당자가 `frontend/src/App.jsx`의
-`USE_REAL_WEBSOCKET=true`, `RADAR_WS_URL='ws://localhost:8080/radar'`를 선택한 뒤
-기존 `npm start`로 실행하면 Mock과 연결할 수 있습니다. 이 절차의 실행 여부는 별도 보고합니다.
-빈 passengers는 전체 목록 제거, 필드 생략은 목록 유지라는 D의 현재 동작을 고려해야 합니다.
+D 코드 변경은 이번 작업에 포함하지 않습니다. 현재 `frontend/src/App.jsx`의
+WebSocket `useEffect`/`new WebSocket(...)` 연결 예제와 `ws.send(...)` 수동 명령 송신은
+주석 처리되어 있습니다. `USE_REAL_WEBSOCKET`과 `RADAR_WS_URL` 설정은 구현되어 있지
+않으므로 해당 값을 지정하거나 `npm start`만 실행해도 Backend에 연결되는 상태가 아닙니다.
+D 담당자가 연결·수신·명령 송신 코드를 활성화하고, 같은 PC라면 loopback URL,
+다른 PC라면 Backend LAN IP의 URL을 사용하도록 연동해야 합니다. 현재 수동 버튼은
+화면 상태를 바꾸는 시뮬레이션이며 실제 Backend 송신/문 제어 완료를 뜻하지 않습니다.
 
-기본 bind는 loopback이지만 인증·Origin 제한·TLS는 구현하지 않았습니다. 외부 bind는
-신뢰된 테스트 환경에서만 사용하고 실제 문 제어 시스템에 연결하지 마세요. HTTPS UI에는
-wss가 필요하지만 이 서버의 TLS 구성은 현재 범위가 아닙니다.
+인증·Origin 검증·접속 IP별 권한·TLS는 구현하지 않았습니다. LAN에서 접근 가능한
+클라이언트는 Snapshot 수신뿐 아니라 OPEN/HOLD/CLOSE 요청도 보낼 수 있습니다.
+현재는 수신·FIFO까지만 구현되어 실제 문 제어/ACK는 없지만, 임의 요청과 큐 포화 위험이
+있으므로 신뢰된 LAN의 허용된 시험 PC로 접근을 제한해야 합니다. 외부 인터넷 공개나
+인터넷 포트 포워딩을 하지 마세요. HTTPS UI에는 `wss://`가 필요하지만 현재 서버는
+TLS를 제공하지 않습니다. LAN 시험은 승인된 환경에서 진행하며 실제 문 제어 시스템에는
+연결하지 않습니다.
 
 ### A-B 및 WebSocket transport 공존
 
