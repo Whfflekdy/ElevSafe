@@ -1,4 +1,8 @@
 .vscode/
 backend/build/
 
+backend/build-websocket/
+
+backend/build-websocket-integration/
+
 /build-integrated/

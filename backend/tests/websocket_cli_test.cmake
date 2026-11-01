@@ -1,0 +1,43 @@
+if(NOT DEFINED BACKEND_EXE)
+    message(FATAL_ERROR "Missing executable")
+endif()
+function(reject expected)
+    execute_process(COMMAND "${BACKEND_EXE}" ${ARGN}
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
+    if(NOT "${result}" STREQUAL "${expected}")
+        message(FATAL_ERROR "CLI ${ARGN}: expected ${expected}, got ${result}: ${output} ${error}")
+    endif()
+endfunction()
+reject(2 127.0.0.1 0)
+reject(2 127.0.0.1 65536)
+reject(2 127.0.0.1 29172 --benchmark-frames 0)
+reject(2 127.0.0.1 29172 --benchmark-frames abc)
+reject(2 127.0.0.1 29172 --benchmark-frames 164)
+reject(2 --ws-port 8080)
+reject(2 --ws-mock --benchmark)
+reject(2 --ws-mock 127.0.0.1 29172)
+reject(2 --ws-mock --ws-port 0)
+reject(2 --ws-mock --ws-port abc)
+reject(2 --ws-mock --ws-duration 0)
+reject(2 --ws-mock --ws-duration 86401)
+reject(2 --websocket --ws-duration 1)
+reject(2 --ws-mock --ws-bind)
+reject(1 --ws-mock --ws-bind invalid-ip --ws-duration 1)
+reject(1 --mock-websocket --ws-bind invalid-ip --ws-duration 1)
+reject(2 --ws-mock --signal-config unused.cfg)
+reject(2 --mock-websocket --signal-config unused.cfg)
+reject(2 --websocket --signal-config)
+reject(2 --websocket --signal-config a.cfg --signal-config b.cfg)
+reject(1 127.0.0.1 29172 --websocket --signal-config missing-signal-config.cfg)
+
+# A valid B configuration must initialize before transport startup. A numeric-IP
+# parse failure avoids depending on the host's intermittent native socket errors.
+get_filename_component(backend_dir "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+execute_process(COMMAND "${BACKEND_EXE}" 127.0.0.1 29172 --websocket
+    --signal-config "${backend_dir}/tests/data/signal_integration.cfg" --ws-bind invalid-ip
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 5)
+if(NOT "${result}" STREQUAL "1" OR NOT error MATCHES "SignalPipeline ready:"
+    OR NOT error MATCHES "startup/runtime failed")
+    message(FATAL_ERROR "Combined A-B/WebSocket initialization failed: ${result}: ${output} ${error}")
+endif()
+message(STATUS "WebSocket and existing CLI rejection tests passed")

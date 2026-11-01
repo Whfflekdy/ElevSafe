@@ -2,18 +2,26 @@
 #include "elevsafe/retina_client.h"
 #include "elevsafe/signal_adapter.h"
 #include "pipeline/signal_pipeline.h"
+#include "elevsafe/websocket_server.h"
+#include "elevsafe/websocket_message.h"
 
+#include <algorithm>
+#include <atomic>
 #include <charconv>
+#include <chrono>
+#include <csignal>
+#include <exception>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <new>
-#include <optional>
 #include <stdexcept>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace
 {
@@ -48,8 +56,10 @@ namespace
 
     void printUsage()
     {
-        std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N]"
-                     " [--signal-config PATH]\n";
+        std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N] [--signal-config PATH]\n"
+                     "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
+                     "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS]\n"
+                     "       --mock-websocket is an alias for --ws-mock\n";
     }
 
     void printProcessingSummary(const elevsafe::ParserProcessingSummary& summary)
@@ -63,24 +73,69 @@ namespace
                   << "p95ProcessingMs=" << summary.p95ProcessingMs << '\n'
                   << "maximumProcessingMs=" << summary.maximumProcessingMs << '\n';
     }
+
+    std::atomic<bool> mockStop{false};
+    static_assert(std::atomic<bool>::is_always_lock_free);
+    void stopMock(int) { mockStop.store(true, std::memory_order_relaxed); }
+
+    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds)
+    {
+        mockStop.store(false, std::memory_order_relaxed);
+        const auto previous = std::signal(SIGINT, stopMock);
+        std::cerr << "[ws] MOCK ONLY: synthetic session snapshots, target 100ms (10Hz), duration=" << seconds
+                  << "s. No radar/C result, no door control. Ctrl+C stops this mode.\n";
+        constexpr auto period = std::chrono::milliseconds(100);
+        std::optional<std::chrono::steady_clock::time_point> firstFrame;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+        auto next = std::chrono::steady_clock::now();
+        while (!mockStop.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < deadline)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next)
+            {
+                if (!firstFrame) firstFrame = now;
+                const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - *firstFrame).count();
+                const auto message = elevsafe::mockSnapshot(static_cast<std::uint64_t>(elapsed));
+                if (!server.publishSnapshot(message))
+                {
+                    std::cerr << "[ws] Mock publish failed\n";
+                    if (previous != SIG_ERR) std::signal(SIGINT, previous);
+                    return 1;
+                }
+                next += period;
+                // Skip missed slots instead of issuing a catch-up burst.
+                const auto afterPublish = std::chrono::steady_clock::now();
+                if (next <= afterPublish) next = afterPublish + period;
+            }
+            while (server.popCommand()) {} // Received requests are logged, never executed.
+            std::this_thread::sleep_until(std::min({deadline, next, now + std::chrono::milliseconds(25)}));
+        }
+        if (previous != SIG_ERR) std::signal(SIGINT, previous);
+        server.stop();
+        const auto stats = server.statistics();
+        std::cerr << "[ws] stopped sent=" << stats.snapshotsSent
+                  << " ingressReplaced=" << stats.ingressReplaced
+                  << " sessionReplaced=" << stats.sessionReplaced
+                  << " commands=" << stats.commandsReceived << " rejected=" << stats.rejectedRequests << '\n';
+        return 0;
+    }
 }
 
 int main(int argc, char** argv)
 {
-    const std::string host = argc >= 2 ? argv[1] : "127.0.0.1";
+    std::string host = "127.0.0.1";
     std::uint16_t port = 29172;
-
-    if (argc >= 3 && !parsePort(argv[2], port))
-    {
-        std::cerr << "Invalid port '" << argv[2] << "'. Port must be in the range 1-65535.\n";
-        printUsage();
-        return 2;
-    }
-
+    int positionals = 0;
     bool benchmarkMode = false;
     std::optional<std::size_t> benchmarkFrameLimit;
+    bool websocketEnabled = false;
+    bool mockMode = false;
+    bool websocketSettings = false;
+    bool durationSpecified = false;
+    std::size_t mockSeconds = 30;
+    elevsafe::WebSocketConfig wsConfig;
     std::optional<std::string> signalConfigPath;
-    for (int argument = 3; argument < argc;)
+    for (int argument = 1; argument < argc;)
     {
         const std::string_view option(argv[argument]);
         if (option == "--signal-config")
@@ -94,6 +149,41 @@ int main(int argc, char** argv)
                 return 2;
             }
             signalConfigPath = argv[argument + 1];
+            argument += 2;
+            continue;
+        }
+        if (option == "--websocket" || option == "--ws-mock" || option == "--mock-websocket")
+        {
+            websocketEnabled = true;
+            mockMode = mockMode || option == "--ws-mock" || option == "--mock-websocket";
+            ++argument;
+            continue;
+        }
+        if (option == "--ws-port" || option == "--ws-bind" || option == "--ws-duration")
+        {
+            if (argument + 1 >= argc || std::string_view(argv[argument + 1]).empty()
+                || std::string_view(argv[argument + 1]).starts_with("--"))
+            {
+                std::cerr << "Missing value for " << option << '\n';
+                return 2;
+            }
+            const auto* value = argv[argument + 1];
+            if (option == "--ws-port" && !parsePort(value, wsConfig.port))
+            {
+                std::cerr << "Invalid --ws-port: expected 1-65535\n";
+                return 2;
+            }
+            if (option == "--ws-bind") wsConfig.address = value;
+            if (option == "--ws-duration")
+            {
+                if (!parsePositiveSize(value, mockSeconds) || mockSeconds > 86400)
+                {
+                    std::cerr << "Invalid --ws-duration: expected 1-86400 seconds\n";
+                    return 2;
+                }
+                durationSpecified = true;
+            }
+            websocketSettings = true;
             argument += 2;
             continue;
         }
@@ -134,8 +224,27 @@ int main(int argc, char** argv)
             continue;
         }
 
-        std::cerr << "Unknown option '" << option << "'.\n";
-        printUsage();
+        if (option.starts_with("--") || positionals >= 2)
+        {
+            std::cerr << "Unknown option or extra argument '" << option << "'.\n";
+            printUsage();
+            return 2;
+        }
+        if (positionals == 0) host = option;
+        else if (!parsePort(argv[argument], port))
+        {
+            std::cerr << "Invalid port '" << option << "'. Port must be in the range 1-65535.\n";
+            return 2;
+        }
+        ++positionals;
+        ++argument;
+    }
+
+    if ((websocketSettings && !websocketEnabled) || (durationSpecified && !mockMode)
+        || (mockMode && (positionals != 0 || benchmarkMode || benchmarkFrameLimit.has_value() || signalConfigPath.has_value())))
+    {
+        std::cerr << "WebSocket settings require --websocket/--ws-mock; duration is Mock-only. "
+                     "Mock cannot be combined with radar host/port, benchmark or --signal-config options.\n";
         return 2;
     }
 
@@ -169,6 +278,23 @@ int main(int argc, char** argv)
         catch (const std::exception& exception)
         {
             std::cerr << "SignalPipeline initialization failed: " << exception.what() << '\n';
+            return 1;
+        }
+    }
+
+    std::unique_ptr<elevsafe::WebSocketServer> websocket;
+    if (websocketEnabled)
+    {
+        try
+        {
+            websocket = std::make_unique<elevsafe::WebSocketServer>(wsConfig, std::cerr);
+            websocket->start();
+            if (mockMode) return runMock(*websocket, mockSeconds);
+            std::cerr << "[ws] transport only: no C result, no live snapshot generation or door control\n";
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "[ws] startup/runtime failed: " << error.what() << '\n';
             return 1;
         }
     }

@@ -6,6 +6,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(cmake/WebSocketDependencies.cmake)
+find_package(Threads REQUIRED)
+
+add_library(elevsafe_websocket
+    src/websocket_server.cpp
+    src/websocket_message.cpp
+)
+target_include_directories(elevsafe_websocket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(elevsafe_websocket PRIVATE elevsafe_boost_headers nlohmann_json::nlohmann_json Threads::Threads)
+target_compile_options(elevsafe_websocket PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8> $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)
+if(WIN32)
+    target_compile_definitions(elevsafe_websocket PRIVATE _WIN32_WINNT=0x0A00)
+    target_link_libraries(elevsafe_websocket PRIVATE ws2_32 mswsock)
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../signal_processing signal_processing)
 
 add_library(elevsafe_backend_core
@@ -32,7 +47,7 @@ add_library(elevsafe_signal_adapter src/signal_adapter.cpp)
 target_link_libraries(elevsafe_signal_adapter PUBLIC elevsafe_backend_core radar_core)
 target_compile_options(elevsafe_signal_adapter PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
-target_link_libraries(elevsafe_backend PRIVATE elevsafe_signal_adapter)
+target_link_libraries(elevsafe_backend PRIVATE elevsafe_signal_adapter elevsafe_websocket)
 
 enable_testing()
 
@@ -92,3 +107,19 @@ add_test(NAME signal_background_test COMMAND ${CMAKE_COMMAND}
     -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/background-self-tests
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/signal_background_test.cmake)
 set_tests_properties(signal_background_test PROPERTIES TIMEOUT 60)
+
+add_executable(websocket_message_test tests/websocket_message_test.cpp)
+target_link_libraries(websocket_message_test PRIVATE elevsafe_websocket nlohmann_json::nlohmann_json)
+add_test(NAME websocket_message_test COMMAND websocket_message_test)
+
+add_executable(websocket_server_test tests/websocket_server_test.cpp)
+target_link_libraries(websocket_server_test PRIVATE elevsafe_websocket elevsafe_boost_headers nlohmann_json::nlohmann_json)
+target_compile_options(websocket_server_test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)
+if(WIN32)
+    target_compile_definitions(websocket_server_test PRIVATE _WIN32_WINNT=0x0A00)
+endif()
+add_test(NAME websocket_server_test COMMAND websocket_server_test)
+set_tests_properties(websocket_server_test PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
+add_test(NAME websocket_cli_test COMMAND ${CMAKE_COMMAND}
+    -DBACKEND_EXE=$<TARGET_FILE:elevsafe_backend> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/websocket_cli_test.cmake)
+set_tests_properties(websocket_message_test websocket_cli_test PROPERTIES TIMEOUT 30)

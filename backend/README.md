@@ -10,12 +10,17 @@ consumer로 전달하는 단일 스레드 runtime입니다. `--signal-config PAT
 옵션을 생략하면 기존 수신/console 경로를 유지합니다. C Tracking/State와
 D Frontend는 현재 Backend에 연결되어 있지 않습니다.
 
+기존 WebSocket transport와 명시적 Mock 모드가 A-B 실행 경로와 공존합니다.
+WebSocket 전용 코드는 `7c86f77`의 기존 구현을 재사용했으며, 실제 B/C 결과를
+승객 Snapshot으로 전송하거나 수동 문 제어를 실행하지 않습니다.
+
 ## 디렉터리 구조
 
 ```text
 backend/
 ├─ CMakeLists.txt
 ├─ README.md
+├─ cmake/WebSocketDependencies.cmake
 ├─ include/
 │  └─ elevsafe/
 │     ├─ radar_types.h
@@ -24,14 +29,18 @@ backend/
 │     ├─ retina_client.h
 │     ├─ frame_buffer.h
 │     ├─ backend_pipeline.h
-│     └─ signal_adapter.h
+│     ├─ signal_adapter.h
+│     ├─ websocket_server.h
+│     └─ websocket_message.h
 ├─ src/
 │  ├─ main.cpp
 │  ├─ retina_protocol.cpp
 │  ├─ retina_client.cpp
 │  ├─ frame_buffer.cpp
 │  ├─ backend_pipeline.cpp
-│  └─ signal_adapter.cpp
+│  ├─ signal_adapter.cpp
+│  ├─ websocket_server.cpp
+│  └─ websocket_message.cpp
 └─ tests/
    ├─ retina_protocol_test.cpp
    ├─ frame_buffer_test.cpp
@@ -39,6 +48,11 @@ backend/
    ├─ relative_frame_clock_test.cpp
    ├─ signal_adapter_test.cpp
    ├─ signal_integration_test.cpp
+   ├─ signal_replay_compare.cpp
+   ├─ websocket_message_test.cpp
+   ├─ websocket_server_test.cpp
+   ├─ websocket_cli_test.cmake
+   ├─ repeat_websocket_tests.ps1
    └─ data/                     # 독립적인 통합 테스트용 설정
 ```
 
@@ -126,7 +140,8 @@ producer와 consumer가 분리되는 구조에서는 별도 검토가 필요합�
 
 `main.cpp`는 host와 port를 읽고 `RetinaClient`를 실행합니다. callback에서
 `onFrame()`을 호출한 직후 `drain()`을 호출하므로 현재 runtime은 별도
-worker thread 없는 single-thread synchronous 구조입니다. 기존의
+Radar 처리용 worker thread 없는 single-thread synchronous 구조입니다.
+WebSocket을 활성화하면 transport만 별도의 I/O thread에서 동작합니다. 기존의
 `frameCount`, `timestampUs`, `pointCount`, 첫 point의 `x/y/z/doppler/power/targetId`
 출력은 `drain()`에 전달된 console consumer가 담당합니다.
 
@@ -187,13 +202,45 @@ Live timestamp는 PCR 원본 상대 시간과 같은 기준 시각을 의미하�
 - CMake
 - C++20
 
+### WebSocket 의존성
+
+`cmake/WebSocketDependencies.cmake`는 Boost **1.86.0**과 nlohmann/json **3.11.3**의
+공식 배포 archive를 SHA256으로 고정합니다. Boost.Beast/Asio/System은 header-only로
+사용하며 Boost 바이너리 빌드나 시스템 전역 설치가 필요하지 않습니다. JSON은
+`nlohmann_json::nlohmann_json` CMake target을 사용합니다.
+
+새 configure의 첫 실행은 인터넷과 Boost archive 약 149MB 다운로드·압축 해제가
+필요합니다. 소스는 선택한 build directory의 `_deps/`에만 저장됩니다.
+버전 고정은 최신 보안 상태나 production 사용 적합성을 보장하지 않습니다.
+배포 시 [Boost License](https://www.boost.org/LICENSE_1_0.txt)와
+[JSON MIT License](https://github.com/nlohmann/json/blob/v3.11.3/LICENSE.MIT)를 확인하세요.
+
+다운로드가 제한된 환경은 CMake의 `FETCHCONTENT_SOURCE_DIR_ELEVSAFE_BOOST`와
+`FETCHCONTENT_SOURCE_DIR_ELEVSAFE_JSON`에 미리 확보한 동일 버전 source directory를
+지정할 수 있습니다. 이 override에서는 archive hash 검사가 실행되지 않으므로
+관리자가 source의 버전·무결성을 별도로 확인해야 합니다.
+
+### Windows 한글 로그
+
+WebSocket의 Boost.System Windows 오류 메시지는 `BOOST_SYSTEM_USE_UTF8`로
+UTF-8을 사용하며, 이 설정은 Boost를 사용하는 서버와 테스트에 함께 적용합니다.
+소켓 동작, JSON 및 B의 코드·파일 형식은 변경하지 않습니다.
+반복 스크립트도 새 stdout/stderr 로그를 UTF-8로 읽습니다.
+
+B의 한글 로그는 기존 `/utf-8` 빌드의 UTF-8 출력입니다. 기존 UTF-8 파일을 조회할 때는
+`Get-Content -LiteralPath .\existing.log -Encoding UTF8`처럼 인코딩을 지정하세요.
+직접 실행하는 터미널과 native 출력 캡처 환경도 UTF-8에 맞아야 하며, 프로그램에서
+Windows 콘솔 코드 페이지를 강제로 변경하지 않습니다. 이미 잘못 변환되어 저장된
+로그나 이전 ACP 오류 메시지가 섞인 파일을 이 설정이 복구하지는 않습니다.
+한글 표시와 B의 Unicode 파일 경로 지원은 별개이며 B의 경로 API는 이번에 바꾸지 않습니다.
+
 ## Build
 
 프로젝트 루트에서 실행합니다.
 
 ```powershell
-cmake -S backend -B backend/build
-cmake --build backend/build --config Release
+cmake -S backend -B backend/build-websocket-integration -G "Visual Studio 17 2022" -A x64
+cmake --build backend/build-websocket-integration --config Release
 ```
 
 Repository 루트의 CMake 진입점으로도 같은 Backend와 B `radar_core`를 빌드할 수 있습니다.
@@ -213,10 +260,14 @@ ctest --test-dir build-integrated -C Release --output-on-failure
 ## Test
 
 ```powershell
-ctest --test-dir backend/build -C Release --output-on-failure
+ctest --test-dir backend/build-websocket-integration -C Release --output-on-failure
 ```
 
-현재 CMake에 등록된 테스트는 다음 9개입니다.
+통합 빌드의 실행 파일은 `backend/build-websocket-integration/Release/`에 생성됩니다.
+아래 명령은 통합 실행 파일을 사용합니다. 기존 `backend/build/`의 입력 데이터와
+이전 검증 기록은 그대로 보존하며 새 통합 빌드와 구분합니다.
+
+현재 CMake에 등록된 테스트는 다음 12개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
 - `frame_buffer_test`: bounded FIFO, FIFO 순서, oldest frame 제거 및 capacity 검증
@@ -232,8 +283,51 @@ ctest --test-dir backend/build -C Release --output-on-failure
 - `signal_background_test`: 기존 OFF CLI, ON 직접 기준 생성/Adapter 비교, ON/OFF의
   Parser·동기화 자가 테스트, 실제 활성화 상태·통계 JSON, 누락 맵 및 모드 불일치 거부
 
+- `websocket_message_test`: Mock Snapshot 및 수동 요청 JSON 검증
+- `websocket_server_test`: loopback handshake, 경로, 다중 접속, 요청 FIFO,
+  느린 client, 큐 교체, 큰 메시지, 연결 해제/재접속, pending I/O 종료
+- `websocket_cli_test`: 기존 CLI와 신규 옵션의 잘못된 입력 및 종료 코드 검증
+
 테스트는 로컬의 실제 배경 맵에 의존하지 않습니다. Background 테스트만 빌드 폴더의
 새 임시 디렉터리에 작은 맵과 설정 사본을 만들며 실제 센서 설치 설정/맵은 변경하지 않습니다.
+
+서버 테스트는 8080/8081/8082 port를 사용하고 timeout 및 직렬 실행을 설정합니다.
+테스트 전에 해당 port의 기존 서버를 정상 종료하세요. 로컬 반복 검증에서는 listen/connect
+단계의 Winsock 10014가 간헐 관찰되었습니다. 전체 테스트 통과와 별개로 반복 안정성은
+추가 확인이 필요합니다. 기존 A-B `backend/build` 실행 파일과 혼동하지 마세요.
+
+서버 테스트 실패 시 하위 테스트명, 작업 단계, port, 오류 코드·메시지와 서버 내부 로그를
+출력합니다. 포트 충돌 테스트는 주소 사용 중 오류만 인정하며 10014 등 다른 오류는 실패입니다.
+
+상태 대기는 `slow.client.ready`, `snapshot.pressure.observed`, `fast.client.ready`,
+`slow.client.retained-or-removed` 등으로 구분하며 기대값·관측값·통계와 Unix epoch ms를
+기록합니다. 느린 client는 유지되거나 기존 정책에 따라 제거될 수 있습니다. 테스트는
+두 경우 모두 큐 상한, Snapshot 교체/폐기 통계, 정상 client의 실제 송수신을 확인합니다.
+
+하위 테스트를 분리하거나 진행·정리 로그를 실시간으로 보려면 다음처럼 실행합니다.
+
+```powershell
+.\backend\build-websocket-integration\Release\websocket_server_test.exe --diagnostics --case queue-bounds-slow-client
+& .\backend\tests\repeat_websocket_tests.ps1 -Mode Server -Count 20
+& .\backend\tests\repeat_websocket_tests.ps1 -Mode Server -Case queue-bounds-slow-client -Count 20
+& .\backend\tests\repeat_websocket_tests.ps1 -Mode Mock -Count 20
+```
+
+반복 스크립트는 Windows PowerShell 5.1용이며 기본 프로세스 제한은 45초입니다.
+기본 실행 파일 위치는 통합 빌드이며 다른 빌드는 `-BuildDirectory`로 지정합니다.
+`backend/build-websocket-integration/diagnostics/<실행시각>-<모드>/`에 전체 stdout/stderr, 시작 즉시
+PID·시각을 기록한 `runs.jsonl`과 `results.csv`를 남깁니다. 시작/종료/Timeout 진단은 별도 행이므로
+집계할 때 Round별 마지막 행만 사용합니다. `Success`, `Winsock10014`, `Winsock10048`,
+`Timeout`, `Other`, `OutputIncomplete`를 구분하며 기존 로그 디렉터리는 덮어쓰지 않습니다.
+Timeout 사실을 먼저 저장하고 프로세스·스레드·TCP 상태를 추가 저장한 뒤 중단합니다. 프로세스를 자동 종료하거나
+다음 반복을 시작하지 않으므로, 기록된 PID를 확인하고 정리한 뒤 별도 실행하세요.
+Timeout 이후에도 로그 redirection을 유지하려면 실행한 PowerShell 창을 프로세스 종료 전까지
+닫지 마세요. 실패 지점(`FailureStage`)과 정리 중 마지막 진행 단계(`LastStage`)는 별도입니다.
+`-OutputDirectory`로 비어 있는 출력 디렉터리를 지정할 수 있습니다. Mock의 기본 실행 시간은
+1초이며 `-MockDurationSeconds`로 변경할 수 있습니다. 출력 파일은 실행 중에도 조회할 수 있습니다.
+
+실행 정책이 `.ps1` 실행을 차단하면 정책을 임의로 변경하지 마세요. 스크립트 실행 방식은
+해당 환경의 보안 정책에 따라 확인해야 합니다. 진단 파일에는 로컬 경로·PID 등이 포함됩니다.
 
 ### 오프라인 Adapter 비교
 
@@ -247,7 +341,7 @@ $base = '.\backend\build\s0-3-b-baseline-20261031_014816' # 확보한 검증 자
 $inputCsv = "$base\S0-3_t01.csv"
 $baselineCsv = "$base\b_frames.csv"
 $outputDir = '.\backend\build\s0-3-compare' # 새 디렉터리 또는 빈 디렉터리
-.\backend\build\Release\signal_replay_compare.exe `
+.\backend\build-websocket-integration\Release\signal_replay_compare.exe `
   signal_processing/config/elevator_1st.cfg `
   $inputCsv $baselineCsv $outputDir --s0-3
 ```
@@ -268,8 +362,8 @@ ON 모드는 OFF 기준 `b_frames.csv`를 받지 않습니다. 아래처럼 외�
 
 ```powershell
 $base = '.\backend\build\s0-3-b-baseline-20261031_014816'
-$out = ".\backend\build\validation\s0-3-bg-on-offline-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-.\backend\build\Release\signal_replay_compare.exe `
+$out = ".\backend\build-websocket-integration\validation\s0-3-bg-on-offline-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+.\backend\build-websocket-integration\Release\signal_replay_compare.exe `
   signal_processing/config/elevator_1st.cfg "$base\S0-3_t01.csv" $out --require-background --s0-3
 $LASTEXITCODE
 Get-Content "$out\comparison_summary.json"
@@ -288,6 +382,179 @@ Get-Content "$out\comparison_summary.json"
 비교합니다. 누락·중복·순서·기준 결과 차이를 검출하면 최초 차이를 출력하고 종료 코드 1을 반환합니다.
 입력/초기화 오류는 stderr와 종료 코드 1로 보고하며 완료 결과 JSON을 생성하지 않을 수 있습니다.
 
+### WebSocket 단독 Mock
+
+Radar Emulator 없이 프로젝트 루트에서 실행할 수 있습니다.
+
+```powershell
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe --ws-mock
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe --ws-mock --ws-port 8080 --ws-duration 60
+```
+
+기본 주소는 `ws://127.0.0.1:8080/radar`, Mock 실행 시간은 30초입니다. 고정된 예시
+Snapshot을 목표 100ms(10Hz) 주기로 publish하며 `Ctrl+C` 또는 지정 시간이 끝나면 서버를 정리합니다.
+연결 직전 publish된 Snapshot은 재전송하지 않으므로 첫 수신은 다음 주기까지 기다릴 수 있습니다.
+Mock의 timestamp는 `2026-10-30T11:00:00Z`라는 **고정 예시**이며 현재 시각이나 센서 시각이 아닙니다.
+승객 label도 `MOCK Passenger #1`로 구분합니다. `timestamp_us`는 Mock 세션 첫 발행을
+0으로 하는 steady clock 경과 µs(정수)이며 재접속으로 초기화하지 않습니다. 실제 RadarFrame의
+시각이나 처리 지연이 아닙니다. 스케줄이 늦으면 놓친 주기를 건너뛰며 몰아서 전송하지 않습니다.
+10Hz는 목표 전송 주기이며 OS 스케줄링·큐 교체·느린 클라이언트에 따른 지연/누락이 가능합니다.
+실제 C 결과의 10Hz 갱신이나 새 결과가 없을 때의 재전송 정책은 아직 구현하지 않았습니다.
+
+`--mock-websocket`은 기존 `--ws-mock`의 별칭입니다. Mock은 host/port,
+benchmark 및 `--signal-config`와 함께 사용할 수 없습니다.
+
+### 레이더 수신과 WebSocket transport 동시 실행
+
+```powershell
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 127.0.0.1 29172 --websocket
+```
+
+이 모드는 기존 TCP/Parser/FrameBuffer/console 경로와 WebSocket 접속·요청 수신을
+함께 실행합니다. C 결과가 없으므로 **실시간 Snapshot은 생성하지 않습니다.**
+옵션을 생략하면 서버를 시작하지 않고 기존 동작을 유지합니다. 서버 초기화 실패는
+레이더 연결 전에 종료 코드 1로 끝나며, TCP 실패/정상 EOF로 run이 반환하면 서버도 정리합니다.
+레이더 모드의 기존 Ctrl+C 종료 처리는 변경하지 않았으므로 그 경로의 graceful shutdown은
+보장하지 않습니다. WebSocket thread에서 `RetinaClient::stop()`을 호출하지 않습니다.
+
+| 옵션 | 의미 |
+| --- | --- |
+| `--websocket` | 레이더와 함께 transport 활성화 |
+| `--ws-mock` | 독립 Mock, 레이더 연결 없음 |
+| `--ws-bind IP` | 기본 `127.0.0.1`; IP literal 사용 |
+| `--ws-port N` | 기본 8080, 1~65535 |
+| `--ws-duration N` | Mock만 사용, 1~86400초 |
+
+주소/port 옵션은 `--websocket` 또는 `--ws-mock`이 필요합니다. Mock은 레이더 host/port 및
+Benchmark와 함께 사용할 수 없습니다. 설정 오류는 종료 코드 2입니다.
+기존 `--benchmark`/`--benchmark-frames`의 Parser 측정 범위는 변경하지 않았습니다.
+
+### JSON 및 수동 요청
+
+v6 송신은 `timestamp`, `timestamp_us`, `door_command`, `door_state`, `passengers`를
+포함한 text JSON입니다. `timestamp_us`는 세션 첫 프레임 기준 경과 µs의 음수가 아닌 정수입니다.
+누락, 음수, 실수, 문자열, null/bool은 거부하며 별도 `alert` 필드는 허용하지 않습니다.
+`timestamp`는 유지하며 상대 µs를 절대시각이나 처리 지연으로 해석하지 않습니다.
+승객은 `id`, 유한한 숫자 `x/y`(m), `state`, `safety_state`, 선택적 `label`을 사용합니다.
+`state`는 OUTSIDE/ENTERING/INSIDE/EXITING, `safety_state`는 null/FALL/IMMOBILE입니다.
+door_state는 OPEN/CLOSED/OPENING/CLOSING, door_command는 null/OPEN/HOLD/CLOSE입니다.
+UNKNOWN 변환이나 z 필드 추가는 하지 않습니다. ID는 정수 또는 문자열을 허용하며
+최종 Tracking ID 타입과 실제 결과 공급은 C 통합 시 확인해야 합니다.
+
+현재 수동 요청은 다음처럼 **door_command 한 필드만** 받습니다.
+
+```json
+{"door_command":"OPEN"}
+```
+
+OPEN/HOLD/CLOSE는 로그와 `popCommand()` FIFO에 전달합니다. JSON 오류, 비객체,
+필드 누락, null/알 수 없는 명령, 추가 필드, binary 메시지는 거부합니다.
+**수신은 실행 완료가 아닙니다.** ACK, 문 상태 변경, MANUAL/AUTO 우선순위 적용은 없습니다.
+Mock에서는 수신 큐를 비우지만 요청에 따라 Mock 상태를 바꾸지 않습니다.
+레이더 모드의 큐는 향후 제어 계층용이며 현재 실행 consumer는 연결하지 않았습니다.
+
+### 스레드·큐·종료 정책
+
+- 서버 객체가 I/O thread 하나와 모든 세션을 소유합니다. start/stop은 소유자 thread에서 호출합니다.
+- `publishSnapshot()`은 소유권 있는 JSON을 전달하며 네트워크 전송 완료를 기다리지 않습니다.
+- ingress 최신 메시지 1개와 알림 작업 1개만 대기합니다. 세션마다 전송 중 1개를 보존하고
+  대기 1개만 최신 메시지로 교체합니다. 동일 세션의 write는 직렬 실행합니다.
+- 기본 최대 client 8개(진행 중 handshake 포함), Snapshot 65536 bytes, 수동 요청 4096 bytes,
+  명령 큐 32개입니다. HTTP header는 8192 bytes, body는 허용하지 않습니다.
+- listen backlog는 `min(maxClients, 128)`입니다. 로컬 검증에서 시스템 최대값
+  SOMAXCONN 사용 시 .NET에서도 Winsock 10014가 재현되어 유한한 backlog를 사용합니다.
+  이 접속 대기열은 Snapshot/명령 큐와 별도이며 OS 설정은 변경하지 않습니다.
+- 명령 큐 초과 시 기존 요청을 보존하고 새 요청을 수용하지 않은 채 해당 client를 종료합니다.
+  Snapshot처럼 명령을 조용히 덮어쓰지 않습니다. 큰 요청은 연결을 종료합니다.
+- handshake 읽기 제한 3초, write 제한 5초입니다. 느린 client의 세션만 닫으며 Radar TCP 설정은 바꾸지 않습니다.
+- ingress 큐는 1개, 등록 세션마다 전송 중 1개·대기 1개를 보관합니다. 기본 8개 세션의
+  정상 진행 중 payload는 전달 중 메시지를 포함해 보수적으로 약 18 x 64KiB입니다.
+  취소 완료를 기다리는 종료 세션의 전송 buffer, 수신 buffer, JSON 임시 메모리와 OS buffer는
+  별도이므로 전체 프로세스 메모리에 대한 고정 상한을 뜻하지는 않습니다.
+- stop은 accept 중단 후 close handshake를 시도하고 500ms 후 남은 socket을 취소/닫습니다.
+  thread를 join하고 남은 completion handler도 정리합니다. stop은 반복 호출할 수 있고,
+  재시작은 새 서버 객체를 생성합니다. 500ms는 스케줄링 지연까지 포함한 실행시간 보장이 아닙니다.
+- I/O handler 예외 시 새 연결을 중단하고 남은 작업을 취소·정리합니다. start 실패와 이미
+  종료된 I/O thread도 stop의 정리 대상입니다. start 실패 후 재시도 역시 새 객체가 필요합니다.
+- stop은 I/O 종료 요청을 보낸 뒤 thread 종료 통지를 기다리고 join합니다. 지연 시
+  `stop.thread.wait`, 취소 완료 처리 지연 시 `stop.drain.wait`를 출력합니다. 테스트 client도
+  취소된 callback 완료까지 객체·버퍼를 보존하며 `client.cancel.drain` 진행 상태를 출력합니다.
+  native 취소나 handler가 멈추면 안전한 자원 해제를 위해 대기가 남을 수 있습니다.
+  hard timeout 보장, 강제 thread 종료, detach는 제공하지 않으며 외부 watchdog으로 진단합니다.
+- `statistics()`에서 ingress/session 교체 수, 송신 수, 수신·거부 및 명령 큐 초과를 조회합니다.
+  연결 종료·write timeout·Snapshot 폐기, 현재/최대 ingress·세션 대기·write 수도 조회합니다.
+  각 카운터는 원자적이지만 여러 필드가 한 순간의 일관된 snapshot을 보장하지는 않습니다.
+  Mock 종료 로그도 교체/요청 통계를 출력합니다. 서버 자체는 영구 로그 파일을 만들지 않습니다.
+
+### D Frontend 수동 연결 절차
+
+D 코드 변경은 이번 작업에 포함하지 않습니다. D 담당자가 `frontend/src/App.jsx`의
+`USE_REAL_WEBSOCKET=true`, `RADAR_WS_URL='ws://localhost:8080/radar'`를 선택한 뒤
+기존 `npm start`로 실행하면 Mock과 연결할 수 있습니다. 이 절차의 실행 여부는 별도 보고합니다.
+빈 passengers는 전체 목록 제거, 필드 생략은 목록 유지라는 D의 현재 동작을 고려해야 합니다.
+
+기본 bind는 loopback이지만 인증·Origin 제한·TLS는 구현하지 않았습니다. 외부 bind는
+신뢰된 테스트 환경에서만 사용하고 실제 문 제어 시스템에 연결하지 마세요. HTTPS UI에는
+wss가 필요하지만 이 서버의 TLS 구성은 현재 범위가 아닙니다.
+
+### A-B 및 WebSocket transport 공존
+
+```powershell
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 127.0.0.1 29172 --signal-config signal_processing/config/elevator_1st.cfg --websocket
+```
+
+B는 기존과 같이 동기적으로 처리하고 결과를 console에 출력합니다. WebSocket은
+별도 I/O thread에서 연결과 요청 수신을 처리하지만 실제 B 결과를 Snapshot으로
+변환하지 않습니다. Parser Benchmark의 측정 범위도 변경하지 않습니다.
+
+향후 연결 위치는 다음과 같으며 **아직 구현되지 않았습니다**.
+
+```text
+SignalPipeline::process() -> C 처리 결과 -> A JSON 직렬화 -> publishSnapshot()
+```
+
+C의 공개 API 확정 전에는 cluster_id를 승객 ID로 쓰거나 승객 상태를 만들지 않습니다.
+B의 문 상태 추정값은 실제 문 상태로 확정하지 않으며 상대 µs를 임의의 절대시각으로
+변환하지 않습니다. v6의 MANUAL 우선 원칙은 유지하되 현재는 요청 수신만 구현되어
+있고 실제 우선 처리와 제어 실행은 없습니다.
+
+### v6 Mock 자동 수신 확인
+
+다음 명령은 별도 PowerShell 두 창에서 실행합니다. 먼저 서버의 listening 로그를 확인합니다.
+루트 빌드는 `build-integrated/backend/Release`, 독립 빌드는
+`backend/build-websocket-integration/Release`를 사용합니다.
+
+```powershell
+# 창 1: 실제 Mock 프로세스 (자동 종료)
+.\build-integrated\backend\Release\elevsafe_backend.exe --ws-mock --ws-duration 60
+# 창 2: 별도 프로세스에 접속하는 명시적 검증 모드
+.\build-integrated\backend\Release\websocket_server_test.exe --case mock-process --diagnostics
+```
+
+`mock-process`는 두 클라이언트의 동일 v6 JSON 21개, 증가하는 상대 시간,
+20구간 평균 수신/생성 주기, 개별 종료·재접속을 검사합니다. 로컬 테스트의 평균 주기
+허용 범위 70~150ms는 스케줄링 여유이며 실시간 보장값이 아닙니다. OPEN/HOLD/CLOSE와
+잘못된 요청을 보내며 서버 로그로 수신을 확인합니다. FIFO와 느린 클라이언트 격리는
+기존 CTest `websocket_server_test`가 검사합니다. 이 외부 Mock 모드는 CTest에서 자동 실행하지 않습니다.
+소켓 실패는 그대로 실패이며 재접속 기능 검사는 실패 재시도와 구분합니다.
+
+2026-11-01 v6 변경 검증에서는 루트/Backend 독립 x64 Release Build와 각 CTest 12/12가
+통과했습니다. 별도 Mock 프로세스의 두 클라이언트가 동일 JSON 21개를 수신했고, 20구간
+평균 수신 간격 99.71ms, Mock 상대 시간 간격 99.71ms를 관측했습니다. OPEN/HOLD/CLOSE
+수신 순서, 잘못된 요청 거부, 개별 종료·재접속 및 서버/클라이언트 종료 코드 0을 확인했습니다.
+첫 실행 보조 스크립트의 종료 코드 수집 누락은 별도 로그로 보존하고 수집 방식을 수정해
+확인했습니다. 이번 실행에서 10014가 없었지만 기존 간헐 오류의 해결이나 장시간 안정성을
+뜻하지 않습니다. 실제 D GUI·C 결과·물리 센서 E2E는 이번 검증에 포함하지 않았습니다.
+
+### AWS와 실제 제어 연동 범위
+
+현재 A Backend에 AWS 클라이언트/전송 경로는 없습니다. 따라서 AWS 장애 격리가
+구현·검증됐다고 주장하지 않습니다. 향후 C 결과로 만든 Snapshot의 별도 소비 지점에
+클라우드 전송을 연결하되, 제한된 별도 큐·worker·timeout과 오류 진단을 두어야 합니다.
+Radar 수신/B 처리, 로컬 제어 및 `publishSnapshot()`에서 클라우드 응답을 기다리거나
+클라우드 실패로 로컬 파이프라인을 종료하지 않도록 설계해야 합니다. 이는 후속 설계 조건이며
+이번에는 구현하지 않았습니다. 실제 C/하드웨어 Door Control도 아직 연결하지 않았습니다.
+
 ### Radar Emulator TCP 비교 모드
 
 기존 Radar Emulator는 최초 활성화 위치가 무작위이고 PCR 원본 frame ID를 stream 번호로
@@ -303,7 +570,7 @@ TCP 29172를 정상 개방한 다음, ElevSafe 루트에서 새 출력 디렉터
 ```powershell
 $base = '.\backend\build\s0-3-b-baseline-20261031_014816'
 $out = ".\backend\build\s0-3-emulator-e2e-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-.\backend\build\Release\signal_replay_compare.exe --tcp 127.0.0.1 29172 `
+.\backend\build-websocket-integration\Release\signal_replay_compare.exe --tcp 127.0.0.1 29172 `
   --config signal_processing/config/elevator_1st.cfg `
   --input "$base\S0-3_t01.csv" --baseline "$base\b_frames.csv" `
   --output $out --sync-timeout 120 --total-timeout 240 --s0-3
@@ -332,8 +599,8 @@ timestamp가 B까지 보존되는지 검사합니다. 원본 ID/PCR 시간은 �
 
 ```powershell
 $base = '.\backend\build\s0-3-b-baseline-20261031_014816'
-$out = ".\backend\build\validation\s0-3-bg-on-tcp-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-.\backend\build\Release\signal_replay_compare.exe --tcp 127.0.0.1 29172 `
+$out = ".\backend\build-websocket-integration\validation\s0-3-bg-on-tcp-$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+.\backend\build-websocket-integration\Release\signal_replay_compare.exe --tcp 127.0.0.1 29172 `
   --config signal_processing/config/elevator_1st.cfg --input "$base\S0-3_t01.csv" `
   --output $out --require-background --s0-3 --sync-timeout 120 --total-timeout 240
 $LASTEXITCODE
@@ -392,6 +659,32 @@ packet·동기화/전체 timeout을 확인했습니다. 별도 연결 실패 시
 별도로 완료한 S0-3 전체 Emulator TCP E2E 결과는 아래 검증 상태에 기록합니다.
 
 ## 검증 상태
+
+### A-B 및 WebSocket 공존 검증 (2026-10-31)
+
+통합 코드의 Windows x64 Release Build와 전체 CTest 11/11이 통과했습니다.
+S0-3(1,673 frame / 381,730 point) 및 front_man(164 frame / 106,024 point)을
+통합 비교 실행기로 다시 처리했으며 프레임별 결과와 cluster 상세 float32 비트 비교의
+불일치는 모두 0건입니다. 두 경로 모두 배경 맵 비활성 조건입니다.
+
+별도 Mock 프로세스에 실제 WebSocket client 2개를 연결해 JSON 수신, 수동 요청
+OPEN/HOLD/CLOSE 수신 및 연결 해제·프로세스 정상 종료를 확인했습니다.
+`--ws-mock`과 별칭 `--mock-websocket` 모두 검사했으며 명령 실행이나 ACK는 없습니다.
+
+| 통합 바이너리 반복 검증 | 성공 | Winsock 10014 실패 |
+| --- | ---: | ---: |
+| 전체 서버 테스트 20회 | 12 | 8 |
+| slow-client 단독 10회 | 5 | 5 |
+| Mock 시작/종료 20회 | 17 | 3 |
+
+이 반복 실행에서 10048, Timeout 및 기타 오류는 없었습니다. 별도 .NET IPv4 loopback
+bind/listen(포트 0, backlog 8) 20회는 모두 성공했지만 조건이 다른 단일 기준선이므로
+과거 독립 TCP의 10014 재현을 반박하거나 원인을 확정하는 결과는 아닙니다.
+10014를 무시하거나 자동 재시도로 성공 처리하지 않았으며 반복 안정성은 미해결입니다.
+기록은 Git 제외 경로 `backend/build-websocket-integration/validation/`에 보관합니다.
+
+이번 통합 코드로 Radar Emulator TCP E2E, 실제 물리 센서 및 D Frontend GUI는
+재검증하지 않았습니다. 아래의 기존 S0-3 TCP E2E 기록과 구분하세요.
 
 기존 A 수신·파싱 범위에서 Radar Emulator에 대해 다음을 확인했습니다.
 
@@ -465,7 +758,7 @@ Emulator가 원본 frame ID를 stream ID로 바꾸므로 전체 point 데이터�
 Radar Emulator를 실행하고 `.pcr` 데이터셋을 연 뒤 재생을 시작합니다.
 
 ```powershell
-.\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 127.0.0.1 29172
 ```
 
 ### RETINA-4SN
@@ -473,7 +766,7 @@ Radar Emulator를 실행하고 `.pcr` 데이터셋을 연 뒤 재생을 시작�
 Device Discovery 없이 장치 IP를 직접 지정합니다.
 
 ```powershell
-.\backend\build\Release\elevsafe_backend.exe 192.168.30.1 29172
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 192.168.30.1 29172
 ```
 
 실제 RETINA-4SN에서는 AP Mode 및 TCP `29172` 연결 후
@@ -491,8 +784,8 @@ host와 port는 command line으로 지정할 수 있습니다. port는 `1`부터
 아래 minitest 설정은 센서 좌표를 유지하는 비엘리베이터 테스트용입니다.
 
 ```powershell
-.\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172 --signal-config signal_processing/config/minitest.cfg
-.\backend\build\Release\elevsafe_backend.exe 192.168.30.1 29172 --signal-config signal_processing/config/elevator_1st.cfg
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 127.0.0.1 29172 --signal-config signal_processing/config/minitest.cfg
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 192.168.30.1 29172 --signal-config signal_processing/config/elevator_1st.cfg
 ```
 
 설정 경로는 명시적으로 한 번만 지정하며 기본 설정을 자동 선택하지 않습니다.
@@ -516,7 +809,7 @@ Radar Emulator로 PCR을 한 번 재생하며 A 수신/파싱 구간을 측정�
 `--benchmark`를 마지막 인자로 지정합니다.
 
 ```powershell
-.\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172 --benchmark
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 127.0.0.1 29172 --benchmark
 ```
 
 Radar Emulator의 loop playback에서 첫 N개의 valid frame만 측정하려면
@@ -524,7 +817,7 @@ Radar Emulator의 loop playback에서 첫 N개의 valid frame만 측정하려면
 다음과 같습니다.
 
 ```powershell
-.\backend\build\Release\elevsafe_backend.exe 127.0.0.1 29172 --benchmark --benchmark-frames 164
+.\backend\build-websocket-integration\Release\elevsafe_backend.exe 127.0.0.1 29172 --benchmark --benchmark-frames 164
 ```
 
 이 모드는 기존 frame별 console 출력을 생략하지만, 동일한 synchronous
@@ -557,17 +850,20 @@ B 처리시간은 Parser Benchmark에 포함되지 않습니다. 다만 같은 t
 - `BackendPipeline` enqueue/drain skeleton
 - frameCount, timestampUs, pointCount, 첫 point console 출력
 - 선택적 A-B Adapter 및 SignalPipeline 호출/결과 진단 출력
+- WebSocket transport, 명시적 Mock JSON 송신 및 수동 요청 FIFO 수신
 
 ## 현재 구현되지 않음
 
 - C Tracking / State 실제 연결
-- WebSocket Server
-- JSON Output
-- Multithreading
+- 실제 B/C 결과의 WebSocket Snapshot 생성 및 전송
+- 수동 문 제어 실행 및 ACK
+- Radar 처리의 producer/consumer multithreading
 - Automatic Reconnect
 - Device Discovery
 - Target Section 상세 Parsing
 
-향후 다른 모듈이 연결될 수 있지만, 현재 Backend runtime이 생성하거나
-전송하는 결과는 console 출력까지입니다. 위 미구현 영역을 현재 완료된
-기능으로 간주하지 않습니다.
+실제 레이더/B 처리 결과는 console까지이며 WebSocket JSON 송신은 명시적 Mock에
+한정됩니다. C/D 통합 및 실제 문 제어가 완료된 것으로 간주하지 않습니다.
+
+기존 S0-3 TCP E2E와 WebSocket 반복 테스트는 각 브랜치의 이전 검증입니다.
+통합 코드의 재검증 결과와 구분해야 하며 Winsock 10014의 근본 원인은 미확정입니다.
