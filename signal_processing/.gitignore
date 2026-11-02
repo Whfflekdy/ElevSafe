@@ -1,0 +1,8 @@
+build*/
+data/output/*
+!data/output/.gitkeep
+data/background/
+scratch
+tests/scratch.cpp
+build-release/
+data/raw/
