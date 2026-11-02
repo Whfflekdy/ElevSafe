@@ -1,12 +1,17 @@
 #include "elevsafe/backend_pipeline.h"
 #include "elevsafe/retina_client.h"
+#include "elevsafe/signal_adapter.h"
+#include "pipeline/signal_pipeline.h"
 
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -43,7 +48,8 @@ namespace
 
     void printUsage()
     {
-        std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N]\n";
+        std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N]"
+                     " [--signal-config PATH]\n";
     }
 
     void printProcessingSummary(const elevsafe::ParserProcessingSummary& summary)
@@ -73,9 +79,24 @@ int main(int argc, char** argv)
 
     bool benchmarkMode = false;
     std::optional<std::size_t> benchmarkFrameLimit;
+    std::optional<std::string> signalConfigPath;
     for (int argument = 3; argument < argc;)
     {
         const std::string_view option(argv[argument]);
+        if (option == "--signal-config")
+        {
+            if (signalConfigPath.has_value() || argument + 1 >= argc
+                || std::string_view(argv[argument + 1]).empty()
+                || std::string_view(argv[argument + 1]).starts_with("--"))
+            {
+                std::cerr << "--signal-config requires one non-empty path and may be specified only once.\n";
+                printUsage();
+                return 2;
+            }
+            signalConfigPath = argv[argument + 1];
+            argument += 2;
+            continue;
+        }
         if (option == "--benchmark")
         {
             benchmarkMode = true;
@@ -125,6 +146,33 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    std::unique_ptr<elevsafe::sp::SignalPipeline> signal;
+    if (signalConfigPath.has_value())
+    {
+        try
+        {
+            elevsafe::sp::Config config;
+            if (!config.load(*signalConfigPath))
+            {
+                std::cerr << "Signal config load failed: " << *signalConfigPath << '\n';
+                return 1;
+            }
+            signal = std::make_unique<elevsafe::sp::SignalPipeline>(config);
+            if (!signal->ok())
+            {
+                std::cerr << "SignalPipeline initialization failed: invalid config: " << *signalConfigPath << '\n';
+                return 1;
+            }
+            std::cerr << "SignalPipeline ready: config=" << *signalConfigPath
+                      << " background=" << (signal->usesBackground() ? "enabled" : "disabled") << '\n';
+        }
+        catch (const std::exception& exception)
+        {
+            std::cerr << "SignalPipeline initialization failed: " << exception.what() << '\n';
+            return 1;
+        }
+    }
+
     // Capacity 1 is only the minimum needed for synchronous enqueue -> immediate drain.
     // It is not a production tuning value and must be revisited for a separated producer/consumer design.
     constexpr std::size_t kSynchronousFrameBufferCapacity = 1;
@@ -135,11 +183,39 @@ int main(int argc, char** argv)
     client.setProcessingMetricsFrameLimit(benchmarkFrameLimit);
 
     bool summaryPrinted = false;
-    client.setFrameCallback([&pipeline, &client, benchmarkMode, &summaryPrinted](const elevsafe::RadarFrame& frame)
+    client.setFrameCallback([&pipeline, &client, &signal, benchmarkMode, &summaryPrinted](const elevsafe::RadarFrame& frame)
     {
         pipeline.onFrame(frame);
-        pipeline.drain([benchmarkMode](const elevsafe::RadarFrame& pendingFrame)
+        pipeline.drain([&signal, benchmarkMode](const elevsafe::RadarFrame& pendingFrame)
         {
+            if (signal)
+            {
+                try
+                {
+                    const auto input = elevsafe::toSignalFrame(pendingFrame);
+                    const elevsafe::sp::FrameContext context;
+                    const auto result = signal->process(input, context);
+                    if (!benchmarkMode)
+                        std::cout << "signal frame_id=" << result.frame_id
+                                  << " timestamp_us=" << result.timestamp_us
+                                  << " inputPoints=" << input.points.size()
+                                  << " clusters=" << result.clusters.size()
+                                  << " estimated_door_state="
+                                  << elevsafe::sp::doorStateToString(result.estimated_door_state) << '\n';
+                }
+                catch (const std::bad_alloc&)
+                {
+                    throw;
+                }
+                catch (const std::exception& exception)
+                {
+                    // drain already owns/popped this frame; skip it without retrying B's stateful process.
+                    std::cerr << "Signal frame failed: frameCount=" << pendingFrame.frameCount
+                              << " timestampUs=" << pendingFrame.timestampUs
+                              << ": " << exception.what() << '\n';
+                }
+            }
+
             if (benchmarkMode)
                 return;
 
@@ -171,7 +247,15 @@ int main(int argc, char** argv)
     });
 
     std::cerr << "Connecting to " << host << ':' << port << "...\n";
-    const int result = client.run(std::cerr);
+    int result = 1;
+    try
+    {
+        result = client.run(std::cerr);
+    }
+    catch (const std::exception& exception)
+    {
+        std::cerr << "Backend stopped: " << exception.what() << '\n';
+    }
 
     if (benchmarkMode && !summaryPrinted)
         printProcessingSummary(client.processingSummary());

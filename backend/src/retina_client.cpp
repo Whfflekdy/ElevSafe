@@ -4,6 +4,7 @@
 #include "elevsafe/retina_protocol.h"
 
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -16,6 +17,8 @@
 #else
 #include <cerrno>
 #include <netdb.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -27,19 +30,21 @@ namespace elevsafe
         class SocketRuntime
         {
         public:
-            bool start(std::ostream& log)
+            bool start(std::ostream& log, int& errorCode)
             {
 #ifdef _WIN32
                 WSADATA data{};
                 const int result = WSAStartup(MAKEWORD(2, 2), &data);
                 if (result != 0)
                 {
+                    errorCode = result;
                     log << "WSAStartup failed: " << result << '\n';
                     return false;
                 }
                 m_started = true;
 #else
                 (void)log;
+                (void)errorCode;
 #endif
                 return true;
             }
@@ -84,6 +89,78 @@ namespace elevsafe
             return socket < 0;
 #endif
         }
+
+        int lastSocketError()
+        {
+#ifdef _WIN32
+            return WSAGetLastError();
+#else
+            return errno;
+#endif
+        }
+
+        bool pendingSocketError(int error)
+        {
+#ifdef _WIN32
+            return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
+#else
+            return error == EWOULDBLOCK || error == EAGAIN || error == EINPROGRESS;
+#endif
+        }
+
+        int timeoutError()
+        {
+#ifdef _WIN32
+            return WSAETIMEDOUT;
+#else
+            return ETIMEDOUT;
+#endif
+        }
+
+        int makeNonblocking(std::intptr_t socket)
+        {
+#ifdef _WIN32
+            u_long mode = 1;
+            return ioctlsocket(static_cast<SOCKET>(socket), FIONBIO, &mode) == 0 ? 0 : lastSocketError();
+#else
+            const int flags = fcntl(static_cast<int>(socket), F_GETFL, 0);
+            return flags >= 0 && fcntl(static_cast<int>(socket), F_SETFL, flags | O_NONBLOCK) == 0 ? 0 : errno;
+#endif
+        }
+
+        int waitSocket(std::intptr_t socket, bool writing, const RetinaClient::Deadline& deadline)
+        {
+            for (;;)
+            {
+                const auto left = deadline() - std::chrono::steady_clock::now();
+                if (left <= std::chrono::steady_clock::duration::zero()) return timeoutError();
+                // Re-query the same-thread deadline periodically; no watchdog thread.
+                const auto micros = std::max<std::int64_t>(1, std::min<std::int64_t>(1000000,
+                    std::chrono::duration_cast<std::chrono::microseconds>(left).count()));
+                timeval interval{static_cast<long>(micros / 1000000), static_cast<long>(micros % 1000000)};
+                fd_set ready, errors;
+                FD_ZERO(&ready); FD_ZERO(&errors);
+#ifdef _WIN32
+                const auto native = static_cast<SOCKET>(socket);
+                const int width = 0;
+#else
+                const auto native = static_cast<int>(socket);
+                if (native >= FD_SETSIZE) return EINVAL;
+                const int width = native + 1;
+#endif
+                FD_SET(native, &ready); FD_SET(native, &errors);
+                const int result = select(width, writing ? nullptr : &ready, writing ? &ready : nullptr, &errors, &interval);
+                if (result > 0) return 0;
+                if (result == 0) continue;
+                const int error = lastSocketError();
+#ifdef _WIN32
+                if (error == WSAEINTR) continue;
+#else
+                if (error == EINTR) continue;
+#endif
+                return error;
+            }
+        }
     }
 
     RetinaClient::RetinaClient(std::string host, std::uint16_t port, FrameCallback callback) :
@@ -125,25 +202,44 @@ namespace elevsafe
 
     int RetinaClient::run(std::ostream& log)
     {
+        RunDiagnostics diagnostics;
+        return run(log, {}, diagnostics);
+    }
+
+    int RetinaClient::run(std::ostream& log, const Deadline& deadline, RunDiagnostics& diagnostics)
+    {
+        diagnostics = {};
+        if (deadline && std::chrono::steady_clock::now() >= deadline())
+        {
+            diagnostics.stage = "start";
+            diagnostics.errorCode = timeoutError();
+            diagnostics.timedOut = true;
+            log << "TCP deadline expired before connection: " << socketError(diagnostics.errorCode) << '\n';
+            return 1;
+        }
         m_stopRequested = false;
         m_processingSummary = {};
         m_processingMetricsFrozen = false;
         closeSocket();
 
         SocketRuntime runtime;
-        if (!runtime.start(log))
+        diagnostics.stage = "socket_runtime";
+        if (!runtime.start(log, diagnostics.errorCode))
             return 1;
 
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
+        if (deadline) hints.ai_flags = AI_NUMERICHOST; // Avoid unbounded DNS in validation mode.
 
         addrinfo* addresses = nullptr;
         const std::string port = std::to_string(m_port);
         const int resolveResult = getaddrinfo(m_host.c_str(), port.c_str(), &hints, &addresses);
         if (resolveResult != 0)
         {
+            diagnostics.stage = "resolve";
+            diagnostics.errorCode = resolveResult;
 #ifdef _WIN32
             log << "getaddrinfo failed: " << resolveResult << '\n';
 #else
@@ -160,46 +256,73 @@ namespace elevsafe
 #ifdef _WIN32
             const SOCKET socket = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
             if (socket == INVALID_SOCKET)
+            {
+                lastConnectError = lastSocketError(); haveConnectError = true;
                 continue;
+            }
             m_socket = static_cast<std::intptr_t>(socket);
 #else
             const int socket = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
             if (socket < 0)
+            {
+                lastConnectError = lastSocketError(); haveConnectError = true;
                 continue;
+            }
             m_socket = socket;
 #endif
 
-            if (::connect(
+            const int setupError = deadline ? makeNonblocking(m_socket) : 0;
+            const int connectResult = setupError == 0 ? ::connect(
 #ifdef _WIN32
                 static_cast<SOCKET>(m_socket),
 #else
                 static_cast<int>(m_socket),
 #endif
                 address->ai_addr,
-                static_cast<socklen_t>(address->ai_addrlen)) == 0)
+                static_cast<socklen_t>(address->ai_addrlen)) : -1;
+            int connectError = setupError != 0 ? setupError : (connectResult == 0 ? 0 : lastSocketError());
+            if (deadline && pendingSocketError(connectError))
+            {
+                connectError = waitSocket(m_socket, true, deadline);
+                if (connectError == 0)
+                {
+                    int socketErrorCode = 0;
+                    socklen_t length = sizeof(socketErrorCode);
+                    if (getsockopt(
+#ifdef _WIN32
+                        static_cast<SOCKET>(m_socket), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&socketErrorCode),
+#else
+                        static_cast<int>(m_socket), SOL_SOCKET, SO_ERROR, &socketErrorCode,
+#endif
+                        &length) != 0) connectError = lastSocketError();
+                    else connectError = socketErrorCode;
+                }
+            }
+            if (connectError == 0)
             {
                 break;
             }
 
-            #ifdef _WIN32
-            lastConnectError = WSAGetLastError();
-            #else
-            lastConnectError = errno;
-            #endif
+            lastConnectError = connectError;
             haveConnectError = true;
             closeSocket();
+            if (deadline && connectError == timeoutError()) break;
         }
 
         freeaddrinfo(addresses);
 
         if (isInvalidSocket(m_socket))
         {
+            diagnostics.stage = "connect";
+            diagnostics.errorCode = haveConnectError ? lastConnectError : lastSocketError();
+            diagnostics.timedOut = deadline && diagnostics.errorCode == timeoutError();
             const std::string error = haveConnectError ? socketError(lastConnectError) : currentSocketError();
             log << "TCP connect failed for " << m_host << ':' << m_port << ": " << error << '\n';
             return 1;
         }
 
         log << "Connected to " << m_host << ':' << m_port << '\n';
+        diagnostics.stage = "receiving";
 
         RelativeFrameClock frameClock;
         RetinaStreamParser parser;
@@ -223,6 +346,19 @@ namespace elevsafe
 
         while (!m_stopRequested)
         {
+            if (deadline)
+            {
+                const int error = waitSocket(m_socket, false, deadline);
+                if (error != 0)
+                {
+                    diagnostics.stage = "receive";
+                    diagnostics.errorCode = error;
+                    diagnostics.timedOut = error == timeoutError();
+                    log << "TCP receive wait failed: " << socketError(error) << '\n';
+                    result = 1;
+                    break;
+                }
+            }
 #ifdef _WIN32
             const int received = ::recv(
                 static_cast<SOCKET>(m_socket),
@@ -239,15 +375,20 @@ namespace elevsafe
 
             if (received == 0)
             {
+                diagnostics.stage = "eof";
                 log << "Remote endpoint closed the connection.\n";
                 break;
             }
 
             if (received < 0)
             {
+                const int error = lastSocketError();
+                if (deadline && pendingSocketError(error)) continue;
                 if (!m_stopRequested)
                 {
-                    log << "TCP receive failed: " << currentSocketError() << '\n';
+                    diagnostics.stage = "receive";
+                    diagnostics.errorCode = error;
+                    log << "TCP receive failed: " << socketError(error) << '\n';
                     result = 1;
                 }
                 break;
@@ -259,6 +400,9 @@ namespace elevsafe
         }
 
         m_processingSummary = parser.processingSummary();
+        diagnostics.parser = parser.statistics();
+        diagnostics.bufferedBytes = parser.bufferedBytes();
+        if (m_stopRequested && diagnostics.stage == "receiving") diagnostics.stage = "stopped";
         m_processingMetricsFrozen = parser.processingMetricsFrozen();
         closeSocket();
         return result;

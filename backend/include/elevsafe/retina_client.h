@@ -3,6 +3,7 @@
 #include "retina_protocol.h"
 
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
@@ -28,6 +29,19 @@ namespace elevsafe
 
         // Blocking receive loop. Returns 0 on a clean disconnect, otherwise 1.
         int run(std::ostream& log);
+        struct RunDiagnostics
+        {
+            std::string stage = "not_started";
+            int errorCode = 0;
+            bool timedOut = false;
+            RetinaStreamParser::Statistics parser;
+            std::size_t bufferedBytes = 0;
+        };
+        using Deadline = std::function<std::chrono::steady_clock::time_point()>;
+        // Validation-only bounded I/O. Numeric IP; deadline and callback execute
+        // on this calling thread. stop() must also be called on this thread.
+        // The original run(log) keeps its blocking socket behavior.
+        int run(std::ostream& log, const Deadline& deadline, RunDiagnostics& diagnostics);
         void stop();
 
         const ParserProcessingSummary& processingSummary() const noexcept;
