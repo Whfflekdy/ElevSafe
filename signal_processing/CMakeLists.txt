@@ -40,6 +40,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(build_background src/build_background.cpp)
   target_link_libraries(build_background PRIVATE radar_core)
 
+  # 단위 테스트: cmake --build build 후 ctest --test-dir build
+  enable_testing()
+  add_executable(sp_tests tests/sp_tests.cpp)
+  target_link_libraries(sp_tests PRIVATE radar_core)
+  add_test(NAME sp_tests COMMAND sp_tests)
+
   # 확인용 scratch 실행 파일 (tests/scratch.cpp 가 있을 때만, git에는 올리지 않음)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/scratch.cpp)
     add_executable(scratch tests/scratch.cpp)
