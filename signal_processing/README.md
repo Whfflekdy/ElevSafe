@@ -8,8 +8,8 @@
 ## 파이프라인
 
 ```
-FrameData → 격자 번호 → 좌표 변환 → 문 상태 추정 → ROI 필터 → 정적 배경 제거 → SOR/RCS → DBSCAN → 덩어리 요약 → PipelineResult
-            (Step 2)   (Step 1)    (문 상태)      (Step 1)    (Step 2)        (Step 3)  (Step 4)   (Step 5)
+FrameData → 격자 번호 → 좌표 변환 → 문 상태 추정 → ROI 필터 → 정적 배경 제거 → SOR/RCS → DBSCAN → 봉우리 분할 → 덩어리 요약 → PipelineResult
+            (Step 2)   (Step 1)    (문 상태)      (Step 1)    (Step 2)        (Step 3)  (Step 4)   (Step 5)     (Step 5)
 ```
 
 - [x] **Step 1**: 센서 → 엘리베이터 좌표 변환, Door Zone / Cabin ROI 필터 및 Zone 라벨링
@@ -30,7 +30,8 @@ FrameData → 격자 번호 → 좌표 변환 → 문 상태 추정 → ROI 필�
   - [ ] 변형 알고리즘 (격자 칸 기준 이웃 등, [docs/dbscan_design.md](docs/dbscan_design.md))
 - [ ] **Step 5**: 덩어리 요약 및 대형 군집 분할
   - [x] 1차: 덩어리마다 중심·범위·`z_top`(상위 95%)·평균 도플러·점 수·zone
-  - [ ] 봉우리 분할 + `maybe_merged` (지금은 항상 false)
+  - [x] 봉우리 분할 + `maybe_merged` (기본 꺼짐, 리허설 R3-1 1.53 → 1.81개/프레임)
+  - [ ] 엘리베이터 데이터로 값 조정 후 `elevator_1st.cfg`에서 켜기
   - [ ] 사람이 아닌 덩어리 거르기 (문짝 위쪽 끝, 작은 물체)
 - [x] **A 연동 진입점**: `SignalPipeline` 클래스, `elevsafe::sp` 이름 공간, C++20 빌드 확인
 
@@ -53,15 +54,17 @@ signal_processing/
 │   ├── io/                        # csv_io.h
 │   ├── preprocessing/             # coordinate_transform.h, roi_filter.h, polar_grid.h,
 │   │                              # background_subtractor.h, door_state_estimator.h
-│   ├── clustering/                # clusterer.h (공통 틀), dbscan.h
+│   ├── clustering/                # clusterer.h (공통 틀), dbscan.h, peak_splitter.h
 │   └── pipeline/                  # signal_pipeline.h (공개 진입점, A가 include)
 ├── src/                           # 구현 (include와 같은 구조)
 │   ├── main.cpp                   # radar_pipeline: 오프라인 실행기 (SignalPipeline 사용)
 │   └── build_background.cpp       # build_background: 빈 장면 → 배경 맵 생성
 ├── docs/
 │   └── dbscan_design.md           # DBSCAN 변형 설계 (구상)
-├── tools/                         # inspect_csv.py, pcr_targets_to_csv.py, regen_shared_outputs.sh
+├── tools/                         # inspect_csv.py, pcr_targets_to_csv.py, regen_shared_outputs.sh,
+│                                  # sweep_peak_split.sh, check_split_distance.py
 ├── tests/
+│   └── sp_tests.cpp               # 단위 테스트 (데이터 파일 없이 동작)
 └── data/
     ├── raw/                       # 실측 녹화 CSV (git 제외)
     ├── sample/                    # 테스트용 소형 데이터 (tiny.csv)
@@ -79,6 +82,16 @@ cmake --build build
 
 빌드 종류를 정하지 않으면 최적화 없이 컴파일되어 처리 시간이 여러 배 느려집니다.
 `grep CMAKE_BUILD_TYPE build/CMakeCache.txt`가 `Release`인지 확인하세요.
+
+**단위 테스트**
+
+```bash
+ctest --test-dir build --output-on-failure   # 전체 결과
+./build/sp_tests                             # 항목별 결과
+```
+
+봉우리 분할, 문 상태, ROI를 확인합니다. 코드로 만든 점을 쓰므로 원본 데이터 없이 CI에서도 실행됩니다.
+`add_subdirectory`로 가져갈 때는 빌드되지 않습니다.
 
 **파이프라인 실행**
 
@@ -320,9 +333,49 @@ R1-2와 R1-3 중심 간격이 0.30 m로 나와 테이프 간격(1.0 m)과 다름
 
 ### 남은 검증
 
-- 서 있는 사람 옆의 낮은 자세(아이 키 대용)가 분리되는지 → Step 5에서 머리 높이 봉우리 기반 분할
+- 서 있는 사람 옆의 낮은 자세(아이 키 대용)가 분리되는지 → 아래 "봉우리 분할"로 대응, 실제 데이터 검증 필요
 - 누운 사람이 여러 덩어리로 쪼개지는지 (R5) → 낮은 덩어리 병합 후처리 ([docs/dbscan_design.md](docs/dbscan_design.md))
 - 위아래 이웃 거리가 1.5m라 바닥 반사점이 다리와 붙을 수 있음 → ROI `z_min`으로 먼저 제거
+
+## 봉우리 분할
+
+DBSCAN은 두 사람의 몸이 붙으면 한 덩어리로 잇습니다. 덩어리를 위에서 내려다본 높이 지도를 만들어 머리 위치를 찾고, 머리가 2개 이상이면 각 점을 수평으로 가장 가까운 머리에 나눕니다.
+**기본은 꺼짐**이고 지금은 `rehearsal.cfg`에서만 켜 두었습니다. `elevator_1st.cfg`는 2차 녹화로 값을 정한 뒤 켭니다.
+
+1. 덩어리를 수평 칸으로 나눠 칸마다 가장 높은 z를 구합니다.
+2. 높은 칸부터 봉우리 후보로 보되, 이미 뽑은 봉우리와 가깝거나 사이가 충분히 낮지 않으면 뺍니다.
+3. 봉우리가 2개 이상이면 점을 나누고, 조각이 `min_points`보다 작으면 나누지 않고 `maybe_merged`만 표시합니다.
+4. 봉우리가 1개여도 폭이 `max_width`보다 넓으면 `maybe_merged`를 표시합니다.
+
+| 설정 키 | 기본값 | 리허설 값 | 설명 |
+|---|---|---|---|
+| `peak_split.enabled` | 0 | 1 | 1이면 켬 |
+| `peak_split.cell` | 0.10 | 기본값 | 높이 지도 칸 크기 [m] |
+| `peak_split.min_height` | 0.9 | 기본값 | 봉우리 최소 높이 [m] |
+| `peak_split.min_valley` | 0.15 | 0.10 | 두 봉우리 사이가 낮은 쪽보다 낮아야 하는 값 [m] |
+| `peak_split.min_distance` | 0.30 | 0.30 | 봉우리 사이 최소 수평 거리 [m] |
+| `peak_split.min_points` | 15 | 기본값 | 나눈 뒤 조각의 최소 점 수 |
+| `peak_split.max_width` | 0.70 | 기본값 | 봉우리 1개인데 이보다 넓으면 합쳐짐 의심 [m] |
+
+**리허설 결과 (임시값 `min_valley` 0.10, `min_distance` 0.30)**
+
+| 장면 | 실제 사람 | 끈 상태 | 켠 상태 | 나눈 덩어리 |
+|---|---|---|---|---|
+| **R3-1** | **2** | **1.53** | **1.81** | 169 |
+| R1-1 | 1 | 0.98 | 0.98 | 0 |
+| R1-2 | 1 | 약 1.03 | 1.05 | 7 |
+| R1-3 | 1 | 1.05 | 1.05 | 0 |
+| R2-1 | 1 | 0.91 | 0.91 | 0 |
+
+R3-1에서 프레임별 덩어리 수는 1개 155, 2개 417, 3개 37프레임입니다. 나뉜 프레임의 두 중심 간격은 중앙값 0.48 m, 5 ~ 95% 구간 0.42 ~ 0.52 m입니다.
+
+값 비교는 `bash tools/sweep_peak_split.sh`, 나뉜 간격 확인은 `python3 tools/check_split_distance.py <출력.csv>`로 합니다.
+
+**한계**
+- 강의실 리허설 기준 임시값입니다. 엘리베이터 값은 2차 녹화의 1명 장면과 `S1-5`로 다시 정합니다.
+- 빈 칸은 골짜기로 보지 않습니다. 몸속 구멍 때문에 한 사람이 나뉘는 일을 막기 위해서지만, 두 머리 사이에 점이 없으면 나뉘지 않습니다.
+- R3-1의 남은 1개 프레임 중 대부분은 `maybe_merged`도 표시되지 않습니다. `max_width` 기준을 다시 봐야 합니다.
+- 나뉜 조각은 프레임마다 번호와 위치가 흔들릴 수 있어 C가 추적으로 최종 판단합니다.
 
 ## 데이터 형식
 
@@ -366,7 +419,7 @@ frame_id,timestamp_us,cluster_id,cx,cy,cz,x_min,x_max,y_min,y_max,z_min,z_max,z_
 - `z_top`: 점 높이의 상위 95% (가장 가까운 순위 방식, 점 20개 미만이면 사실상 최댓값)
 - `mean_doppler`: 센서에 다가오면 −, 멀어지면 + (미니테스트 `doppler_man`으로 확인)
 - `zone`: 덩어리 점 중 많은 쪽, 같으면 `DOOR`
-- `maybe_merged`: 0 / 1 (지금은 항상 0)
+- `maybe_merged`: 0 / 1 (`peak_split.enabled`를 켜면 1이 나올 수 있음)
 
 ## 설정 파일
 
@@ -385,6 +438,7 @@ frame_id,timestamp_us,cluster_id,cx,cy,cz,x_min,x_max,y_min,y_max,z_min,z_max,z_
 | `background.*` | 위 표 참고 | 정적 배경 제거 |
 | `door_state.*` | 위 표 참고 | 문 상태 추정 |
 | `dbscan.*` | 위 DBSCAN 표 참고 | 클러스터링 |
+| `peak_split.*` | 위 봉우리 분할 표 참고 | 합쳐진 덩어리 분할 |
 
 Door Zone과 Cabin이 겹치는 경계에서는 진입/퇴장 판단을 위해 **Door Zone을 우선**합니다.
 캐빈 범위는 벽보다 조금 안쪽까지만 잡아서 벽 자체의 점과 벽 너머 다중경로 유령 점을 제외합니다.
@@ -393,7 +447,7 @@ Door Zone과 Cabin이 겹치는 경계에서는 진입/퇴장 판단을 위해 *
 (tx −0.65, ty 1.19, tz 2.14, roll −41, yaw 225). yaw는 현장 측정 44°와, 각도를 바꿔 가며 점이 캐빈에 가장 잘 들어오는 값을 찾은 결과가 일치.
 
 현재는 **승강장(OUTSIDE) 구역이 없어서** y < −0.50인 점은 ROI에서 제거됩니다.
-A-D 합의 v4 예시의 승강장 승객(y = −1.20, OUTSIDE)은 지금 범위로는 출력되지 않으므로 `HALL` 구역을 추가할 예정입니다 (아래 "협의 필요" 참고).
+A-D 합의 v6 예시의 승강장 승객(y = −1.20, OUTSIDE)은 지금 범위로는 출력되지 않으므로 `HALL` 구역을 추가할 예정입니다 (아래 "협의 필요" 참고).
 원본 PCR에는 모든 점이 남아 있으므로 범위를 바꾼 뒤 다시 실행하면 승강장 데이터를 되살릴 수 있습니다.
 
 ## 실측 데이터 특성
@@ -417,7 +471,7 @@ A-D 합의 v4 예시의 승강장 승객(y = −1.20, OUTSIDE)은 지금 범위�
 ### 어른 옆에 붙은 아이 (덩어리 합쳐짐) - C
 
 **문제**: DBSCAN은 위아래로 넉넉하게 묶도록 튜닝되어(z_scale 0.2, 위아래 1.5m),
-아이가 어른 바로 옆에 붙으면 두 사람이 한 덩어리로 합쳐질 수 있다. 리허설 R3-1(어른 두 명 나란히)에서도 약 절반의 프레임에서 합쳐졌다.
+아이가 어른 바로 옆에 붙으면 두 사람이 한 덩어리로 합쳐질 수 있다. 리허설 R3-1(어른 두 명 나란히)에서도 약 절반의 프레임에서 합쳐졌다 (봉우리 분할을 켜면 1.53 → 1.81개/프레임).
 z_scale을 키우면 어른 한 명이 다시 위아래로 쪼개지므로 클러스터링 단계에서는 막기 어렵다.
 
 **역할 분담 (C와 합의)**
@@ -441,13 +495,13 @@ z_scale을 키우면 어른 한 명이 다시 위아래로 쪼개지므로 클�
 
 **현재 (B 초안)**: Door Zone y −0.50 ~ +0.30, Cabin y +0.30 ~ 뒷벽 안쪽, 승강장 구역 없음
 - 문턱(y = 0)을 사이에 두고 양쪽에 걸친 범위라, 캐빈 안이라도 문턱에서 0.3m까지는 `DOOR`
-- A-D 합의 v4에서 Door Transition Zone 범위는 "C와 협의 후 확정"으로 남아 있음
+- A-D 합의 v6에서 Door Transition Zone 범위는 "C와 협의 후 확정"으로 남아 있음
 
 **문제**: y < −0.50은 제거되어, C가 승강장 대기 승객을 OUTSIDE로 판정할 데이터가 없음
 
 **제안**
 - B: 승강장 쪽 점을 지우지 않고 `HALL` 구역 라벨을 추가해 넘김 (ROI 필터·Zone 종류·출력 라벨 수정)
-- C: `HALL` 덩어리를 보고 OUTSIDE 판정 (상태 판정은 C 담당, v4 기준)
+- C: `HALL` 덩어리를 보고 OUTSIDE 판정 (상태 판정은 C 담당, v6 기준)
 - B의 `zone = DOOR` 범위와 C의 Door Transition Zone을 **하나의 범위로 통일**
 
 **정해야 할 것**
@@ -467,19 +521,19 @@ z_scale을 키우면 어른 한 명이 다시 위아래로 쪼개지므로 클�
 - [ ] "애매하면 열림" 원칙과 `UNKNOWN` 처리 방식을 C와 합의 (실제 문 신호 없음)
 
 ### 다음 엘리베이터 녹화 전
-- [ ] FOV 재촬영 계획 (모서리·중앙·문턱·승강장 위치별 Space 기록)
-- [ ] S1(사람 1명), S3(승하차), R5(낙상) 시나리오
-- [ ] 녹화자 위치 규칙(센서 시야 밖), 캐빈 안 물건 위치 고정
-- [ ] S0-3처럼 문 개폐 장면에서 타이머로 문 동작 순간 기록 (문 상태 추정 반응 지연 측정용)
-- [ ] 문 상태: DOOR 구역에 덩어리가 있으면 OPEN → CLOSED 전환 막기 (위 "사람이 있을 때의 위험" 1번)
-- [ ] 문 상태 위험 장면 시나리오 추가: 문 닫힘 + 캐빈 안 문 앞에 1 ~ 2명 / 문 열림 + 문턱에 5초 이상 서 있기 / 문 열림 + 승강장 여러 명
+- [x] FOV 재촬영 계획 (모서리·중앙·문턱·승강장 위치별 Space 기록)
+- [x] 2차 시나리오: S1(1명), S3(승하차), 문 앞 경계 S2-4·S2-1, 2명 어깨 맞대기 S1-5
+- [x] 녹화자 위치 규칙(센서 시야 밖), 캐빈 안 물건 위치 고정
+- [x] 타이머로 문 동작 순간 기록 (문 상태 추정 반응 지연 측정용)
+- [ ] 낙상(R5) 시나리오: 4차 회차 예정
 
 ### 다음 엘리베이터 녹화 후
 - [ ] FOV로 위치별 좌표 검증, R1-2·R1-3 간격 문제 원인 확인
 - [ ] 승객 장면에서 캐빈 안으로 들어오는 다중경로 유령 덩어리 확인 → Step 3 SOR / RCS 설계
   (power 로그 변환, 거리별 임계값, 약한 power·듬성한 점 제거)
 - [ ] 사람이 아닌 덩어리 거르기 (바닥 근처에 점이 없는 덩어리, 누운 자세와 구분)
-- [ ] Step 5 봉우리 분할 + `maybe_merged`
+- [ ] 봉우리 분할: 엘리베이터 값 조정 후 켜기, `max_width`와 빈 칸 처리 재검토
+- [ ] 문 상태: DOOR 구역에 사람 덩어리가 있으면 OPEN → CLOSED 전환 막기 (위 "사람이 있을 때의 위험" 1번)
 - [ ] DBSCAN·배경 맵 파라미터 최종 튜닝, 운행 중 진동(S0-4)으로 dilation 1 충분한지 확인
 - [ ] 문 상태 추정 임계값을 다른 층에서 확인
 - [ ] 문 상태: 위험 장면으로 오판 확인, 열림 맵 기반 판단·문 움직임 신호(OPENING/CLOSING) 시험
