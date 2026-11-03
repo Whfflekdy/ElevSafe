@@ -20,7 +20,8 @@
 #include "preprocessing/background_subtractor.h"
 #include "preprocessing/door_state_estimator.h"
 #include "clustering/dbscan.h"
-#include "clustering/peak_splitter.h"              // include 에 추가
+#include "clustering/peak_splitter.h"    
+#include "preprocessing/outlier_filter.h"   
 
 namespace elevsafe::sp {
 
@@ -61,6 +62,7 @@ struct PipelineStats {
     std::size_t frames = 0;
     ROIStats roi;
     BGStats bg;
+    OutlierStats outlier;
     std::size_t clusters = 0;   // 모든 프레임의 덩어리 수 합
     std::size_t noise = 0;      // 노이즈 점 수 합
     std::size_t splits = 0;                            // PipelineStats 에 추가
@@ -94,6 +96,7 @@ private:
     PolarGrid polar_;
     ROIFilter roi_;
     BackgroundSubtractor bg_;
+    OutlierFilter outlier_;
     DBSCAN dbscan_;
     PeakSplitter splitter_;     
     DoorStateEstimator door_est_;   // 프레임 사이 상태를 기억 → process 는 const 아님

@@ -16,6 +16,7 @@ SignalPipeline::SignalPipeline(const Config& cfg)
       polar_(PolarGridConfig::fromConfig(cfg)),
       roi_(ROIConfig::fromConfig(cfg)),
       bg_(BackgroundConfig::fromConfig(cfg)),
+      outlier_(OutlierConfig::fromConfig(cfg)),
       dbscan_(DBSCANConfig::fromConfig(cfg)),
       splitter_(PeakSplitConfig::fromConfig(cfg)),
       door_est_(DoorStateConfig::fromConfig(cfg)) {
@@ -56,7 +57,12 @@ PipelineResult SignalPipeline::process(const FrameData& frame, const FrameContex
         stats_.bg.removed += bs.removed;
     }
 
-    // Step 3: outlier_filter (SOR, RCS) 자리
+    // Step 3: 허공 노이즈 제거 (RCS, SOR)
+    OutlierStats os;
+    kept = outlier_.filter(kept, &os);
+    stats_.outlier.input += os.input;
+    stats_.outlier.rcs_removed += os.rcs_removed;
+    stats_.outlier.sor_removed += os.sor_removed;
 
     // DBSCAN: 점마다 덩어리 번호 기록
     const ClusteringResult cr = dbscan_.cluster(kept);
