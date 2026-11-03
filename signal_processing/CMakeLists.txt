@@ -23,6 +23,7 @@ add_library(radar_core
   src/preprocessing/polar_grid.cpp
   src/preprocessing/background_subtractor.cpp
   src/preprocessing/door_state_estimator.cpp
+  src/preprocessing/outlier_filter.cpp
   src/clustering/dbscan.cpp
   src/clustering/peak_splitter.cpp
   src/pipeline/signal_pipeline.cpp
