@@ -20,6 +20,7 @@
 #include "preprocessing/background_subtractor.h"
 #include "preprocessing/door_state_estimator.h"
 #include "clustering/dbscan.h"
+#include "clustering/peak_splitter.h"              // include 에 추가
 
 namespace elevsafe::sp {
 
@@ -62,6 +63,8 @@ struct PipelineStats {
     BGStats bg;
     std::size_t clusters = 0;   // 모든 프레임의 덩어리 수 합
     std::size_t noise = 0;      // 노이즈 점 수 합
+    std::size_t splits = 0;                            // PipelineStats 에 추가
+    std::size_t merged = 0;
 };
 
 class SignalPipeline {
@@ -83,7 +86,7 @@ private:
     // 덩어리 요약 함수 선언
     // 점들(kept)과 DBSCAN 결과(labels, num_clusters)를 받아 덩어리마다 클러스터 하나를 만든다
     // 노이즈(label -1) 점은 건너뛴다. 덩어리가 없으면 빈 목록. 
-    static std::vector<Cluster> summarize(const Frame& points, const ClusteringResult& cr);
+    static std::vector<Cluster> summarize(const Frame& points, const SplitResult& sr);
 
     bool ok_ = false;
     bool use_bg_ = false;
@@ -92,6 +95,7 @@ private:
     ROIFilter roi_;
     BackgroundSubtractor bg_;
     DBSCAN dbscan_;
+    PeakSplitter splitter_;     
     DoorStateEstimator door_est_;   // 프레임 사이 상태를 기억 → process 는 const 아님
     PipelineStats stats_;
 };
