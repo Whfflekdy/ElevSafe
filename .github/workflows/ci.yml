@@ -1,0 +1,58 @@
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend (A) build + ctest (Includes B)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 백엔드(A) 폴더를 타겟으로 지정하면, 내부 CMakeLists.txt의 지시에 따라
+      # ../signal_processing 경로의 B 모듈까지 함께 묶어서 빌드를 구성합니다.
+      - name: Configure Backend
+        run: cmake -S backend -B build/backend -DCMAKE_BUILD_TYPE=Release
+        
+      - name: Build Backend
+        run: cmake --build build/backend -j
+        
+      - name: Run Backend Unit Tests
+        run: ctest --test-dir build/backend --output-on-failure
+
+  signal_processing:
+    name: Signal processing (B) standalone build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Signal Processing
+        run: cmake -S signal_processing -B build/sp -DCMAKE_BUILD_TYPE=Release
+      - name: Build Signal Processing
+        run: cmake --build build/sp -j
+      - name: Smoke test (sample CSV)
+        working-directory: signal_processing
+        run: |
+          mkdir -p data/output
+          ../build/sp/radar_pipeline config/elevator_default.cfg data/sample/tiny.csv data/output/ci_out.csv
+          test -s data/output/ci_out.csv
+
+  frontend:
+    name: Frontend (D) build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Build
+        run: CI=false npm run build

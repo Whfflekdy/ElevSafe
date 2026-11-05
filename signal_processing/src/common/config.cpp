@@ -1,0 +1,97 @@
+#include "common/config.h"
+
+#include <fstream>
+#include <iostream>
+
+namespace elevsafe::sp {
+
+namespace { // 이 파일에서만 쓰는 함수여서 다른 파일에 trim과 같은 이름이 있어도 충돌하지 않도록
+// 앞뒤 공백(space, tab, \r, \n) 제거
+std::string trim(const std::string& s){
+    const char* whitespace = " \t\r\n";
+    const auto start = s.find_first_not_of(whitespace);
+    if(start == std::string::npos) return ""; // 공백만 있는 경우
+    const auto end = s.find_last_not_of(whitespace);
+    return s.substr(start, end-start+1);
+}
+}
+
+bool Config::load(const std::string& path){
+    std::ifstream file(path);
+    if(!file.is_open()){
+        std::cerr<< "[Config] 파일을 열 수 없음: " << path << "\n";
+        return false;
+    }
+
+    // 설정 파일이 있는 폴더 기억 (Mac·Linux 는 '/', Windows 는 '\\' 도 쓰므로 둘 다 찾음)
+    // 예: "config/elevator_1st.cfg" → "config"
+    //     "elevator_1st.cfg"        → ""   (현재 폴더)
+    const auto slash = path.find_last_of("/\\");
+    base_dir_ = (slash == std::string::npos) ? "" : path.substr(0, slash);
+
+    std::string line;
+    while(std::getline(file, line)){
+        // '#' 위치를 찾아 그 뒤를 잘라내기 
+        const auto comment_pos = line.find('#');
+        if(comment_pos != std::string::npos){
+            line = line.substr(0, comment_pos);
+        }
+
+        // trim 후 빈 줄이면 continue
+        line = trim(line);
+        if(line.empty()) continue;
+
+        // '=' 위치를 찾고, 없으면 경고 출력 후 continue
+        const auto equal_pos = line.find('=');
+        if(equal_pos == std::string::npos){
+            std::cerr << "[Config] '-' 없는 줄 무시: " << line << "\n";
+            continue;
+        }
+        // '=' 앞은 key, 뒤는 value, 각각 trim해서 values_에 저장
+        const std::string key = trim(line.substr(0, equal_pos));
+        const std::string value = trim(line.substr(equal_pos + 1));
+        values_[key] = value;
+    }
+    return true;
+}
+
+bool Config::has(const std::string& key) const{
+    // values_에 key가 있는지 확인
+    return values_.find(key) != values_.end();
+}
+
+// key에 해당하는 값을 float로 변환하여 반환. 없으면 default_value 반환
+float Config::getFloat(const std::string& key, float default_value) const {
+    auto it = values_.find(key);
+    if (it == values_.end()) return default_value;
+    try {
+        return std::stof(it->second);
+    } catch (...) {
+        std::cerr << "[Config] '" << key << "' 값을 숫자로 바꿀 수 없음: " << it->second << "\n";
+        return default_value;
+    }
+}
+// 맵 파일에서 경로를 읽기 위한 string 반환 함수.
+std::string Config::getString(const std::string& key, const std::string& default_value)const{
+    auto it = values_.find(key);
+    return it == values_.end() ? default_value : it->second;
+}
+
+// 경로 값 읽기: 상대 경로면 "이 설정 파일이 있는 폴더" 기준으로 바꿔서 돌려준다.
+std::string Config::getPath(const std::string& key, const std::string& default_value) const {
+    const std::string value = getString(key, default_value);
+    if (value.empty()) return value;
+
+    // 절대 경로는 그대로
+    const bool absolute =
+        value[0] == '/' ||                          // Mac, Linux: /Users/...
+        value[0] == '\\' ||                         // Windows 네트워크 경로: \\server\...
+        (value.size() >= 2 && value[1] == ':');     // Windows 드라이브: C:/... , C:\...
+    if (absolute) return value;
+
+    // 설정 파일이 현재 폴더에 있으면 그대로, 아니면 그 폴더를 앞에 붙임
+    if (base_dir_.empty()) return value;
+    return base_dir_ + "/" + value;
+}
+
+}  // namespace elevsafe::sp
