@@ -267,8 +267,8 @@ ctest --test-dir backend/build-websocket-integration -C Release --output-on-fail
 아래 명령은 통합 실행 파일을 사용합니다. 기존 `backend/build/`의 입력 데이터와
 이전 검증 기록은 그대로 보존하며 새 통합 빌드와 구분합니다.
 
-Windows CMake에 등록된 테스트는 다음 16개입니다. 비 Windows에서는 PowerShell 재연결
-fixture를 제외한 15개입니다.
+Windows CMake에 등록된 테스트는 다음 17개입니다. 비 Windows에서는 PowerShell 재연결
+fixture를 제외한 16개입니다.
 
 - `retina_protocol_test`: packet/frame parsing 및 stream edge case
 - `retina_reconnect_test`: 재시도 횟수·복구 예산, 10014 제외, 사전 취소·만료 기한,
@@ -293,6 +293,8 @@ fixture를 제외한 15개입니다.
 - `ab_profile_replay_test`: 기존 오프라인 동등성 경로와 성능 Helper 연결 검증
 - `websocket_server_test`: loopback handshake, 경로, 다중 접속, 요청 FIFO,
   느린 client, 큐 교체, 큰 메시지, 연결 해제/재접속, pending I/O 종료
+- `websocket_mock_scenarios_test`: 시험용 가변 Snapshot 6개를 두 client에 전달,
+  잘못된 시간/JSON publish 거부 및 송신 client 종료 후 접수 명령 FIFO 보존
 - `websocket_cli_test`: 기존 CLI 오류, Mock 실패 시 Radar 미진입, WebSocket 시작 실패 후
   Radar 계속 실행을 검증합니다. Windows 기본 PowerShell/.NET fixture가 임시 loopback 포트로
   두 프레임을 보내 Radar-only 및 WebSocket 실패 모드의 B 처리·정상 EOF를 확인합니다.
@@ -555,13 +557,56 @@ Mock에서는 수신 큐를 비우지만 요청에 따라 Mock 상태를 바꾸�
 
 ### D Frontend 수동 연결 절차
 
-D 코드 변경은 이번 작업에 포함하지 않습니다. 현재 `frontend/src/App.jsx`의
-WebSocket `useEffect`/`new WebSocket(...)` 연결 예제와 `ws.send(...)` 수동 명령 송신은
-주석 처리되어 있습니다. `USE_REAL_WEBSOCKET`과 `RADAR_WS_URL` 설정은 구현되어 있지
-않으므로 해당 값을 지정하거나 `npm start`만 실행해도 Backend에 연결되는 상태가 아닙니다.
-D 담당자가 연결·수신·명령 송신 코드를 활성화하고, 같은 PC라면 loopback URL,
-다른 PC라면 Backend LAN IP의 URL을 사용하도록 연동해야 합니다. 현재 수동 버튼은
-화면 상태를 바꾸는 시뮬레이션이며 실제 Backend 송신/문 제어 완료를 뜻하지 않습니다.
+D 코드 변경은 이번 작업에 포함하지 않습니다. 이 Backend 브랜치의 로컬
+`frontend/src/App.jsx`는 연결·명령 송신 코드가 주석 처리된 이전 상태입니다.
+별도로 확인한 GitHub main `bfa1d5af`의 Frontend에는 실제 연결·송신 코드가 있으며,
+소스 상수 `USE_REAL_WEBSOCKET=false`, `RADAR_WS_URL='ws://localhost:8080/radar'`를
+사용합니다. 환경변수 설정이 아니므로 `npm start`만으로 실제 연결이 활성화되지는 않습니다.
+D 담당자가 사용하는 버전을 확인하고 연결 모드를 활성화한 뒤 실제 화면을 검증해야 합니다.
+Backend 자체 시험의 성공은 D 화면 연동 완료를 뜻하지 않습니다.
+
+초기 A–D 시험은 **동일 PC의 loopback**으로 제한합니다. Backend 실행 후 `[ws] listening`
+로그를 확인하고 D는 `ws://127.0.0.1:8080/radar`에 연결합니다. `localhost`는 브라우저가
+실행되는 PC 자신을 뜻합니다. 다른 PC 접속은 별도 승인된 LAN 시험 대상으로 남깁니다.
+
+```powershell
+# Repository 루트에서 실행. 아래 경로는 기본 루트 Release Build 기준입니다.
+Set-Location 'C:\Users\kimji\ElevSafe'
+& '.\build-integrated\backend\Release\elevsafe_backend.exe' --ws-mock --ws-bind 127.0.0.1 --ws-port 8080 --ws-duration 60
+```
+
+격리 Build에서는 위 EXE를 해당 Build의 `backend/Release/elevsafe_backend.exe`로 교체합니다.
+서버는 지정 시간이 끝나거나 Ctrl+C를 받으면 종료합니다. 클라이언트 하나가 종료돼도 다른
+연결과 발행은 유지하며, 재접속한 클라이언트는 다음 발행부터 받습니다. 서버는 클라이언트의
+자동 재연결을 대신하지 않으며, 연결 중단 후 오래된 표시를 어떻게 처리할지는 D에서 확인해야 합니다.
+
+Backend → Frontend text JSON v6 예시(합성 데이터이며 실제 C 결과가 아님):
+
+```json
+{"timestamp":"2026-10-30T11:00:00Z","timestamp_us":100000,"door_state":"OPEN","door_command":null,"passengers":[{"id":1,"x":0.25,"y":0.8,"state":"INSIDE","safety_state":null,"label":"MOCK Passenger #1"}]}
+```
+
+`passengers`는 현재 표시할 **전체 목록**으로 취급하고 이전 목록에 누적하지 않습니다.
+`passengers: []`이면 기존 승객 표시를 비웁니다. x/y는 m이며 Timestamp는 지연 측정값이
+아닙니다. `timestamp` 검사는 문자열 타입만 확인하고 ISO 날짜의 유효성까지 검사하지 않습니다.
+`timestamp_us` 타입은 검증하지만 서버가 메시지 간 단조 증가나 세션 초기화를 강제하지는 않습니다.
+이번 시험용 시퀀스와 기본 Mock 발행자가 각자의 상대 시간을 생성합니다.
+
+Frontend → Backend 요청은 각각 별도 text 메시지로 보냅니다.
+
+```json
+{"door_command":"OPEN"}
+{"door_command":"HOLD"}
+{"door_command":"CLOSE"}
+```
+
+연결이 OPEN일 때 보내고 Backend의 `manual request received ... (not executed; no ACK)`
+로그로 접수를 확인합니다. 이는 실제 문 실행·완료·ACK가 아닙니다. FIFO 순서는 Backend가
+접수한 순서이며 서로 다른 클라이언트의 송신 시각 순서를 보장하지 않습니다. 접수된 명령은
+송신 클라이언트가 종료돼도 큐에 남고, 만료 시각이나 종료 시 취소 정책은 없습니다.
+기본 Mock은 FIFO를 소비해 폐기하고 문 상태를 바꾸지 않습니다. 모든 Mock Snapshot의
+`door_command=null`은 개별 수동 요청의 ACK나 거부 응답으로 해석하지 마세요.
+실제 C Tracking, AUTO/MANUAL 제어 실행, 물리 문 상태 확인은 미연동입니다.
 
 인증·Origin 검증·접속 IP별 권한·TLS는 구현하지 않았습니다. LAN에서 접근 가능한
 클라이언트는 Snapshot 수신뿐 아니라 OPEN/HOLD/CLOSE 요청도 보낼 수 있습니다.
@@ -619,6 +664,84 @@ B의 문 상태 추정값은 실제 문 상태로 확정하지 않으며 상대 
 첫 실행 보조 스크립트의 종료 코드 수집 누락은 별도 로그로 보존하고 수집 방식을 수정해
 확인했습니다. 이번 실행에서 10014가 없었지만 기존 간헐 오류의 해결이나 장시간 안정성을
 뜻하지 않습니다. 실제 D GUI·C 결과·물리 센서 E2E는 이번 검증에 포함하지 않았습니다.
+
+### A팀 가변 Mock Snapshot 자체 시험
+
+`tests/websocket_mock_scenarios.h`는 기존 Mock JSON에서 시험용 전체 Snapshot을 구성합니다.
+제품 `--ws-mock`의 한 명·고정 상태·목표 10Hz 동작은 변경하지 않습니다. 시험 데이터는
+C Tracking 또는 실제 문 상태가 아닙니다. `websocket_message_test`와 기존 서버 시험 실행 파일의
+`--case mock-scenarios`가 이 데이터를 재사용하며 별도 서버 프로그램은 추가하지 않습니다.
+
+| 순서 / 상대 µs | 승객 목록 | 문 상태 | 확인 목적 |
+|---|---|---|---|
+| 0 / 0 | 빈 목록 | CLOSED | 최초 시각 0, 승객 없음 |
+| 1 / 100000 | 101: OUTSIDE | OPENING | 한 명, 음수 좌표, safety null |
+| 2 / 200000 | 101: ENTERING, 202: INSIDE/FALL | OPEN | ID 유지·추가, 좌표 이동, 복수 승객 |
+| 3 / 300000 | 101: INSIDE/IMMOBILE, 202: EXITING | CLOSING | 위치·상태·안전 상태 갱신 |
+| 4 / 400000 | MOCK-303: OUTSIDE | CLOSED | 전체 교체, 새 문자열 ID, label 생략 |
+| 5 / 500000 | 빈 목록 | OPEN | 기존 승객 전체 제거 |
+
+두 client가 각각 받은 text가 발행 원문과 같은지 비교하므로 ID·좌표·상태·목록 및 순서를
+함께 검사합니다. 각 Snapshot을 두 client가 수신한 뒤 다음 것을 발행하여 의도된 latest-only
+큐 교체와 콘텐츠 보존 검사를 분리합니다. 이 시퀀스의 100000µs 증가는 **시험값**이며
+벽시계 10Hz 측정이 아닙니다. 실제 제품 주기는 위 `mock-process` 시험으로 별도 측정합니다.
+잘못된 JSON/시간 publish는 false를 반환해야 하며, 이후 유효 Snapshot 수신도 확인합니다.
+timestamp 문자열의 날짜 문법이나 서버의 메시지 간 시각 역행 거부는 검사 대상이 아닙니다.
+
+OPEN/HOLD/CLOSE 접수 후 송신 client를 정상 종료하고, `popCommand()`로 같은 client ID와
+FIFO 순서를 검사합니다. 이는 현재의 미처리 명령 보존 동작을 확인하며 제어 정책 승인을 뜻하지
+않습니다. 큐 포화·잘못된 수동 요청·느린 client·재접속은 기존 `websocket_server_test`를 유지합니다.
+
+```powershell
+# 다른 8080 서버를 종료한 상태에서 단독 실행; 서버와 두 client를 시험이 소유합니다.
+# 사용자가 실행 중인 프로세스를 임의로 종료하지 마세요.
+& '.\build-integrated\backend\Release\websocket_server_test.exe' --case mock-scenarios --diagnostics
+```
+
+CTest에는 `websocket_mock_scenarios_test`로 별도 등록되어 기존 서버 시험 실패로 이 시나리오가
+건너뛰어지지 않습니다. 원래 테스트는 제외하지 않으며 소켓 오류는 실제 코드·category·단계와
+함께 FAIL로 남깁니다. D 화면 표시, 브라우저의 빈 목록 처리·경보 동작, 실제 C/문 제어는 별도 검증입니다.
+
+### A팀 자체 검증 결과 (2026-11-05)
+
+기준 HEAD `30dbbe37`에서 테스트·문서만 확장하고, MSVC 19.44 / Windows SDK 10.0.26100.0 /
+VS 2022 x64 Release로 별도 Build했습니다. Boost 1.86.0 및 JSON 3.11.3의 기존 소스를 재사용했습니다.
+
+| 검증 | 결과 |
+|---|---|
+| 루트 Release Build / CTest | PASS / 17/17 PASS (43.75초) |
+| Backend 독립 Release Build / CTest | PASS / 17/17 PASS (41.55초) |
+| 가변 Mock 6개·두 client 동일 수신·잘못된 publish 9개 거부 | 양쪽 PASS |
+| 명령 FIFO·포화·종료 후 보존·기존 느린 client/재접속 | 양쪽 PASS |
+| 기존 A–B·Background ON/OFF·Radar 재연결 자동 회귀 | 양쪽 PASS |
+| 별도 제품 Mock 20초 / 기존 mock-process client | 양쪽 ExitCode 0 |
+| 동일 Snapshot 수신 | 두 client 각각 21개, 20구간 비교 |
+| 평균 수신 간격 / Mock 상대시각 간격 | 99.5142ms / 99.5085ms |
+| 제품 Mock 수동 요청 | OPEN/HOLD/CLOSE 3개 접수, 잘못된 요청 1개 거부 |
+
+두 CTest는 각각 한 번 순차 실행했고, 제품 Mock 시험도 한 번 실행했습니다. 이번 실행에서는
+Winsock 10014가 재현되지 않았으나 기존 간헐 오류의 해결이나 장시간 안정성을 의미하지 않습니다.
+처음 sandbox 내부 병렬 MSBuild는 컴파일 전에 작업자 기동이 진행되지 않아 해당 프로세스만
+정리했고, 일반 사용자 토큰에서 단일 작업자(`/nr:false`)로 Build했습니다. 최초 로그도 보존했습니다.
+테스트의 소켓 설정·backlog·재시도 정책과 제품 서버·JSON·Mock 코드는 변경하지 않았습니다.
+
+격리 출력과 원시 로그: `build-integrated/diagnostics/ws-mock-ready-20261105_190551/`.
+`root-ctest.log`, `backend-ctest.log`, 각 Build의 `Testing/Temporary/LastTest.log`,
+`mock-process-result.json`, `mock-server-*.log`, `mock-client-*.log`에 결과를 보존합니다.
+PID·실행 시각·EXE SHA256·ExitCode는 `mock-process-result.json`에 기록했습니다.
+
+이번 검증 EXE를 D팀이 동일 PC에서 실행하는 명령:
+
+```powershell
+Set-Location 'C:\Users\kimji\ElevSafe'
+$bin = 'C:\Users\kimji\ElevSafe\build-integrated\diagnostics\ws-mock-ready-20261105_190551\root\backend\Release'
+& "$bin\elevsafe_backend.exe" --ws-mock --ws-bind 127.0.0.1 --ws-port 8080 --ws-duration 60
+```
+
+연결 URL은 `ws://127.0.0.1:8080/radar`입니다. 제품 Mock은 계속 고정 승객 1명을 발행합니다.
+가변 시나리오는 별도 CTest 내부 시험이며 브라우저용 시나리오 서버를 추가하지 않았습니다.
+Frontend는 수정·실행하지 않았고 실제 A–D 화면 연동, C Tracking, 문 제어, LAN 공개 및 센서
+시험은 수행하지 않았습니다. D 연결 활성화 후 표시·입력·연결 중단 처리를 공동 검증해야 합니다.
 
 ### AWS와 실제 제어 연동 범위
 

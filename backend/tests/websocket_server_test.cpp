@@ -1,5 +1,6 @@
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
+#include "websocket_mock_scenarios.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -335,6 +336,86 @@ namespace
         context.refresh();
     }
 
+    void testMockScenarios(TestContext& context)
+    {
+        elevsafe::WebSocketServer server(testConfig(), context.log);
+        context.server = &server;
+        context.at("server.start", 8080);
+        server.start();
+        Client first(context, server.port());
+        Client second(context, server.port());
+        until(context, server, "scenarios.clients.ready", "connected=2",
+            [](const auto& s) { return s.connected == 2; });
+
+        const auto scenarios = elevsafe::test::mockScenarios();
+        std::uint64_t previousUs = 0;
+        for (std::size_t i = 0; i < scenarios.size(); ++i)
+        {
+            const auto& scenario = scenarios[i];
+            const auto text = scenario.snapshot.dump();
+            context.at("scenario.publish", server.port(), scenario.name);
+            expect(server.publishSnapshot(text), "valid scenario rejected by publisher");
+            // Read both before publishing the next scenario: the intentional latest-only
+            // queue policy must not make this content test depend on scheduling races.
+            const auto a = first.read("scenario.first.receive");
+            const auto b = second.read("scenario.second.receive");
+            expect(a == text && b == text, "scenario content/order differs across clients");
+            expect(elevsafe::isSnapshot(a) && elevsafe::isSnapshot(b), "received invalid v6 scenario");
+            const auto elapsedUs = nlohmann::json::parse(a)["timestamp_us"].get<std::uint64_t>();
+            expect(i == 0 ? elapsedUs == 0 : elapsedUs > previousUs, "received scenario time did not advance");
+            previousUs = elapsedUs;
+            std::cout << "mock scenario received: " << scenario.name << " clients=2 passengers="
+                      << scenario.snapshot["passengers"].size() << " timestamp_us=" << elapsedUs << '\n';
+        }
+
+        context.at("scenario.invalid.publish", server.port());
+        expect(!server.publishSnapshot("{"), "malformed snapshot accepted by publisher");
+        for (const auto& value : nlohmann::json::array({-1, 0.5, 1.0, "100000", nullptr, true}))
+        {
+            auto invalid = scenarios.back().snapshot;
+            invalid["timestamp_us"] = value;
+            expect(!server.publishSnapshot(invalid.dump()), "invalid elapsed time accepted by publisher");
+        }
+        auto invalid = scenarios.back().snapshot;
+        invalid["timestamp"] = 123;
+        expect(!server.publishSnapshot(invalid.dump()), "non-string timestamp accepted by publisher");
+        invalid.erase("timestamp_us");
+        invalid["timestamp"] = "2026-10-30T11:00:00Z";
+        expect(!server.publishSnapshot(invalid.dump()), "missing elapsed time accepted by publisher");
+        const auto finalSnapshot = scenarios.back().snapshot.dump();
+        expect(server.publishSnapshot(finalSnapshot), "invalid publish damaged server");
+        expect(first.read() == finalSnapshot && second.read() == finalSnapshot,
+            "invalid snapshot was sent or interrupted valid delivery");
+
+        for (const auto* command : {"OPEN", "HOLD", "CLOSE"})
+            first.send(nlohmann::json({{"door_command", command}}).dump());
+        until(context, server, "scenarios.commands.received", "commandsReceived=3",
+            [](const auto& s) { return s.commandsReceived == 3; });
+        first.close();
+        until(context, server, "scenarios.sender.closed", "connected=1",
+            [](const auto& s) { return s.connected == 1; });
+        std::optional<std::uint64_t> sender;
+        for (const auto* command : {"OPEN", "HOLD", "CLOSE"})
+        {
+            const auto request = server.popCommand();
+            expect(request.has_value() && request->command == command,
+                "accepted command lost/reordered after sender disconnect");
+            if (!sender) sender = request->clientId;
+            expect(request->clientId == *sender, "command sender changed");
+        }
+        expect(!server.popCommand(), "unexpected command after FIFO drain");
+        second.close();
+        until(context, server, "scenarios.clients.closed", "connected=0",
+            [](const auto& s) { return s.connected == 0; });
+        context.at("server.stop", server.port());
+        server.stop();
+        const auto stopped = server.statistics();
+        expect(stopped.connected == 0 && stopped.ingressPending == 0
+            && stopped.sessionPending == 0 && stopped.activeWrites == 0, "scenario shutdown retained work");
+        context.refresh();
+        std::cout << "mock scenarios passed=6 invalidPublishRejected=9 FIFO-after-disconnect=OPEN,HOLD,CLOSE\n";
+    }
+
     void testQueueBoundsAndSlowClient(TestContext& context)
     {
         auto config = testConfig(8081);
@@ -573,6 +654,7 @@ int main(int argc, char** argv)
     }
     struct Case { const char* name; void (*test)(TestContext&); };
     if (selected == "mock-process") return runTest("mock-process", testMockProcess) ? 0 : 1;
+    if (selected == "mock-scenarios") return runTest("mock-scenarios", testMockScenarios) ? 0 : 1;
     const Case cases[] = {
         {"failed-start-cleanup", testFailedStartCleanup},
         {"handshake-snapshots-commands", testHandshakeSnapshotsAndCommands},

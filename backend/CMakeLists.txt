@@ -139,6 +139,8 @@ if(WIN32)
 endif()
 add_test(NAME websocket_server_test COMMAND websocket_server_test)
 set_tests_properties(websocket_server_test PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
+add_test(NAME websocket_mock_scenarios_test COMMAND websocket_server_test --case mock-scenarios --diagnostics)
+set_tests_properties(websocket_mock_scenarios_test PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 add_test(NAME websocket_cli_test COMMAND ${CMAKE_COMMAND}
     -DBACKEND_EXE=$<TARGET_FILE:elevsafe_backend> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/websocket_cli_test.cmake)
 set_tests_properties(websocket_message_test PROPERTIES TIMEOUT 30)

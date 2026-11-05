@@ -1,4 +1,5 @@
 #include "elevsafe/websocket_message.h"
+#include "websocket_mock_scenarios.h"
 
 #include <nlohmann/json.hpp>
 #include <iostream>
@@ -19,6 +20,15 @@ int main()
         expect(elevsafe::isSnapshot(json.dump()), "mock snapshot must be valid");
         expect(json.size() == 5 && json["passengers"][0]["label"] == "MOCK Passenger #1", "mock format mismatch");
         expect(json["timestamp_us"] == 0 && !json.contains("alert"), "v6 initial timestamp/fields mismatch");
+        std::uint64_t previousUs = 0;
+        for (const auto& scenario : elevsafe::test::mockScenarios())
+        {
+            expect(elevsafe::isSnapshot(scenario.snapshot.dump()), scenario.name);
+            const auto elapsedUs = scenario.snapshot["timestamp_us"].get<std::uint64_t>();
+            expect(elapsedUs == 0 || elapsedUs > previousUs, "scenario time must advance");
+            previousUs = elapsedUs;
+            std::cout << "mock scenario valid: " << scenario.name << '\n';
+        }
         for (const auto value : {std::uint64_t{9382050}, std::numeric_limits<std::uint64_t>::max()})
         {
             const auto timed = Json::parse(elevsafe::mockSnapshot(value));
@@ -27,6 +37,15 @@ int main()
             expect(timed["timestamp"] == json["timestamp"], "fixed mock timestamp changed");
         }
         auto invalid = json;
+        invalid.erase("timestamp");
+        expect(!elevsafe::isSnapshot(invalid.dump()), "missing timestamp string accepted");
+        for (const auto& value : Json::array({0, nullptr, true, Json::array(), Json::object()}))
+        {
+            invalid = json;
+            invalid["timestamp"] = value;
+            expect(!elevsafe::isSnapshot(invalid.dump()), "non-string timestamp accepted");
+        }
+        invalid = json;
         invalid.erase("timestamp_us");
         expect(!elevsafe::isSnapshot(invalid.dump()), "missing v6 timestamp accepted");
         for (const auto& value : Json::array({-1, 0.5, 1.0, "100000", nullptr, true}))
