@@ -24,8 +24,8 @@ const SCALE = 1.6;
  * true : WebSocket으로 데이터 수신 및 명령 전송
  * HTTPS 화면에서는 서버도 wss:// 주소를 사용해야 합니다.
  */
-const USE_REAL_WEBSOCKET = false;
-const RADAR_WS_URL = 'ws://localhost:8080/radar';
+const USE_REAL_WEBSOCKET = true;
+const RADAR_WS_URL = 'ws://127.0.0.1:8080/radar';
 const MAX_WIDTH = Math.max(CONFIG_CM.ELEV_WIDTH, CONFIG_CM.WAITING_WIDTH);
 // 외곽선을 한 번 계산합니다. 내부 구분선과 면 채우기는 없습니다.
 const PLAN = (() => {
