@@ -112,6 +112,9 @@ function App() {
   // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
   const [passengers, setPassengers] = useState([]);
 
+  // ✅ timestamp_us를 저장할 상태 변수 추가
+  const [timestampUs, setTimestampUs] = useState(null);
+
   const [systemLogs, setSystemLogs] = useState([
     USE_REAL_WEBSOCKET
       ? '[WebSocket] 서버 연결 대기 중...'
@@ -166,6 +169,11 @@ function App() {
 
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
         throw new Error('JSON 객체가 필요합니다.');
+      }
+
+      // ✅ 수신한 JSON에 timestamp_us가 있으면 상태 업데이트
+      if (typeof data.timestamp_us === 'number') {
+        setTimestampUs(data.timestamp_us)
       }
 
       if (
@@ -229,6 +237,8 @@ function App() {
       connectWebSocket();
     } else {
       const sampleData = {
+        timestamp: "2026-11-01T10:30:00Z",
+        timestamp_us: 9382050,
         door_state: 'OPEN',
         door_command: 'OPEN',
         passengers: [
@@ -366,6 +376,8 @@ function App() {
         <h1>ElevSafe 관제 시스템 — [RETINA-4SN 4D Radar 연동]</h1>
         <div className="spec-badge">
           <span>Range: 12m(Person) / 7m×7m</span> | <span>FoV: 90°(±45°)</span> | <span>Rate: 50ms</span>
+          {/* ✅ 개발자 데이터 갱신 확인용 필요없음 지움*/}
+          {timestampUs !== null && <span> | Time: {timestampUs}µs</span>}
         </div>
       </header>
 
