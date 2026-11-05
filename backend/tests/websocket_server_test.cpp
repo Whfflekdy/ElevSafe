@@ -255,28 +255,41 @@ namespace
         }
     };
 
-    elevsafe::WebSocketConfig testConfig(std::uint16_t port = 8080)
+    elevsafe::WebSocketConfig testConfig()
     {
         elevsafe::WebSocketConfig config;
-        config.port = port;
+        config.port = 0; // Each owned fixture asks the OS for an available port.
         return config;
+    }
+
+    void startServer(TestContext& context, elevsafe::WebSocketServer& server,
+        const elevsafe::WebSocketConfig& config, const char* stage = "server.start")
+    {
+        context.at(stage, config.port);
+        context.log << stage << " requestedPort=" << config.port << " boundPort=unassigned\n";
+        server.start();
+        const auto boundPort = server.port();
+        context.log << stage << " requestedPort=" << config.port << " boundPort=" << boundPort << '\n';
+        context.at("server.started", boundPort, "assigned port is nonzero");
+        expect(boundPort != 0, "server did not receive an assigned port");
     }
 
     void testHandshakeSnapshotsAndCommands(TestContext& context)
     {
-        elevsafe::WebSocketServer server(testConfig(), context.log);
+        const auto config = testConfig();
+        elevsafe::WebSocketServer server(config, context.log);
         context.server = &server;
-        context.at("server.start", 8080);
-        server.start();
+        startServer(context, server, config);
         auto collision = testConfig();
         collision.port = server.port();
         bool failed = false;
         elevsafe::WebSocketServer duplicate(collision, context.log);
-        context.at("collision.start", server.port());
-        try { duplicate.start(); }
+        try { startServer(context, duplicate, collision, "collision.start"); }
         catch (const boost::system::system_error& error)
         {
             if (error.code() != net::error::address_in_use) throw;
+            context.log << "collision rejected requestedPort=" << collision.port
+                << " code=" << error.code().value() << " category=" << error.code().category().name() << '\n';
             failed = true;
         }
         duplicate.stop();
@@ -338,10 +351,10 @@ namespace
 
     void testMockScenarios(TestContext& context)
     {
-        elevsafe::WebSocketServer server(testConfig(), context.log);
+        const auto config = testConfig();
+        elevsafe::WebSocketServer server(config, context.log);
         context.server = &server;
-        context.at("server.start", 8080);
-        server.start();
+        startServer(context, server, config);
         Client first(context, server.port());
         Client second(context, server.port());
         until(context, server, "scenarios.clients.ready", "connected=2",
@@ -418,13 +431,12 @@ namespace
 
     void testQueueBoundsAndSlowClient(TestContext& context)
     {
-        auto config = testConfig(8081);
+        auto config = testConfig();
         config.maxCommands = 2;
         config.maxClients = 2;
         elevsafe::WebSocketServer server(config, context.log);
         context.server = &server;
-        context.at("server.start", config.port);
-        server.start();
+        startServer(context, server, config);
         Client sender(context, server.port());
         for (const auto* command : {"OPEN", "HOLD", "CLOSE"})
             sender.send(nlohmann::json({{"door_command", command}}).dump());
@@ -497,10 +509,10 @@ namespace
 
     void testOversizedRequestAndPendingHandshake(TestContext& context)
     {
-        elevsafe::WebSocketServer server(testConfig(8082), context.log);
+        const auto config = testConfig();
+        elevsafe::WebSocketServer server(config, context.log);
         context.server = &server;
-        context.at("server.start", 8082);
-        server.start();
+        startServer(context, server, config);
         Client client(context, server.port());
         client.send(std::string(4097, 'x'));
         bool closed = false;
@@ -540,9 +552,8 @@ namespace
         config.address = "invalid-ip";
         elevsafe::WebSocketServer server(config, context.log);
         context.server = &server;
-        context.at("invalid-address.start", config.port);
         bool failed = false;
-        try { server.start(); }
+        try { startServer(context, server, config, "invalid-address.start"); }
         catch (const boost::system::system_error& error)
         {
             if (error.code() != net::error::invalid_argument) throw;
