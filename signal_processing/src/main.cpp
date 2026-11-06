@@ -133,6 +133,12 @@ int main(int argc, char** argv) {
               << static_cast<double>(s.clusters) / frames.size()
               << "개, 노이즈 점 " << s.noise << "개\n";
 
+    std::cout << "[노이즈 제거] RCS " << s.outlier.rcs_removed
+          << "점, SOR " << s.outlier.sor_removed << "점\n";
+
+    std::cout << "[봉우리 분할] 나눈 덩어리 " << s.splits
+          << "개, maybe_merged " << s.merged << "개\n";
+
     if (!writeFramesCSV(output_path, outputs)) return 1;
     std::cout << "출력 저장: " << output_path << "\n";
     std::cout << "[문 상태] OPEN 프레임 " << open_frames << " / " << frames.size()

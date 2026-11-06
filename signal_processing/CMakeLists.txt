@@ -23,7 +23,9 @@ add_library(radar_core
   src/preprocessing/polar_grid.cpp
   src/preprocessing/background_subtractor.cpp
   src/preprocessing/door_state_estimator.cpp
+  src/preprocessing/outlier_filter.cpp
   src/clustering/dbscan.cpp
+  src/clustering/peak_splitter.cpp
   src/pipeline/signal_pipeline.cpp
 )
 # radar_core를 쓰는 쪽은 include/ 를 기준으로 헤더를 찾음
@@ -37,6 +39,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
   add_executable(build_background src/build_background.cpp)
   target_link_libraries(build_background PRIVATE radar_core)
+
+  # 단위 테스트: cmake --build build 후 ctest --test-dir build
+  enable_testing()
+  add_executable(sp_tests tests/sp_tests.cpp)
+  target_link_libraries(sp_tests PRIVATE radar_core)
+  add_test(NAME sp_tests COMMAND sp_tests)
 
   # 확인용 scratch 실행 파일 (tests/scratch.cpp 가 있을 때만, git에는 올리지 않음)
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/scratch.cpp)

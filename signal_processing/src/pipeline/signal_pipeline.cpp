@@ -16,7 +16,9 @@ SignalPipeline::SignalPipeline(const Config& cfg)
       polar_(PolarGridConfig::fromConfig(cfg)),
       roi_(ROIConfig::fromConfig(cfg)),
       bg_(BackgroundConfig::fromConfig(cfg)),
+      outlier_(OutlierConfig::fromConfig(cfg)),
       dbscan_(DBSCANConfig::fromConfig(cfg)),
+      splitter_(PeakSplitConfig::fromConfig(cfg)),
       door_est_(DoorStateConfig::fromConfig(cfg)) {
     // 설정 검사: ROI 범위와 문 상태 설정이 둘 다 말이 되어야 사용 가능
     // (추정기는 자기 설정을 밖으로 안 보여 주니, 같은 설정을 한 번 더 읽어 검사)
@@ -55,22 +57,37 @@ PipelineResult SignalPipeline::process(const FrameData& frame, const FrameContex
         stats_.bg.removed += bs.removed;
     }
 
-    // Step 3: outlier_filter (SOR, RCS) 자리
+    // Step 3: 허공 노이즈 제거 (RCS, SOR)
+    OutlierStats os;
+    kept = outlier_.filter(kept, &os);
+    stats_.outlier.input += os.input;
+    stats_.outlier.rcs_removed += os.rcs_removed;
+    stats_.outlier.sor_removed += os.sor_removed;
 
     // DBSCAN: 점마다 덩어리 번호 기록
     const ClusteringResult cr = dbscan_.cluster(kept);
+    // 봉우리를 찾으려면 점의 좌표와 DBSCAN 번호가 둘 다 필요함. 
+    const SplitResult sr = splitter_.split(kept, cr);
+    // 점 단위의 CSV에도 나눈 뒤의 번호가 저장되도록 sr을 사용
     for (std::size_t i = 0; i < kept.size(); ++i) {
-        kept[i].cluster_id = cr.labels[i];
-        if (cr.labels[i] == -1) stats_.noise++;
+        kept[i].cluster_id = sr.labels[i];
+        if (sr.labels[i] == -1) stats_.noise++;
     }
-    stats_.clusters += static_cast<std::size_t>(cr.num_clusters);
+    // 규칙이 실제로 몇 번 작동했는지 숫자로 확인하기 위함. 
+    stats_.clusters += static_cast<std::size_t>(sr.num_clusters);
+    stats_.splits += static_cast<std::size_t>(sr.split_count);
+
+    // 합쳐짐 의심 덩어리 수 세기
+    for(char m : sr.maybe_merged){
+        if(m) stats_.merged++;
+    }
     stats_.frames++;
 
     // 결과 만들기
     PipelineResult r;
     r.frame_id = frame.frame_id;
     r.timestamp_us = frame.timestamp_us;
-    r.clusters = summarize(kept, cr);          // kept 를 넘기기 전에 요약부터!
+    r.clusters = summarize(kept, sr);          // kept 를 넘기기 전에 요약부터!
     r.estimated_door_state = ds;
 
     // 오프라인용 점 출력 (요약이 끝났으니 이제 넘겨도 됨)
@@ -81,8 +98,8 @@ PipelineResult SignalPipeline::process(const FrameData& frame, const FrameContex
 // ---------------------------------------------------------------------------
 // 덩어리 요약 (Step 5 최소판)
 // ---------------------------------------------------------------------------
-std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const ClusteringResult& cr) {
-    const int n_cl = cr.num_clusters;
+std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const SplitResult& sr) {
+    const int n_cl = sr.num_clusters;
     std::vector<Cluster> out(n_cl);
     if (n_cl == 0) return out;
 
@@ -93,7 +110,7 @@ std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const Cluste
 
     // 1. 점을 한 번 훑으며 모으기
     for (std::size_t i = 0; i < points.size(); ++i) {
-        const int k = cr.labels[i];
+        const int k = sr.labels[i];
         if (k < 0) continue;                    // 노이즈는 건너뜀
         const RadarPoint& p = points[i];
         Cluster& c = out[k];
@@ -139,7 +156,8 @@ std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const Cluste
         std::nth_element(z.begin(), z.begin() + idx, z.end());
         c.z_top = z[idx];
 
-        c.maybe_merged = false;                 // 1차: 봉우리 분할 전
+        // 나눴거나 합쳐짐이 의심되면 C에게 알림
+        c.maybe_merged = sr.maybe_merged[k]!=0;
     }
     return out;
 }
