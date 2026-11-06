@@ -24,8 +24,8 @@ const SCALE = 1.6;
  * true : WebSocket으로 데이터 수신 및 명령 전송
  * HTTPS 화면에서는 서버도 wss:// 주소를 사용해야 합니다.
  */
-const USE_REAL_WEBSOCKET = false;
-const RADAR_WS_URL = 'ws://localhost:8080/radar';
+const USE_REAL_WEBSOCKET = true;
+const RADAR_WS_URL = 'ws://127.0.0.1:8080/radar';
 const MAX_WIDTH = Math.max(CONFIG_CM.ELEV_WIDTH, CONFIG_CM.WAITING_WIDTH);
 // 외곽선을 한 번 계산합니다. 내부 구분선과 면 채우기는 없습니다.
 const PLAN = (() => {
@@ -56,6 +56,9 @@ const PLAN = (() => {
 
 // 도면, 구역 이름, 문 애니메이션을 담당합니다. children에는 승객 점이 들어갑니다.
 function FloorPlan({ doorState, children }) {
+  const animationTime = (doorState === 'OPEN' || doorState === 'OPENING') ? 2.68 : 2.35;
+  const inlineTransition = `transform ${animationTime}s ease-in-out`;
+
   return (
     <div
       className="floor-plan"
@@ -92,8 +95,8 @@ function FloorPlan({ doorState, children }) {
           height: CONFIG_CM.DOOR_THICKNESS * SCALE,
         }}
       >
-        <div className="plan-door plan-door-left" />
-        <div className="plan-door plan-door-right" />
+        <div className="plan-door plan-door-left" style={{ transition: inlineTransition }} />
+        <div className="plan-door plan-door-right" style={{ transition: inlineTransition }} />
       </div>
       {children}
     </div>
@@ -109,6 +112,9 @@ function App() {
   // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
   const [passengers, setPassengers] = useState([]);
 
+  // ✅ timestamp_us를 저장할 상태 변수 추가
+  const [timestampUs, setTimestampUs] = useState(null);
+
   const [systemLogs, setSystemLogs] = useState([
     USE_REAL_WEBSOCKET
       ? '[WebSocket] 서버 연결 대기 중...'
@@ -116,6 +122,13 @@ function App() {
   ]);
   const wsRef = useRef(null);
   const doorTimerRef = useRef(null);
+  const autoRevertTimerRef = useRef(null); // 수동명령 후 자동 복귀용
+
+  // 10Hz 데이터 수신 시 로그 폭발 방지를 위해 최대 50개 유지
+  const log = message => setSystemLogs(prev => {
+    const newLogs = [...prev, message];
+    return newLogs.length > 50 ? newLogs.slice(newLogs.length - 50) : newLogs;
+  });
 
   /* 
   ===============================================================
@@ -148,50 +161,84 @@ function App() {
   =================================================================
   */
 
-  useEffect(() => {
-    const log = message =>
-      setSystemLogs(prev => [...prev, message]);
+ 
+  // 테스트 데이터와 실제 서버 데이터를 똑같이 처리합니다.
+  const receiveMessage = message => {
+    try {
+      const data = JSON.parse(message);
 
-    // 테스트 데이터와 실제 서버 데이터를 똑같이 처리합니다.
-    const receiveMessage = message => {
-      try {
-        const data = JSON.parse(message);
-
-        if (!data || typeof data !== 'object' || Array.isArray(data)) {
-          throw new Error('JSON 객체가 필요합니다.');
-        }
-
-        if (
-          ['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(
-            data.door_state
-          )
-        ) {
-          setDoorState(data.door_state);
-        }
-
-        if (Array.isArray(data.passengers)) {
-          setPassengers(
-            data.passengers.filter(p =>
-              p &&
-              (typeof p.id === 'number' || typeof p.id === 'string') &&
-              Number.isFinite(p.x) &&
-              Number.isFinite(p.y)
-            )
-          );
-        }
-
-        if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
-          setDoorCommand(data.door_command);
-        }
-      } catch (error) {
-        console.error('수신 데이터 처리 오류:', error);
-        log('[데이터] 수신 데이터 형식 오류');
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('JSON 객체가 필요합니다.');
       }
+
+      // ✅ 수신한 JSON에 timestamp_us가 있으면 상태 업데이트
+      if (typeof data.timestamp_us === 'number') {
+        setTimestampUs(data.timestamp_us)
+      }
+
+      if (
+        ['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(
+          data.door_state
+        )
+      ) {
+        setDoorState(data.door_state);
+      }
+
+      if (Array.isArray(data.passengers)) {
+        setPassengers(
+          data.passengers.filter(p =>
+            p &&
+            (typeof p.id === 'number' || typeof p.id === 'string') &&
+            Number.isFinite(p.x) &&
+            Number.isFinite(p.y)
+          )
+        );
+      }
+
+      if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
+        setDoorCommand(data.door_command);
+      }
+    } catch (error) {
+      console.error('수신 데이터 처리 오류:', error);
+      // 너무 잦은 에러 로그 방지: 필요시 주석 해제
+      // log('[데이터] 수신 데이터 형식 오류'); 
+    }
+  };
+
+  useEffect(() => {
+    let reconnectTimeout;
+    let isUnmounted = false;
+
+    const connectWebSocket = () => {
+      if (!USE_REAL_WEBSOCKET || isUnmounted) return;
+
+      const ws = new WebSocket(RADAR_WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => log('[WebSocket] 서버 연결 완료 (10Hz 데이터 수신 준비)');
+      ws.onmessage = event => receiveMessage(event.data);
+      
+      ws.onerror = () => {
+        log('[WebSocket] 연결 오류 발생');
+        ws.close();
+      };
+
+      ws.onclose = () => {
+        if (!isUnmounted) {
+          log('[WebSocket] 연결 종료. 1초 뒤 자동 재접속 시도...');
+          reconnectTimeout = setTimeout(connectWebSocket, 1000);
+        }
+      };
     };
 
+
     // 서버가 없을 때: 시험용 JSON을 직접 넣습니다.
-    if (!USE_REAL_WEBSOCKET) {
+    if (USE_REAL_WEBSOCKET) {
+      connectWebSocket();
+    } else {
       const sampleData = {
+        timestamp: "2026-11-01T10:30:00Z",
+        timestamp_us: 9382050,
         door_state: 'OPEN',
         door_command: 'OPEN',
         passengers: [
@@ -216,62 +263,39 @@ function App() {
 
       receiveMessage(JSON.stringify(sampleData));
       log('[테스트] 샘플 JSON을 화면에 적용했습니다.');
-      return;
     }
 
-    // 서버가 준비됐을 때: 실제로 받은 JSON을 넣습니다.
-    const ws = new WebSocket(RADAR_WS_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => log('[WebSocket] 서버 연결 완료');
-
-    ws.onmessage = event => {
-      receiveMessage(event.data);
-    };
-
-    ws.onerror = () => log('[WebSocket] 연결 오류 발생');
-    ws.onclose = () => log('[WebSocket] 연결 종료');
-
     return () => {
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-
-      if (wsRef.current === ws) {
-        wsRef.current = null;
-      }
-
-      ws.close();
+      isUnmounted = true;
+      clearTimeout(reconnectTimeout);
+      if (wsRef.current) wsRef.current.close();
     };
   }, []);
 
+  useEffect(() => () => {
+    clearTimeout(doorTimerRef.current);
+    clearTimeout(autoRevertTimerRef.current);
+  }, []);
 
-
-  // 테스트 도중 화면이 닫히면 남아 있는 타이머도 정리합니다.
-  useEffect(() => () => clearTimeout(doorTimerRef.current), []);
-
-  // 승객 점의 색상은 기존 안전 상태 기준을 유지합니다.
   const getTheme = (safetyState) => {
     if (safetyState === 'FALL' || safetyState === 'IMMOBILE') return 'danger';
     return 'normal';
   };
-  // 기존 동작 유지: OUTSIDE가 아닌 승객의 IMMOBILE만 전체 경보를 활성화합니다.
-  // FALL도 전체 경보에 포함하려면 이 조건을 별도로 변경하세요.
+
   const isDangerActive = passengers.some(
     p => p.safety_state === 'IMMOBILE' && p.state !== 'OUTSIDE'
   );
 
-useEffect(() => {
-  if (isDangerActive) {
-    const audio = new Audio('/alert-sound.mp3'); 
-    audio.play().catch(e => console.log("브라우저 자동재생 정책 제한"));
-  }
-}, [isDangerActive]);
+  useEffect(() => {
+    if (isDangerActive) {
+      const audio = new Audio('/alert-sound.mp3');
+      audio.play().catch(e => console.log("브라우저 자동재생 정책 제한"));
+    }
+  }, [isDangerActive]);
+
   const getStatusLabel = (state, safetyState) => {
     if (safetyState === 'FALL') return '🚨 비상 (낙상 감지!)';
     if (safetyState === 'IMMOBILE') return '🚨 비상 (장기 미동 감지!)';
-    
     switch (state) {
       case 'OUTSIDE': return '🧍 대기 중 (승강장)';
       case 'ENTERING': return '🚶 입장 중 (정상)';
@@ -280,43 +304,66 @@ useEffect(() => {
       default: return '알 수 없음';
     }
   };
-  // 실제 모드에서는 명령만 전송하고, 문의 실제 상태는 서버 수신값으로 표시합니다.
+
   const handleDoorCommand = command => {
     const timeStr = new Date().toLocaleTimeString();
+
+    // 수동 명령 후 도어 완료 시간에 맞춰 자동 복귀 (OPEN: 2680ms, CLOSE: 2350ms)
+    const autoRevertTime = command === 'OPEN' ? 2680 : (command === 'CLOSE' ? 2350 : null);
+    
+    const sendRevertCommand = () => {
+      if (USE_REAL_WEBSOCKET && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ door_command: null }));
+      } else {
+        setDoorCommand(null); // 테스트용
+      }
+      log(`[${new Date().toLocaleTimeString()}] 수동 동작 완료 ➔ 자동 제어(null) 복귀`);
+    };
 
     if (USE_REAL_WEBSOCKET) {
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        setSystemLogs(prev => [...prev, `[${timeStr}] 연결되지 않아 명령을 전송하지 못했습니다.`]);
+        log(`[${timeStr}] 연결되지 않아 명령을 전송하지 못했습니다.`);
         return;
       }
       try {
-        // [실제 명령 전송 영역] 백엔드와 이 JSON 형식을 맞추세요.
         ws.send(JSON.stringify({ door_command: command }));
         setDoorCommand(command);
-        setSystemLogs(prev => [...prev, `[${timeStr}] 📤명령 송신: ${command} (서버 처리 확인 전)`]);
+        log(`[${timeStr}] 📤명령 송신: ${command}`);
+
+      // 자동 복귀 타이머 설정
+        clearTimeout(autoRevertTimerRef.current);
+        if (autoRevertTime) {
+          autoRevertTimerRef.current = setTimeout(sendRevertCommand, autoRevertTime);
+        }
       } catch (error) {
         console.error('명령 전송 오류:', error);
-        setSystemLogs(prev => [...prev, `[${timeStr}] 명령 전송 실패`]);
+        log(`[${timeStr}] 명령 전송 실패`);
       }
       return;
     }
 
-    // [테스트 전용] 실제 모드에서는 위에서 return하므로 실행되지 않습니다.
-    // 새 명령이 오면 이전 타이머를 취소하여 상태가 뒤늦게 덮이는 것을 방지합니다.
+    // [테스트 전용]
     clearTimeout(doorTimerRef.current);
+    clearTimeout(autoRevertTimerRef.current);
+    
     setDoorCommand(command);
-    setSystemLogs(prev => [...prev, `[${timeStr}] 테스트 명령: ${command}`]);
+    log(`[${timeStr}] 테스트 명령: ${command}`);
+    
     if (command === 'HOLD') {
       setDoorState('OPEN');
     } else {
       const opening = command === 'OPEN';
       setDoorState(opening ? 'OPENING' : 'CLOSING');
+
+      const testDuration = opening ? 2680 : 2350;
       doorTimerRef.current = setTimeout(() => {
         setDoorState(opening ? 'OPEN' : 'CLOSED');
-      }, 1200);
+        sendRevertCommand(); // 테스트 환경에서도 자동 복귀
+      }, testDuration);
     }
   };
+
   const handleBackgroundClick = () => {
     setSelectedDot(null);
   };
@@ -329,6 +376,8 @@ useEffect(() => {
         <h1>ElevSafe 관제 시스템 — [RETINA-4SN 4D Radar 연동]</h1>
         <div className="spec-badge">
           <span>Range: 12m(Person) / 7m×7m</span> | <span>FoV: 90°(±45°)</span> | <span>Rate: 50ms</span>
+          {/* ✅ 개발자 데이터 갱신 확인용 필요없음 지움*/}
+          {timestampUs !== null && <span> | Time: {timestampUs}µs</span>}
         </div>
       </header>
 
@@ -426,7 +475,7 @@ useEffect(() => {
             <h2>실시간 시스템 로그 (Terminal)</h2>
             <div className="terminal-window">
               {systemLogs.map((log, index) => (
-                <p key={index} className={log.includes('FALL') || log.includes('HOLD') || log.includes('IMMOBILE') ? 'log-danger' : ''}>
+                <p key={index} className={log.includes('FALL') || log.includes('HOLD') || log.includes('IMMOBILE') || log.includes('오류') ? 'log-danger' : ''}>
                   {log}
                 </p>
               ))}
