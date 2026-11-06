@@ -34,6 +34,8 @@ namespace elevsafe
             std::string stage = "not_started";
             int errorCode = 0;
             bool timedOut = false;
+            bool connected = false;
+            bool cancelled = false;
             RetinaStreamParser::Statistics parser;
             std::size_t bufferedBytes = 0;
         };
@@ -42,6 +44,16 @@ namespace elevsafe
         // on this calling thread. stop() must also be called on this thread.
         // The original run(log) keeps its blocking socket behavior.
         int run(std::ostream& log, const Deadline& deadline, RunDiagnostics& diagnostics);
+        struct SessionControl
+        {
+            std::chrono::milliseconds connectTimeout{3000};
+            std::optional<std::chrono::steady_clock::time_point> connectNotAfter;
+            // Polled on the owner thread; the predicate may read a lock-free stop flag.
+            std::function<bool()> cancelRequested;
+        };
+        // Numeric IP only: bounded connect without DNS; cancellable receive, no idle timeout.
+        int runSession(std::ostream& log, const SessionControl& control, RunDiagnostics& diagnostics);
+        static bool retryable(const RunDiagnostics& diagnostics, bool reconnectEof) noexcept;
         void stop();
 
         const ParserProcessingSummary& processingSummary() const noexcept;
@@ -49,6 +61,8 @@ namespace elevsafe
 
     private:
         void closeSocket();
+        int runImpl(std::ostream& log, const Deadline& deadline,
+            const SessionControl* control, RunDiagnostics& diagnostics);
 
         std::string m_host;
         std::uint16_t m_port;
