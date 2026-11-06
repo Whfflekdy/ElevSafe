@@ -173,7 +173,13 @@ namespace elevsafe
                 const auto text = beast::buffers_to_string(self->input.data());
                 const auto command = self->stream.got_text() ? parseDoorRequest(text) : std::nullopt;
                 self->input.consume(self->input.size());
-                if (!command)
+                if (!command && self->stream.got_text() && self->owner.config.allowNullDoorRequest
+                    && isNullDoorRequest(text))
+                {
+                    // Compatibility notification only: never queue, execute, or count as a command/ACK.
+                    self->owner.writeLog("null door request no-op client=" + std::to_string(self->id));
+                }
+                else if (!command)
                 {
                     ++self->owner.rejected;
                     self->owner.writeLog("invalid manual request client=" + std::to_string(self->id));

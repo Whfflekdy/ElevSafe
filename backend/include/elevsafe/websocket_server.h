@@ -17,6 +17,7 @@ namespace elevsafe
         std::size_t maxSnapshotBytes = 65536;
         std::size_t maxRequestBytes = 4096;
         std::size_t maxCommands = 32;
+        bool allowNullDoorRequest = false; // Only software door simulation enables this.
     };
 
     struct ManualDoorRequest

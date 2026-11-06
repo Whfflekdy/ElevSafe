@@ -305,8 +305,9 @@ fixture를 제외한 16개입니다.
 테스트는 로컬의 실제 배경 맵에 의존하지 않습니다. Background 테스트만 빌드 폴더의
 새 임시 디렉터리에 작은 맵과 설정 사본을 만들며 실제 센서 설치 설정/맵은 변경하지 않습니다.
 
-서버 테스트는 8080/8081/8082 port를 사용하고 timeout 및 직렬 실행을 설정합니다.
-테스트 전에 해당 port의 기존 서버를 정상 종료하세요. 로컬 반복 검증에서는 listen/connect
+자체 서버 테스트는 port=0으로 OS가 할당한 포트를 사용하고 timeout 및 직렬 실행을 유지합니다.
+외부 제품 Mock에 접속하는 `mock-process`와 `door-sim-process` 시험은 8080을 사용합니다.
+외부 Mock 시험은 8080의 서버가 시험 대상인지 먼저 확인하세요. 로컬 반복 검증에서는 listen/connect
 단계의 Winsock 10014가 간헐 관찰되었습니다. 전체 테스트 통과와 별개로 반복 안정성은
 추가 확인이 필요합니다. 기존 A-B `backend/build` 실행 파일과 혼동하지 마세요.
 
@@ -517,9 +518,12 @@ UNKNOWN 변환이나 z 필드 추가는 하지 않습니다. ID는 정수 또는
 ```
 
 OPEN/HOLD/CLOSE는 로그와 `popCommand()` FIFO에 전달합니다. JSON 오류, 비객체,
-필드 누락, null/알 수 없는 명령, 추가 필드, binary 메시지는 거부합니다.
-**수신은 실행 완료가 아닙니다.** ACK, 문 상태 변경, MANUAL/AUTO 우선순위 적용은 없습니다.
-Mock에서는 수신 큐를 비우지만 요청에 따라 Mock 상태를 바꾸지 않습니다.
+필드 누락, null/알 수 없는 명령, 추가 필드, binary 메시지는 기본 모드에서 거부합니다.
+예외적으로 `--ws-mock --ws-door-sim`에서만 단일 필드 `{"door_command":null}`을
+유효한 무동작 알림으로 수용합니다. FIFO와 실행 명령 통계에는 넣지 않습니다.
+**수신은 실행 완료가 아닙니다.** ACK는 없습니다. 기본 Mock에서는 수신 큐를 비우지만
+요청에 따라 Mock 상태를 바꾸지 않습니다. 아래의 선택적 문 시뮬레이션에서만
+소프트웨어 문 상태와 MANUAL/AUTO 전환을 적용합니다.
 레이더 모드의 큐는 향후 제어 계층용이며 현재 실행 consumer는 연결하지 않았습니다.
 
 ### 스레드·큐·종료 정책
@@ -562,8 +566,12 @@ D 코드 변경은 이번 작업에 포함하지 않습니다. 이 Backend 브�
 별도로 확인한 GitHub main `bfa1d5af`의 Frontend에는 실제 연결·송신 코드가 있으며,
 소스 상수 `USE_REAL_WEBSOCKET=false`, `RADAR_WS_URL='ws://localhost:8080/radar'`를
 사용합니다. 환경변수 설정이 아니므로 `npm start`만으로 실제 연결이 활성화되지는 않습니다.
-D 담당자가 사용하는 버전을 확인하고 연결 모드를 활성화한 뒤 실제 화면을 검증해야 합니다.
-Backend 자체 시험의 성공은 D 화면 연동 완료를 뜻하지 않습니다.
+이 설명은 과거 main 기준입니다. 별도로 확보한 D팀 `feature/ui-dashboard`
+`f5fcb511785cb8c1c67830f7b8d8e57f58241ebd`는 `USE_REAL_WEBSOCKET=true`,
+`RADAR_WS_URL='ws://127.0.0.1:8080/radar'`로 연결이 활성화돼 있습니다.
+사용하는 D팀 버전을 구분해야 하며 Backend 자체 시험과 실제 화면 검증은 별개입니다.
+사용자 수동 검증 결과(PR #27 기록): 실제 A–D 화면의 OPEN/CLOSE/HOLD 및 null 처리 정상 확인.
+이는 소프트웨어 Mock 검증이며 실제 C 판단·물리 문 제어·완료 ACK 검증이 아닙니다.
 
 초기 A–D 시험은 **동일 PC의 loopback**으로 제한합니다. Backend 실행 후 `[ws] listening`
 로그를 확인하고 D는 `ws://127.0.0.1:8080/radar`에 연결합니다. `localhost`는 브라우저가
@@ -615,6 +623,100 @@ Frontend → Backend 요청은 각각 별도 text 메시지로 보냅니다.
 인터넷 포트 포워딩을 하지 마세요. HTTPS UI에는 `wss://`가 필요하지만 현재 서버는
 TLS를 제공하지 않습니다. LAN 시험은 승인된 환경에서 진행하며 실제 문 제어 시스템에는
 연결하지 않습니다.
+
+### 선택적 소프트웨어 문 시뮬레이션
+
+```powershell
+& '.\build-integrated\backend\Release\elevsafe_backend.exe' --ws-mock --ws-door-sim --ws-bind 127.0.0.1 --ws-port 8080 --ws-duration 60
+```
+
+`--ws-door-sim`은 `--ws-mock`(별칭 `--mock-websocket`)에서만 사용할 수 있습니다.
+Radar 모드에서 사용하거나 중복 지정하면 ExitCode 2로 종료합니다.
+기본 `--ws-mock`은 계속 OPEN/null, 고정 승객 1명, 목표 10Hz이며 접수 명령을 폐기합니다.
+새 옵션을 지정한 경우에만 기존 FIFO를 소프트웨어 상태 머신이 소비합니다. 추가 스레드는 없습니다.
+
+- 초기 상태는 AUTO/CLOSED입니다.
+- OPEN: OPENING으로 전환 후 2.68초에 OPEN, AUTO 복귀.
+- CLOSE: CLOSING으로 전환 후 2.35초에 CLOSED, AUTO 복귀.
+- 이미 목표 상태이면 즉시 처리하고 AUTO로 복귀합니다.
+- HOLD: 필요하면 2.68초 동안 OPENING 후 OPEN을 유지하며 MANUAL 상태를 유지합니다.
+  후속 OPEN/CLOSE로 해제합니다. OPEN 상태의 HOLD는 이동하지 않습니다.
+- 다른 명령은 기존 전환을 취소하고 새 명령의 전체 시간을 적용합니다.
+  동일한 활성 명령은 타이머를 재시작하지 않습니다.
+- FIFO 접수 순서대로 적용합니다. 한 발행 간격에 여러 명령을 소비하면 마지막으로 적용된
+  명령만 다음 Snapshot의 `door_command`에 한 번 표시하고, 이후에는 null을 발행합니다.
+  이는 모든 명령의 전달 보장 또는 실행 완료 ACK가 아닙니다. 기존 최신 Snapshot 교체 정책도 유지합니다.
+- AUTO 복귀만으로 문이 다시 움직이지 않습니다. 실제 C 자동 입력 없이 마지막 상태를 유지합니다.
+- 접수한 명령은 연결 종료로 삭제하지 않으며, HOLD도 연결 종료만으로 해제되지 않습니다.
+  인증, 명령 소유권, 만료, 중복 요청 식별, 완료 ACK는 없습니다.
+
+기존 `mockSnapshot()`의 승객과 시간 필드를 재사용하고 `door_state`와 `door_command`만
+변경합니다. JSON v6의 필드·타입은 그대로이며 AUTO/MANUAL 필드를 추가하지 않습니다.
+`timestamp_us`는 기존 Mock의 첫 발행 프레임 기준 상대 µs입니다. 제어용 `steady_clock`
+완료 시각과 Snapshot 수신 시각은 다릅니다. 상태 전환은 Mock 루프의 다음 갱신에서 관측되고
+화면에는 목표 100ms 발행 주기 및 송신 지연을 거쳐 나타납니다.
+`[door-sim]` 로그의 mode는 내부 AUTO/MANUAL 확인용이며 네트워크 ACK가 아닙니다.
+
+**소프트웨어 시뮬레이션만 수행합니다.** 물리 장치·문 상태 센서·실제 C Tracking·자동 제어·
+B 문 추정 상태와 연결하지 않습니다. JSON이 실제 문 관측이라고 해석되지 않도록
+실행 로그와 이 옵션을 확인해야 합니다.
+D팀의 OPEN/CLOSE 이후 알림 `{"door_command":null}`은 시뮬레이션 모드에서만
+정상 수신 후 무동작 처리합니다. OPENING/CLOSING 취소, 타이머 변경, HOLD 해제,
+강제 AUTO 전환은 하지 않습니다. 다른 클라이언트의 지연된 알림과 반복 알림도 동일합니다.
+OPEN/CLOSE의 AUTO 복귀는 상태 머신 자체 완료 시간에 의해 수행합니다.
+`null door request no-op` 로그를 남기되 접수 명령 수·거부 수·FIFO는 변경하지 않습니다.
+기본 Mock과 Radar 모드는 계속 null을 거부합니다. AUTO 문자열, 잘못된 타입, 추가 필드,
+binary 요청은 모두 거부합니다. null은 접수 또는 완료 ACK가 아니며 JSON v6는 그대로입니다.
+아래 자동 시험 기록과 위 사용자 수동 A–D 화면 검증 결과를 구분합니다.
+
+`door_simulation_test`는 sleep 없이 가상 시각으로 완료 경계·충돌·HOLD·AUTO 복귀를 검증합니다.
+기존 테스트 클라이언트의 `--case door-sim-process --diagnostics`는 별도로 시작한 위 서버의
+8080에 접속해 두 클라이언트 상태 일치, 전환 시간, 목표 10Hz, 연결 종료·재접속을 검사합니다.
+이 명령은 서버를 직접 시작하지 않습니다. 기본 Mock 검증에는 기존 `--case mock-process`를 사용합니다.
+
+2026-11-06 최초 구현 검증 (`backend/build/diagnostics/door-sim-20261106-01`, null 호환 추가 전 기록):
+
+| 검증 | 결과 |
+|---|---|
+| Windows MSVC x64 Release 루트 / Backend Build | 양쪽 PASS |
+| 루트 CTest | 18/18 PASS, ExitCode 0 |
+| Backend 독립 CTest | 17/18 PASS, ExitCode 8 |
+| 신규 가상 시각 단위 시험 | Windows 양쪽 및 Ubuntu g++ 실행 PASS |
+| 신규 시뮬레이션 실제 서버 / 기존 클라이언트 | 양쪽 ExitCode 0, 두 클라이언트 상태 일치 |
+| 기본 Mock 실제 서버 / 기존 클라이언트 | 양쪽 ExitCode 0, 동일 Snapshot 21개 |
+
+Backend 실패는 `radar_reconnect_cli_test`의 `partial-fin-restart` 재시작 fixture에서
+발생한 **bind system:10014**입니다. 재시도하지 않았고 근본 원인은 미확정입니다.
+신규 시뮬레이션, 기존 WebSocket/JSON/Mock 시나리오, A–B 및 Background 시험은 통과했습니다.
+시뮬레이션 평균 수신 간격은 100.05ms, 기본 Mock은 100.94ms였습니다.
+내부 로그에서 OPEN/CLOSE 완료 후 AUTO, HOLD 완료 후 MANUAL, 후속 OPEN으로 AUTO 복귀,
+null 요청 거부를 확인했습니다. Snapshot 관측 전환 간격은 OPEN 약 2696ms, CLOSE 약 2298ms,
+HOLD 열림 약 2699ms이며, 이는 정확한 내부 타이머 기간이나 물리 완료 시간을 뜻하지 않습니다.
+경계 시각은 가상 시각 단위 시험에서 별도로 검증했습니다.
+당시 Ubuntu에는 CMake가 없어 Linux 전체 CI 구성과 실제 D 화면 연동은 미검증이었습니다.
+기본 Mock 시작 전 PID 0 포트 항목이 관측돼 일단 시작을 중단했으며, 후속 조회/netstat에서
+FIN_WAIT_1/TIME_WAIT과 listener 부재를 확인한 뒤 미실행 기본 시험을 수행했습니다.
+두 실제 서버는 정상 종료했으며 시험 종료 후 listener는 없었습니다. 기존 실패 기록은 보존합니다.
+
+2026-11-06 null 호환 추가 후 검증 (`backend/build/diagnostics/door-null-20261106-01`):
+
+- 루트/Backend 독립 MSVC x64 Release Build PASS. 루트 CTest 18/18 PASS(ExitCode 0),
+  Backend CTest 16/18 PASS(ExitCode 8). 두 구성 모두 한 번만 실행했습니다.
+- Backend의 `websocket_server_test`(null-compatibility)와 `websocket_mock_scenarios_test`는
+  각각 `client.connect`에서 system:10014로 실패했습니다. 원시 Native API 원인은 미확정이며
+  실패를 재시도로 대체하지 않았습니다. 루트에서는 두 시험 모두 통과했습니다.
+- 루트 시험에서 기본 설정의 null 거부, opt-in null 수용, FIFO/명령·거부 통계,
+  가상 시각의 OPEN/CLOSE 경계, HOLD, 다른 클라이언트·반복·지연 null 무동작을 확인했습니다.
+  기존 DoorSimulation 헤더·구현·단위 시험은 이번 null 변경 전후 동일합니다.
+- 실제 시뮬레이션에서 두 클라이언트 동일 Snapshot, OPEN/CLOSE/HOLD 도중 반복 null,
+  완료 후 null, HOLD 해제 OPEN을 확인했습니다. 서버/클라이언트 ExitCode 0,
+  실제 명령 4건·거부 0건, 평균 수신 간격 약 99.62ms였습니다.
+  기본 Mock도 양쪽 ExitCode 0, 실제 명령 3건·거부 2건(INVALID/null), 평균 약 99.98ms입니다.
+- 시뮬레이션 클라이언트 시험은 약 10.97초에 끝났지만 서버 총 경과는 약 432.11초였습니다.
+  10:18:16 Modern Standby 복귀 이벤트가 기록됐습니다. 따라서 요청한 22초의 연속 실행과
+  종료 시간 보장을 검증한 것으로 보지 않습니다. 재실행하지 않았고 원본 로그를 보존했습니다.
+- Ubuntu g++의 JSON 요청/메시지 시험 PASS. 당시 Linux 전체 CMake/CTest 및 실제 D 화면 연동은
+  미검증이었습니다. 소프트웨어 전용 범위와 후속 사용자 화면 검증은 위 설명을 참고하세요.
 
 ### A-B 및 WebSocket transport 공존
 
@@ -693,8 +795,7 @@ FIFO 순서를 검사합니다. 이는 현재의 미처리 명령 보존 동작�
 않습니다. 큐 포화·잘못된 수동 요청·느린 client·재접속은 기존 `websocket_server_test`를 유지합니다.
 
 ```powershell
-# 다른 8080 서버를 종료한 상태에서 단독 실행; 서버와 두 client를 시험이 소유합니다.
-# 사용자가 실행 중인 프로세스를 임의로 종료하지 마세요.
+# OS 할당 임시 포트 사용; 서버와 두 client를 시험이 소유합니다.
 & '.\build-integrated\backend\Release\websocket_server_test.exe' --case mock-scenarios --diagnostics
 ```
 

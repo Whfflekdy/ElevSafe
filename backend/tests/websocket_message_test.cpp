@@ -68,6 +68,11 @@ int main()
         json["door_state"] = "UNKNOWN";
         expect(!elevsafe::isSnapshot(json.dump()), "UNKNOWN must not be converted to a valid door state");
         expect(!elevsafe::isSnapshot("{\"timestamp\":1e9999}"), "overflowing JSON number accepted");
+        expect(elevsafe::isNullDoorRequest("{\"door_command\":null}"), "valid null rejected");
+        for (const auto* text : {"null", "{}", "[]", "{", "{\"door_command\":false}",
+            "{\"door_command\":0}", "{\"door_command\":{}}", "{\"door_command\":\"AUTO\"}",
+            "{\"door_command\":null,\"extra\":true}", "{\"door_command\":\"OPEN\"}"})
+            expect(!elevsafe::isNullDoorRequest(text), "invalid no-op accepted");
         for (const auto* command : {"OPEN", "HOLD", "CLOSE"})
         {
             const auto parsed = elevsafe::parseDoorRequest(Json({{"door_command", command}}).dump());

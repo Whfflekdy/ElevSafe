@@ -64,6 +64,13 @@ namespace elevsafe
         return json["door_command"].get<std::string>();
     }
 
+    bool isNullDoorRequest(std::string_view text)
+    {
+        const auto json = Json::parse(text, nullptr, false);
+        return json.is_object() && json.size() == 1
+            && json.contains("door_command") && json["door_command"].is_null();
+    }
+
     std::string mockSnapshot()
     {
         return mockSnapshot(0);

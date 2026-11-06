@@ -1,3 +1,4 @@
+#include "elevsafe/door_simulation.h"
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
 #include "websocket_mock_scenarios.h"
@@ -568,6 +569,86 @@ namespace
         context.refresh();
     }
 
+    void testNullCompatibility(TestContext& context)
+    {
+        // The default configuration is shared by basic Mock and Radar modes.
+        for (const bool allow : {false, true})
+        {
+            auto config = testConfig();
+            config.allowNullDoorRequest = allow;
+            elevsafe::WebSocketServer server(config, context.log);
+            context.server = &server;
+            startServer(context, server, config);
+            Client sender(context, server.port()), other(context, server.port());
+            using D = elevsafe::DoorSimulation;
+            D model;
+            const D::Time zero{};
+            std::size_t sent = 0, rejected = 0;
+            auto command = [&](const char* text, D::Command value, D::Time now)
+            {
+                sender.send(nlohmann::json({{"door_command", text}}).dump());
+                ++sent;
+                until(context, server, "null-test.command", "command queued",
+                    [&](const auto& stats) { return stats.commandsReceived == sent; });
+                const auto request = server.popCommand();
+                expect(request && request->command == text, "FIFO changed");
+                model.apply(value, now);
+            };
+            auto nulls = [&]()
+            {
+                const auto beforeState = model.state();
+                const auto beforeMode = model.mode();
+                const auto beforeDeadline = model.deadline();
+                const auto beforeActive = model.activeCommand();
+                for (int i = 0; i < 3; ++i) other.send("{\"door_command\":null}");
+                // Same-connection invalid sentinel proves prior nulls have been processed.
+                other.send("{}");
+                rejected += allow ? 1 : 4;
+                until(context, server, "null-test.barrier", "requests processed",
+                    [&](const auto& stats) { return stats.rejectedRequests == rejected; });
+                expect(server.statistics().commandsReceived == sent, "null counted as command");
+                expect(!server.popCommand(), "null entered FIFO");
+                expect(model.state() == beforeState && model.mode() == beforeMode
+                    && model.deadline() == beforeDeadline && model.activeCommand() == beforeActive,
+                    "null changed simulation");
+            };
+            nulls(); // CLOSED/AUTO
+            command("OPEN", D::Command::Open, zero);
+            nulls(); // Another client cannot cancel OPENING or restart its timer.
+            model.update(zero + D::openDuration - std::chrono::microseconds(1));
+            expect(model.state() == D::State::Opening, "early open");
+            model.update(zero + D::openDuration);
+            expect(model.state() == D::State::Open && model.mode() == D::Mode::Auto, "open deadline");
+            nulls();
+            command("CLOSE", D::Command::Close, zero + std::chrono::seconds(3));
+            nulls();
+            model.update(zero + std::chrono::seconds(3) + D::closeDuration);
+            expect(model.state() == D::State::Closed && model.mode() == D::Mode::Auto, "close deadline");
+            nulls();
+            command("HOLD", D::Command::Hold, zero + std::chrono::seconds(6));
+            nulls();
+            model.update(zero + std::chrono::seconds(9));
+            nulls();
+            expect(model.mode() == D::Mode::Manual && model.activeCommand() == D::Command::Hold, "null released HOLD");
+            command("CLOSE", D::Command::Close, zero + std::chrono::seconds(10));
+            command("OPEN", D::Command::Open, zero + std::chrono::seconds(11));
+            command("CLOSE", D::Command::Close, zero + std::chrono::seconds(12));
+            nulls(); // Delayed notification for superseded OPEN.
+            expect(model.deadline() == zero + std::chrono::seconds(12) + D::closeDuration, "delayed null cancelled close");
+            model.update(zero + std::chrono::seconds(15));
+            expect(model.state() == D::State::Closed && model.mode() == D::Mode::Auto, "final close");
+            for (const auto* invalid : {"{\"door_command\":\"AUTO\"}", "{\"door_command\":false}",
+                "{\"door_command\":0}", "{\"door_command\":{}}", "{\"door_command\":null,\"extra\":true}"})
+                other.send(invalid);
+            rejected += 5;
+            until(context, server, "null-test.invalid", "strict type validation",
+                [&](const auto& stats) { return stats.rejectedRequests == rejected; });
+            expect(!server.popCommand() && server.statistics().commandsReceived == sent, "invalid entered FIFO");
+            sender.close(); other.close(); server.stop();
+            context.server = nullptr;
+        }
+    }
+
     // Explicit opt-in: connects to a separately launched backend --ws-mock.
     // The normal CTest cases continue to own their own servers.
     void testMockProcess(TestContext& context)
@@ -619,11 +700,100 @@ namespace
         for (const auto* command : {"OPEN", "HOLD", "CLOSE"})
             first.send(nlohmann::json({{"door_command", command}}).dump());
         first.send("{\"door_command\":\"INVALID\"}");
+        first.send("{\"door_command\":null}");
         first.close();
         read(second); // Remaining peer still receives after the other closes.
         second.close();
         Client reconnected(context, 8080);
         read(reconnected);
+        reconnected.close();
+    }
+
+    // Opt-in client for the product --ws-mock --ws-door-sim process.
+    void testDoorSimProcess(TestContext& context)
+    {
+        Client first(context, 8080), second(context, 8080);
+        auto read = [](Client& client)
+        {
+            const auto text = client.read("door-sim.snapshot");
+            expect(elevsafe::isSnapshot(text), "invalid simulation snapshot");
+            return nlohmann::json::parse(text);
+        };
+        auto a = read(first), b = read(second);
+        for (int i = 0; a != b && i < 10; ++i)
+        {
+            if (a["timestamp_us"] < b["timestamp_us"]) a = read(first);
+            else b = read(second);
+        }
+        expect(a == b, "simulation clients not aligned");
+        expect(a["door_state"] == "CLOSED", "simulation not initially closed");
+        auto pair = [&]()
+        {
+            auto next = read(first);
+            expect(next == read(second), "simulation broadcast mismatch");
+            expect(next["timestamp_us"] > a["timestamp_us"], "simulation time not increasing");
+            a = next;
+            return next;
+        };
+        auto transition = [&](const char* command, const char* moving, const char* target, double duration)
+        {
+            first.send(nlohmann::json({{"door_command", command}}).dump());
+            const auto start = std::chrono::steady_clock::now();
+            std::uint64_t movingUs = 0;
+            int count = 0;
+            bool sawCommand = false, completed = false;
+            while (std::chrono::steady_clock::now() - start < std::chrono::seconds(6))
+            {
+                const auto next = pair();
+                ++count;
+                if (next["door_command"] == command) sawCommand = true;
+                if (next["door_state"] == moving && !movingUs)
+                {
+                    movingUs = next["timestamp_us"].get<std::uint64_t>();
+                    for (int i = 0; i < 3; ++i) second.send("{\"door_command\":null}");
+                    std::cout << "sent repeated null during " << moving << " from second client\n";
+                }
+                if (movingUs && next["door_state"] == target)
+                {
+                    const double elapsedMs = (next["timestamp_us"].get<std::uint64_t>() - movingUs) / 1000.0;
+                    expect(elapsedMs >= duration - 200 && elapsedMs <= duration + 400,
+                        "observed transition duration outside snapshot tolerance");
+                    std::cout << "door-sim command=" << command << " observedTransitionMs=" << elapsedMs
+                              << " snapshots=" << count << " clients=2\n";
+                    completed = true;
+                    break;
+                }
+            }
+            expect(completed && sawCommand, "missing simulation transition/command");
+            second.send("{\"door_command\":null}");
+            expect(pair()["door_command"].is_null(), "command repeated as ACK");
+        };
+        transition("OPEN", "OPENING", "OPEN", 2680);
+        transition("CLOSE", "CLOSING", "CLOSED", 2350);
+        transition("HOLD", "OPENING", "OPEN", 2680);
+        const auto startUs = a["timestamp_us"].get<std::uint64_t>();
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) expect(pair()["door_state"] == "OPEN", "hold lost open");
+        const auto wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 20;
+        const auto source = (a["timestamp_us"].get<std::uint64_t>() - startUs) / 20000.0;
+        expect(wall >= 70 && wall <= 150 && source >= 70 && source <= 150, "simulation not 10Hz");
+        std::cout << "door-sim meanReceiveMs=" << wall << " meanSourceMs=" << source << '\n';
+        first.send("{\"door_command\":null}"); // Valid no-op in simulation; server logs confirm no rejection.
+        expect(pair()["door_state"] == "OPEN", "null changed state");
+        first.send("{\"door_command\":\"OPEN\"}"); // Release HOLD without animation.
+        bool released = false;
+        for (int i = 0; i < 10 && !released; ++i)
+        {
+            const auto next = pair();
+            expect(next["door_state"] == "OPEN", "release restarted animation");
+            released = next["door_command"] == "OPEN";
+        }
+        expect(released, "HOLD release missing");
+        first.close();
+        read(second);
+        second.close();
+        Client reconnected(context, 8080);
+        expect(read(reconnected)["door_state"] == "OPEN", "reconnection reset simulation");
         reconnected.close();
     }
 
@@ -664,9 +834,12 @@ int main(int argc, char** argv)
         else { std::cerr << "Usage: websocket_server_test [--diagnostics] [--case NAME]\n"; return 2; }
     }
     struct Case { const char* name; void (*test)(TestContext&); };
+    if (selected == "door-sim-process") return runTest("door-sim-process", testDoorSimProcess) ? 0 : 1;
     if (selected == "mock-process") return runTest("mock-process", testMockProcess) ? 0 : 1;
+    if (selected == "null-compatibility") return runTest("null-compatibility", testNullCompatibility) ? 0 : 1;
     if (selected == "mock-scenarios") return runTest("mock-scenarios", testMockScenarios) ? 0 : 1;
     const Case cases[] = {
+        {"null-compatibility", testNullCompatibility},
         {"failed-start-cleanup", testFailedStartCleanup},
         {"handshake-snapshots-commands", testHandshakeSnapshotsAndCommands},
         {"queue-bounds-slow-client", testQueueBoundsAndSlowClient},

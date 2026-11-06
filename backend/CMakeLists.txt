@@ -49,7 +49,14 @@ target_compile_options(elevsafe_signal_adapter PUBLIC $<$<CXX_COMPILER_ID:MSVC>:
 
 target_link_libraries(elevsafe_backend PRIVATE elevsafe_signal_adapter elevsafe_websocket)
 
+add_library(elevsafe_door_simulation src/door_simulation.cpp)
+target_include_directories(elevsafe_door_simulation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(elevsafe_backend PRIVATE elevsafe_door_simulation nlohmann_json::nlohmann_json)
+
 enable_testing()
+add_executable(door_simulation_test tests/door_simulation_test.cpp)
+target_link_libraries(door_simulation_test PRIVATE elevsafe_door_simulation)
+add_test(NAME door_simulation_test COMMAND door_simulation_test)
 
 add_executable(ab_profile_test tests/ab_profile_test.cpp)
 target_link_libraries(ab_profile_test PRIVATE elevsafe_backend_core)
@@ -132,7 +139,7 @@ target_link_libraries(websocket_message_test PRIVATE elevsafe_websocket nlohmann
 add_test(NAME websocket_message_test COMMAND websocket_message_test)
 
 add_executable(websocket_server_test tests/websocket_server_test.cpp)
-target_link_libraries(websocket_server_test PRIVATE elevsafe_websocket elevsafe_boost_headers nlohmann_json::nlohmann_json)
+target_link_libraries(websocket_server_test PRIVATE elevsafe_door_simulation elevsafe_websocket elevsafe_boost_headers nlohmann_json::nlohmann_json)
 target_compile_options(websocket_server_test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)
 if(WIN32)
     target_compile_definitions(websocket_server_test PRIVATE _WIN32_WINNT=0x0A00)
