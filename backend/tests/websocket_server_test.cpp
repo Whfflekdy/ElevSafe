@@ -1,4 +1,5 @@
 #include "elevsafe/door_simulation.h"
+#include "elevsafe/mock_door_policy.h"
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
 #include "websocket_mock_scenarios.h"
@@ -314,6 +315,12 @@ namespace
         const auto snapshot = elevsafe::mockSnapshot();
         expect(server.publishSnapshot(snapshot), "publish failed");
         expect(first.read() == snapshot && second.read() == snapshot, "broadcast content changed");
+        auto unknown = nlohmann::json::parse(snapshot);
+        unknown["door_state"] = "UNKNOWN";
+        const auto unknownText = unknown.dump();
+        expect(server.publishSnapshot(unknownText), "UNKNOWN publish rejected");
+        expect(first.read() == unknownText && second.read() == unknownText,
+            "UNKNOWN state was converted or not broadcast");
         for (const auto* command : {"OPEN", "HOLD", "CLOSE"})
             first.send(nlohmann::json({{"door_command", command}}).dump());
         until(context, server, "commands.received", "commandsReceived=3",
@@ -428,6 +435,87 @@ namespace
             && stopped.sessionPending == 0 && stopped.activeWrites == 0, "scenario shutdown retained work");
         context.refresh();
         std::cout << "mock scenarios passed=6 invalidPublishRejected=9 FIFO-after-disconnect=OPEN,HOLD,CLOSE\n";
+    }
+
+    void testDoorRiskScenarios(TestContext& context)
+    {
+        using D = elevsafe::DoorSimulation;
+        using namespace std::chrono_literals;
+        auto config = testConfig(); config.allowNullDoorRequest = true;
+        elevsafe::WebSocketServer server(config, context.log); context.server = &server;
+        startServer(context, server, config);
+        Client first(context, server.port()), second(context, server.port());
+        until(context, server, "risk.clients.ready", "connected=2", [](const auto& s) { return s.connected == 2; });
+        std::uint64_t sequence = 0;
+        for (const auto name : elevsafe::mockDoorScenarioNames)
+        {
+            D door(name == "unknown" ? D::State::Unknown : D::State::Closed);
+            elevsafe::MockDoorPolicy policy;
+            const D::Time zero{};
+            const auto publish = [&]()
+            {
+                auto frame = nlohmann::json::parse(elevsafe::mockSnapshot(sequence++ * 100000));
+                frame["passengers"] = policy.passengers(); frame["door_state"] = D::name(door.state());
+                if (const auto command = door.takeAppliedCommand()) frame["door_command"] = D::name(*command);
+                const auto text = frame.dump();
+                expect(server.publishSnapshot(text), "risk snapshot rejected");
+                expect(first.read() == text && second.read() == text, "risk snapshot broadcast mismatch");
+                return frame;
+            };
+            policy.accept(elevsafe::mockDoorScenarioInput(name, 0us)); policy.tick(door, zero);
+            auto initial = publish();
+            if (name == "unknown")
+            {
+                expect(initial["door_state"] == "UNKNOWN" && initial["door_command"].is_null(), "UNKNOWN wire mismatch");
+                policy.tick(door, zero + 1s);
+                expect(publish()["door_state"] == "UNKNOWN", "UNKNOWN advanced without manual");
+            }
+            if (name == "normal" || name == "unknown" || name == "inside-fall" || name == "inside-immobile")
+            {
+                const auto before = server.statistics().commandsReceived;
+                first.send("{\"door_command\":\"OPEN\"}");
+                until(context, server, "risk.manual.received", "new OPEN", [&](const auto& s) { return s.commandsReceived == before + 1; });
+                const auto request = server.popCommand(); expect(request && request->command == "OPEN", "manual FIFO missing");
+                door.apply(D::Command::Open, zero + 1s); policy.tick(door, zero + 1s);
+                expect(publish()["door_state"] == "OPENING", "manual opening missing");
+            }
+            policy.tick(door, zero + 3680ms);
+            expect(publish()["door_state"] == "OPEN", "risk/normal did not open");
+            const auto beforeReject = server.statistics().rejectedRequests;
+            first.send("{\"door_command\":null}");
+            // A later valid frame is a processing barrier for the preceding null.
+            const auto before = server.statistics().commandsReceived;
+            first.send("{\"door_command\":\"HOLD\"}");
+            until(context, server, "risk.null.barrier", "new HOLD", [&](const auto& s) { return s.commandsReceived == before + 1; });
+            const auto hold = server.popCommand(); expect(hold && hold->command == "HOLD" && !server.popCommand(), "null entered FIFO");
+            expect(server.statistics().rejectedRequests == beforeReject, "null rejected");
+            // Only the manual-conflict script consumes this barrier as an action.
+            if (name == "manual-conflict")
+            {
+                door.apply(D::Command::Hold, zero + 4s); policy.tick(door, zero + 4s); publish();
+                second.close();
+                policy.tick(door, zero + 5s);
+                expect(door.mode() == D::Mode::Manual && door.activeCommand() == D::Command::Hold, "disconnect released HOLD");
+                Client replacement(context, server.port()); replacement.close();
+                // Keep the other broadcast tests intact; this scenario is last.
+                policy.accept(nlohmann::json::array()); policy.tick(door, zero + 1h);
+                expect(door.mode() == D::Mode::Manual, "clear released manual HOLD");
+                std::cout << "door policy scenario received: manual-conflict clients=2; disconnect preserved HOLD\n";
+                break;
+            }
+            policy.accept(elevsafe::mockDoorScenarioInput(name, 8s)); policy.tick(door, zero + 8s);
+            publish();
+            policy.tick(door, zero + 12s); const auto closing = publish();
+            policy.tick(door, zero + 14350ms); const auto final = publish();
+            if (name == "risk-clear")
+            {
+                expect(closing["door_state"] == "CLOSING" && closing["door_command"] == "CLOSE", "clear wire close missing");
+                expect(final["door_state"] == "CLOSED", "clear wire completion missing");
+            }
+            if (name == "input-loss") expect(final["door_state"] == "OPEN" && policy.inputMissing(), "loss released hold");
+            std::cout << "door policy scenario received: " << name << " clients=2\n";
+        }
+        first.close(); server.stop(); expect(server.statistics().connected == 0, "risk sessions remain");
     }
 
     void testQueueBoundsAndSlowClient(TestContext& context)
@@ -600,6 +688,7 @@ namespace
                 const auto beforeMode = model.mode();
                 const auto beforeDeadline = model.deadline();
                 const auto beforeActive = model.activeCommand();
+                const auto beforeHold = model.openHoldDeadline();
                 for (int i = 0; i < 3; ++i) other.send("{\"door_command\":null}");
                 // Same-connection invalid sentinel proves prior nulls have been processed.
                 other.send("{}");
@@ -609,7 +698,8 @@ namespace
                 expect(server.statistics().commandsReceived == sent, "null counted as command");
                 expect(!server.popCommand(), "null entered FIFO");
                 expect(model.state() == beforeState && model.mode() == beforeMode
-                    && model.deadline() == beforeDeadline && model.activeCommand() == beforeActive,
+                    && model.deadline() == beforeDeadline && model.activeCommand() == beforeActive
+                    && model.openHoldDeadline() == beforeHold,
                     "null changed simulation");
             };
             nulls(); // CLOSED/AUTO
@@ -769,13 +859,49 @@ namespace
             expect(pair()["door_command"].is_null(), "command repeated as ACK");
         };
         transition("OPEN", "OPENING", "OPEN", 2680);
+        const auto openUs = a["timestamp_us"].get<std::uint64_t>();
+        std::uint64_t closingUs = 0;
+        int autoCloseEvents = 0;
+        bool autoClosed = false;
+        const auto autoStart = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - autoStart < std::chrono::seconds(8))
+        {
+            const auto next = pair();
+            if (next["door_command"] == "CLOSE") ++autoCloseEvents;
+            else expect(next["door_command"].is_null(), "unexpected AUTO-cycle command");
+            if (next["door_state"] == "CLOSING" && !closingUs)
+            {
+                closingUs = next["timestamp_us"].get<std::uint64_t>();
+                const auto holdMs = (closingUs - openUs) / 1000.0;
+                expect(holdMs >= 3700 && holdMs <= 4300, "OPEN hold outside 10Hz tolerance");
+                std::cout << "door-sim automatic openHoldMs=" << holdMs << '\n';
+            }
+            if (next["door_state"] == "CLOSED")
+            {
+                expect(closingUs != 0, "automatic close skipped CLOSING");
+                const auto closeMs = (next["timestamp_us"].get<std::uint64_t>() - closingUs) / 1000.0;
+                expect(closeMs >= 2150 && closeMs <= 2750, "automatic close duration");
+                std::cout << "door-sim automatic closeMs=" << closeMs << " clients=2\n";
+                autoClosed = true;
+                break;
+            }
+            expect(closingUs || next["door_state"] == "OPEN", "unexpected AUTO-cycle state");
+        }
+        expect(autoClosed && autoCloseEvents == 1, "automatic CLOSE must publish exactly once");
+        for (int i = 0; i < 5; ++i)
+        {
+            const auto next = pair();
+            expect(next["door_state"] == "CLOSED" && next["door_command"].is_null(),
+                "AUTO event replayed or door reopened");
+        }
+        transition("OPEN", "OPENING", "OPEN", 2680);
         transition("CLOSE", "CLOSING", "CLOSED", 2350);
         transition("HOLD", "OPENING", "OPEN", 2680);
         const auto startUs = a["timestamp_us"].get<std::uint64_t>();
         const auto start = std::chrono::steady_clock::now();
-        for (int i = 0; i < 20; ++i) expect(pair()["door_state"] == "OPEN", "hold lost open");
-        const auto wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 20;
-        const auto source = (a["timestamp_us"].get<std::uint64_t>() - startUs) / 20000.0;
+        for (int i = 0; i < 50; ++i) expect(pair()["door_state"] == "OPEN", "hold lost open");
+        const auto wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 50;
+        const auto source = (a["timestamp_us"].get<std::uint64_t>() - startUs) / 50000.0;
         expect(wall >= 70 && wall <= 150 && source >= 70 && source <= 150, "simulation not 10Hz");
         std::cout << "door-sim meanReceiveMs=" << wall << " meanSourceMs=" << source << '\n';
         first.send("{\"door_command\":null}"); // Valid no-op in simulation; server logs confirm no rejection.
@@ -795,6 +921,65 @@ namespace
         Client reconnected(context, 8080);
         expect(read(reconnected)["door_state"] == "OPEN", "reconnection reset simulation");
         reconnected.close();
+    }
+
+    // Product process must run the risk-clear scenario on loopback:8080.
+    void testDoorRiskProcess(TestContext& context)
+    {
+        Client first(context, 8080), second(context, 8080);
+        const auto read = [&](Client& client)
+        {
+            const auto text = client.read("risk-process.snapshot");
+            expect(elevsafe::isSnapshot(text), "invalid risk-process snapshot");
+            return nlohmann::json::parse(text);
+        };
+        auto a = read(first), b = read(second);
+        for (int i = 0; a != b && i < 20; ++i)
+        {
+            if (a["timestamp_us"] < b["timestamp_us"]) a = read(first); else b = read(second);
+        }
+        expect(a == b, "risk-process clients not aligned");
+        bool opening = false, held = false, cleared = false, closing = false, closed = false;
+        int closeEvents = 0, samples = 0;
+        std::uint64_t previous = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(18);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            expect(a == b, "risk-process broadcast mismatch");
+            const auto us = a["timestamp_us"].get<std::uint64_t>();
+            expect(samples == 0 || us > previous, "risk-process timestamp did not advance");
+            previous = us; ++samples;
+            if (a["door_state"] == "OPENING") opening = true;
+            if (a["door_command"] == "HOLD")
+            {
+                held = true;
+                first.send("{\"door_command\":null}");
+                second.send("{\"door_command\":null}");
+            }
+            if (a["passengers"].empty())
+            {
+                cleared = true;
+                expect(us >= 7500000, "risk cleared before scripted boundary");
+            }
+            else
+            {
+                expect(a["passengers"][0]["state"] == "ENTERING"
+                    && a["passengers"][0]["safety_state"] == "FALL", "synthetic passenger changed");
+            }
+            if (a["door_command"] == "CLOSE") ++closeEvents;
+            if (a["door_state"] == "CLOSING")
+            {
+                closing = true;
+                expect(cleared && us >= 11500000, "risk close before clear + hold");
+            }
+            if (closing && a["door_state"] == "CLOSED") { closed = true; break; }
+            a = read(first); b = read(second);
+        }
+        expect(opening && held && cleared && closing && closed && closeEvents == 1,
+            "missing risk process state/event");
+        first.close(); second.close();
+        std::cout << "risk-clear process PASS clients=2 samples=" << samples
+                  << " closeEvents=" << closeEvents << " finalTimestampUs=" << previous << '\n';
     }
 
     bool runTest(const char* name, void (*test)(TestContext&))
@@ -834,9 +1019,11 @@ int main(int argc, char** argv)
         else { std::cerr << "Usage: websocket_server_test [--diagnostics] [--case NAME]\n"; return 2; }
     }
     struct Case { const char* name; void (*test)(TestContext&); };
+    if (selected == "door-risk-process") return runTest("door-risk-process", testDoorRiskProcess) ? 0 : 1;
     if (selected == "door-sim-process") return runTest("door-sim-process", testDoorSimProcess) ? 0 : 1;
     if (selected == "mock-process") return runTest("mock-process", testMockProcess) ? 0 : 1;
     if (selected == "null-compatibility") return runTest("null-compatibility", testNullCompatibility) ? 0 : 1;
+    if (selected == "door-risk-scenarios") return runTest("door-risk-scenarios", testDoorRiskScenarios) ? 0 : 1;
     if (selected == "mock-scenarios") return runTest("mock-scenarios", testMockScenarios) ? 0 : 1;
     const Case cases[] = {
         {"null-compatibility", testNullCompatibility},

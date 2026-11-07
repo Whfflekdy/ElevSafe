@@ -501,14 +501,14 @@ LAN IP가 바뀌면 실행 인자와 클라이언트 URL을 다시 맞춰야 합
 
 ### JSON 및 수동 요청
 
-v6 송신은 `timestamp`, `timestamp_us`, `door_command`, `door_state`, `passengers`를
+v7 송신은 `timestamp`, `timestamp_us`, `door_command`, `door_state`, `passengers`를
 포함한 text JSON입니다. `timestamp_us`는 세션 첫 프레임 기준 경과 µs의 음수가 아닌 정수입니다.
 누락, 음수, 실수, 문자열, null/bool은 거부하며 별도 `alert` 필드는 허용하지 않습니다.
 `timestamp`는 유지하며 상대 µs를 절대시각이나 처리 지연으로 해석하지 않습니다.
 승객은 `id`, 유한한 숫자 `x/y`(m), `state`, `safety_state`, 선택적 `label`을 사용합니다.
 `state`는 OUTSIDE/ENTERING/INSIDE/EXITING, `safety_state`는 null/FALL/IMMOBILE입니다.
-door_state는 OPEN/CLOSED/OPENING/CLOSING, door_command는 null/OPEN/HOLD/CLOSE입니다.
-UNKNOWN 변환이나 z 필드 추가는 하지 않습니다. ID는 정수 또는 문자열을 허용하며
+door_state는 v7의 OPEN/CLOSED/OPENING/CLOSING/UNKNOWN을 허용하며 door_command는 null/OPEN/HOLD/CLOSE입니다.
+UNKNOWN은 미확정 상태로 보존하며 CLOSED로 변환하지 않습니다. z 필드는 추가하지 않습니다. ID는 정수 또는 문자열을 허용하며
 최종 Tracking ID 타입과 실제 결과 공급은 C 통합 시 확인해야 합니다.
 
 현재 수동 요청은 다음처럼 **door_command 한 필드만** 받습니다.
@@ -636,7 +636,7 @@ Radar 모드에서 사용하거나 중복 지정하면 ExitCode 2로 종료합�
 새 옵션을 지정한 경우에만 기존 FIFO를 소프트웨어 상태 머신이 소비합니다. 추가 스레드는 없습니다.
 
 - 초기 상태는 AUTO/CLOSED입니다.
-- OPEN: OPENING으로 전환 후 2.68초에 OPEN, AUTO 복귀.
+- OPEN: OPENING으로 전환 후 2.68초에 OPEN, AUTO 복귀. 완전히 열린 시점부터 4초 후 자동 CLOSE합니다.
 - CLOSE: CLOSING으로 전환 후 2.35초에 CLOSED, AUTO 복귀.
 - 이미 목표 상태이면 즉시 처리하고 AUTO로 복귀합니다.
 - HOLD: 필요하면 2.68초 동안 OPENING 후 OPEN을 유지하며 MANUAL 상태를 유지합니다.
@@ -646,18 +646,31 @@ Radar 모드에서 사용하거나 중복 지정하면 ExitCode 2로 종료합�
 - FIFO 접수 순서대로 적용합니다. 한 발행 간격에 여러 명령을 소비하면 마지막으로 적용된
   명령만 다음 Snapshot의 `door_command`에 한 번 표시하고, 이후에는 null을 발행합니다.
   이는 모든 명령의 전달 보장 또는 실행 완료 ACK가 아닙니다. 기존 최신 Snapshot 교체 정책도 유지합니다.
-- AUTO 복귀만으로 문이 다시 움직이지 않습니다. 실제 C 자동 입력 없이 마지막 상태를 유지합니다.
+- OPEN 유지 시간은 `DoorSimulation::openHoldDuration`(임시 4000ms) 한곳에서 관리합니다.
+  이동 타이머와 분리하며 정상 경계는 0ms OPENING → 2680ms OPEN → 6680ms CLOSING → 9030ms CLOSED입니다.
+  초기 CLOSED에서 주기적인 OPEN은 발생하지 않습니다.
+- 수동 FIFO를 먼저 처리하고 자동 타이머를 평가합니다. 같은 시각의 MANUAL HOLD/CLOSE가 자동 CLOSE보다 우선합니다.
+  자동 CLOSE는 mode=AUTO이며 새 `door_command="CLOSE"` 이벤트를 한 번만 발행합니다.
+  다음 Snapshot은 null이며, 느린 클라이언트의 이벤트 전달 보장을 추가하지 않습니다.
+- 이미 OPEN인 상태의 반복 OPEN은 진행 중인 유지 타이머를 연장하지 않습니다.
+  MANUAL HOLD를 OPEN으로 해제하면 그 시점부터 새 4초를 시작합니다.
+- 내부 시험용 `applyAuto()`는 수동 `apply()`와 분리되어 있습니다. MANUAL 중 입력은 실행·예약하지 않습니다.
+  AUTO OPEN/HOLD는 일반 자동 CLOSE보다 우선하며 명시적 다른 입력 또는 수동 명령까지 유지합니다.
+  입력 없음(nullopt)은 해제나 위험 해소가 아닙니다. 같은 AUTO 입력 반복은 이벤트·이동 타이머를 재시작하지 않습니다.
+  수동 명령이 AUTO 입력을 대체한 후 이전 AUTO 요청을 재생하지 않습니다.
+- UNKNOWN 초기 상태의 모델에서는 AUTO 입력을 적용하지 않으며 수동 입력은 허용합니다.
+  제품 Mock은 계속 CLOSED로 시작합니다. 시험용 UNKNOWN 상태가 B 관측값을 연결했다는 뜻은 아닙니다.
 - 접수한 명령은 연결 종료로 삭제하지 않으며, HOLD도 연결 종료만으로 해제되지 않습니다.
   인증, 명령 소유권, 만료, 중복 요청 식별, 완료 ACK는 없습니다.
 
-기존 `mockSnapshot()`의 승객과 시간 필드를 재사용하고 `door_state`와 `door_command`만
-변경합니다. JSON v6의 필드·타입은 그대로이며 AUTO/MANUAL 필드를 추가하지 않습니다.
+기본 시뮬레이션은 기존 `mockSnapshot()`의 승객과 시간 필드를 재사용하고 `door_state`와 `door_command`만
+변경합니다. JSON 최상위 5개 필드·타입은 그대로이며 v7 UNKNOWN 허용 외에 AUTO/MANUAL 필드를 추가하지 않습니다.
 `timestamp_us`는 기존 Mock의 첫 발행 프레임 기준 상대 µs입니다. 제어용 `steady_clock`
 완료 시각과 Snapshot 수신 시각은 다릅니다. 상태 전환은 Mock 루프의 다음 갱신에서 관측되고
 화면에는 목표 100ms 발행 주기 및 송신 지연을 거쳐 나타납니다.
 `[door-sim]` 로그의 mode는 내부 AUTO/MANUAL 확인용이며 네트워크 ACK가 아닙니다.
 
-**소프트웨어 시뮬레이션만 수행합니다.** 물리 장치·문 상태 센서·실제 C Tracking·자동 제어·
+**소프트웨어 시뮬레이션만 수행합니다.** 물리 장치·문 상태 센서·실제 C Tracking의 자동 판단·
 B 문 추정 상태와 연결하지 않습니다. JSON이 실제 문 관측이라고 해석되지 않도록
 실행 로그와 이 옵션을 확인해야 합니다.
 D팀의 OPEN/CLOSE 이후 알림 `{"door_command":null}`은 시뮬레이션 모드에서만
@@ -666,7 +679,13 @@ D팀의 OPEN/CLOSE 이후 알림 `{"door_command":null}`은 시뮬레이션 모�
 OPEN/CLOSE의 AUTO 복귀는 상태 머신 자체 완료 시간에 의해 수행합니다.
 `null door request no-op` 로그를 남기되 접수 명령 수·거부 수·FIFO는 변경하지 않습니다.
 기본 Mock과 Radar 모드는 계속 null을 거부합니다. AUTO 문자열, 잘못된 타입, 추가 필드,
-binary 요청은 모두 거부합니다. null은 접수 또는 완료 ACK가 아니며 JSON v6는 그대로입니다.
+binary 요청은 모두 거부합니다. null은 접수 또는 완료 ACK가 아니며 기존 JSON 최상위 필드는 그대로입니다.
+C 입력은 현재 제품 실행 경로에 연결하지 않았고 승객 상태를 A에서 재판정하지 않습니다.
+`applyAuto()`는 로컬 중재 시험용 진입점이며 C 공개 인터페이스를 확정한 것이 아닙니다.
+실제 C의 위험 해소·입력 소실 표현과 복구 정책은 별도 합의 대상입니다. 아래 선택형 Mock에서는 시험용 정책을 명시적으로 적용합니다.
+실행 중 B UNKNOWN 주입 및 C 결과 기반 Snapshot 생성도 이번 범위 밖입니다.
+D의 UNKNOWN 수신·'확인 중' 표시와 null 송신 로그 정정은 D팀 작업이며 현재 Frontend는 수정하지 않았습니다.
+
 아래 자동 시험 기록과 위 사용자 수동 A–D 화면 검증 결과를 구분합니다.
 
 `door_simulation_test`는 sleep 없이 가상 시각으로 완료 경계·충돌·HOLD·AUTO 복귀를 검증합니다.
@@ -717,6 +736,124 @@ FIN_WAIT_1/TIME_WAIT과 listener 부재를 확인한 뒤 미실행 기본 시험
   종료 시간 보장을 검증한 것으로 보지 않습니다. 재실행하지 않았고 원본 로그를 보존했습니다.
 - Ubuntu g++의 JSON 요청/메시지 시험 PASS. 당시 Linux 전체 CMake/CTest 및 실제 D 화면 연동은
   미검증이었습니다. 소프트웨어 전용 범위와 후속 사용자 화면 검증은 위 설명을 참고하세요.
+
+### 자동 CLOSE 및 중재 검증 (2026-11-07)
+
+별도 Worktree의 `backend/build/door-auto-20261107`에서 루트 MSVC x64 Release Configure/Build를 수행했습니다.
+Boost 1.86.0과 nlohmann/json 3.11.3의 기존 소스를 재사용했습니다.
+전체 CTest는 17/18 PASS(47.20초, ExitCode 8)입니다. 실패는 `websocket_server_test`의
+`handshake-snapshots-commands / client.connect`, system:10014이며 원인은 미확정입니다.
+실패한 실행을 재시도하지 않았습니다. 해당 하위 시험의 UNKNOWN 송수신 및 뒤쪽 slow-client 시험은 도달하지 못했습니다.
+가상 시각의 2679/2680/6679/6680/9029/9030ms 경계, AUTO/MANUAL·HOLD·중복·UNKNOWN 시험,
+JSON 시험, 기존 Mock 6개 시나리오, A–B·Background·Radar 재연결 시험은 통과했습니다.
+
+별도의 일반 사용자 loopback Mock 시험은 두 클라이언트 수신, 단발 AUTO CLOSE,
+5초 이상 HOLD, null no-op, 수동 OPEN/CLOSE 및 재접속의 내부 assertion을 통과했습니다.
+Snapshot 기준 OPEN 유지 관측 구간은 약 3901.90ms, 자동 CLOSING은 2397.45ms,
+평균 소스 발행 간격은 100.153ms였습니다. 첫 OPEN 관측 뒤 추가 Snapshot을 읽은 시점부터
+유지 시간을 측정하므로 4000ms 가상 시각 경계와 구분합니다.
+프로세스 종료 코드 집계가 빈 값으로 남아 실행 래퍼는 ExitCode 1입니다.
+내부 TEST_END PASS 및 서버 stop.complete 기록과 구분하며 전체 실행 PASS로 확정하지 않습니다.
+원본 stdout/stderr를 보존했고, 종료 코드 누락을 이유로 시험을 반복하지 않았습니다.
+실제 C 판단, D 화면 UNKNOWN 표시, 물리 문 제어, Linux 및 별도 Backend 독립 Build는 이번 검증에 포함하지 않았습니다.
+
+### 합성 위험 입력으로 문 제어 시험
+
+기본 `--ws-mock`과 `--ws-door-sim` 동작은 유지합니다. 다음 옵션을 추가할 때만
+`MockDoorPolicy`가 합성 Passenger를 해석해 기존 `applyAuto()`에 전달합니다.
+Tracking·FALL·IMMOBILE 판정 알고리즘이나 C 공개 인터페이스가 아닙니다.
+
+```powershell
+.\backend\build\door-risk-20261107\backend\Release\elevsafe_backend.exe `
+  --ws-mock --ws-door-sim --ws-door-scenario risk-clear `
+  --ws-bind 127.0.0.1 --ws-port 8080 --ws-duration 20
+```
+
+`--ws-door-scenario`는 `--ws-mock --ws-door-sim`과 함께 사용합니다.
+
+| 시나리오 | 합성 입력 및 조작 |
+|---|---|
+| `normal` | 빈 승객 목록. 클라이언트 OPEN으로 2680/6680/9030ms 기본 사이클 시작 |
+| `unknown` | UNKNOWN + ENTERING/FALL. 자동 동작 없음. 수동 OPEN/HOLD/CLOSE로 알려진 상태 전환 |
+| `inside-fall`, `inside-immobile` | INSIDE 위험만으로 새 AUTO 명령을 내거나 기존 자동 닫힘 타이머를 중단하지 않음 |
+| `entering-fall`, `entering-immobile`, `exiting-fall`, `exiting-immobile` | 알려진 상태에서 AUTO OPEN, 열림 완료 후 HOLD 지속 |
+| `risk-clear` | ENTERING/FALL, 시작 8초 후 유효한 빈 배열로 명시적 해제 |
+| `input-loss` | ENTERING/FALL, 시작 8초 후 공급 중단. 마지막 유효 입력과 HOLD 유지, 경고 로그 |
+| `multi` | INSIDE/IMMOBILE + ENTERING/FALL + OUTSIDE/null. 출입구 위험 우선 |
+| `manual-conflict` | 지속 ENTERING/FALL에 클라이언트 OPEN/HOLD/CLOSE를 전송해 중재 확인 |
+
+모든 입력은 Mock입니다. INSIDE/IMMOBILE의 알림은 기존 `safety_state`로 D가 표시하며
+최상위 Alert 필드를 추가하지 않습니다. OUTSIDE/FALL·IMMOBILE 및 잘못된 입력은 거부하고,
+정상 상태로 바꾸지 않습니다. 입력 소실 시 마지막 Passenger도 유지되므로 새 관측으로 해석하면 안 됩니다.
+입력 소실 중에는 새 AUTO 명령을 생성하지 않습니다. 수동 동작 완료 후에도 공급이 복구돼
+유효한 위험 입력이 확인돼야 다시 판단합니다. 기존 AUTO HOLD는 그대로 유지합니다.
+공급 중단·명시적 입력 무효화와 유효한 빈 배열은 다릅니다. 이 시나리오는 C의 추적 실패나
+실제 승객 퇴장을 판정하지 않으며 새 네트워크 입력 규격도 추가하지 않습니다.
+
+Mock의 명시적 위험 해제는 AUTO OPEN/HOLD만 해제합니다. OPEN이면 그 시점부터 4초,
+OPENING이면 기존 열림 완료 시점부터 4초 후 자동 CLOSE합니다. CLOSING/CLOSED는 재시작하지
+않습니다. 해제 자체는 명령 이벤트나 ACK를 만들지 않습니다. MANUAL HOLD는 해제하지 않습니다.
+입력 소실만으로 AUTO HOLD를 해제하지 않으며 무기한 유지 정책은 실제 설비에 적용하지 않습니다.
+
+처리 순서는 수동 FIFO → 이동 완료 반영 → Mock 위험 판단 → 기본 자동 닫힘입니다.
+UNKNOWN에서 AUTO 명령은 차단합니다. 수동 CLOSE는 위험 AUTO OPEN/HOLD보다 우선하고,
+수동 OPEN/CLOSE 완료 후 위험이 유지되면 다시 평가합니다. 수동 HOLD는 OPEN/CLOSE로만
+해제합니다. D의 null과 연결 종료는 해제 요청이 아닙니다. 이는 소프트웨어 시연 정책이며
+물리적 안전 인터록이 아닙니다. 복수 승객 판단은 배열 순서와 무관합니다.
+
+새 CTest `websocket_door_risk_test`는 가상 시각으로 정책을 진행하면서 실제 WebSocket의
+두 클라이언트에 UNKNOWN·위험·해제 결과를 전송합니다. 가상 시각 시험을 실제 10Hz 시험으로
+해석하지 않습니다. 실제 프로세스 시험은 위 서버와 별도로 다음 클라이언트를 실행합니다.
+
+```powershell
+.\backend\build\door-risk-20261107\backend\Release\websocket_server_test.exe `
+  --case door-risk-process --diagnostics
+```
+
+이 클라이언트는 `risk-clear` 시나리오의 OPENING→OPEN/HOLD→해제→CLOSING→CLOSED,
+null no-op, 동일 Snapshot 수신을 검사합니다. 서버 준비 후 초기에 연결해야 하며,
+서버와 클라이언트의 종료 코드도 별도로 확인합니다. 기존 10014 실패 기록은 위에 보존합니다.
+
+Frontend는 변경하지 않았습니다. 현재 D는 UNKNOWN을 수신 상태에 반영하지 않습니다.
+D팀은 UNKNOWN 수신 허용, ‘확인 중’ 표시, 이전 문 상태/애니메이션으로 추정 금지,
+null을 ACK·AUTO 복귀로 설명하는 로그 정정을 별도 반영해야 합니다.
+실제 C 연결 시 합성 입력과 Mock 정책을 교체하고, WebSocket·FIFO·문 시뮬레이션을 재사용합니다.
+C의 위험 해제·입력 소실·갱신 주기와 물리 제어 정책은 후속 합의 범위입니다.
+
+2026-11-07 위험 Mock 확장 검증 로그는 Git 제외 경로
+`backend/build/door-risk-20261107` 및 `backend/build/door-risk-backend-20261107`에 보존했습니다.
+
+| 검증 | 결과 |
+|---|---|
+| 수정 전 루트 Release Build / CTest | PASS / 18/18 PASS, 45.24초, ExitCode 0 |
+| 위험 정책 1차 루트 Release Build / CTest | PASS / 19/19 PASS, 45.06초, ExitCode 0 |
+| 최종 입력 소실 중 신규 명령 차단 후 루트 Build / CTest | PASS / 19/19 PASS, 42.64초, ExitCode 0 |
+| Backend 독립 Release Build / 전체 CTest (1차) | PASS / 18/19 PASS, 43.91초, ExitCode 8 |
+| 최종 Backend 독립 Build / 정책 단위 시험 | PASS / PASS, ExitCode 0. 전체 CTest 실패는 재실행하지 않음 |
+| 변경 없는 Frontend Build | PASS, ExitCode 0. 기존 main의 동일 소스·lockfile 및 설치된 의존성 사용 |
+| 위험 정책 단위 시험 / 12개 WebSocket 시나리오 | 양쪽 구성 PASS |
+| 1차 실제 `risk-clear` 서버·클라이언트·래퍼 | 모두 ExitCode 0, 두 클라이언트 142개 동일 Snapshot, CLOSE 이벤트 1회 |
+| 최종 바이너리 `risk-clear` 서버·클라이언트·래퍼 | 모두 ExitCode 0, 두 클라이언트 143개 동일 Snapshot, CLOSE 이벤트 1회 |
+| 기본 Door Mock 실제 서버·클라이언트·래퍼 | 모두 ExitCode 0, 평균 수신 99.95ms, null/HOLD/재접속 PASS |
+
+Backend 실패는 기존 `websocket_server_test`의 `null-compatibility / client.connect`,
+port 58563, system:10014입니다. listen은 성공했으며 원인은 미확정입니다. 이 실행을
+재시도하지 않았고 전체 Windows 검증을 모두 PASS로 해석하지 않습니다. 해당 실행의
+뒤쪽 서버 하위 시험은 미도달했지만 루트에서는 통과했습니다. 신규 위험 시험은 독립된
+CTest로 실행되어 양쪽 모두 통과했습니다. A–B·Background ON/OFF·Radar 재연결도 통과했습니다.
+
+가상 시각의 내부 경계는 2680/6680/9030ms입니다. 기본 Mock에서 관측한 OPEN 유지
+3886.34ms는 첫 OPEN 이후 추가 Snapshot을 읽는 기존 클라이언트 측 측정 기준을 포함하므로
+내부 4000ms 유지 시간과 구분합니다. 실제 측정 원자료나 물리 문 동작을 검증한 것은 아닙니다.
+`risk-clear` 종료 직후 netstat에 일시적인 PID 0 LISTENING 항목이 있었으며 원인은 미확정입니다.
+후속 실행 전에는 없었고 최종 조회에서 시험 프로세스와 8080 listener는 남아 있지 않았습니다.
+과거 10014 및 Mock 래퍼 종료 코드 누락 기록은 삭제하거나 성공 기록으로 대체하지 않았습니다.
+최종 보완은 입력 소실 중 새로운 AUTO 명령을 차단하고 유효 입력 복구 후 재평가하도록 한 것입니다.
+기존 HOLD 유지·명시적 해제와 기본 Door Mock은 유지합니다. 관련 복구 단위 시험을 추가했고,
+최종 루트 CTest는 전체 실행했습니다. Backend 독립 구성은 재빌드 및 해당 단위 시험만 수행하여
+앞선 전체 CTest의 실패를 성공으로 대체하지 않았습니다. 기본 Door Mock 실제 실행은 이 보완 전 기록입니다.
+Frontend는 기존 Node로 `react-scripts/scripts/build.js`를 직접 실행해 별도 `frontend-build`에
+출력했습니다. npm 설치, D 소스 변경, 브라우저 조작은 하지 않았습니다. D UNKNOWN 표시는 여전히 미구현입니다.
 
 ### A-B 및 WebSocket transport 공존
 
