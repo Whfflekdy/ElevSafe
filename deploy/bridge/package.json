@@ -1,5 +1,5 @@
 {
   "name": "elevsafe-bridge",
   "private": true,
-  "dependencies": { "ws": "8.18.0" }
+  "dependencies": { "ws": "8.22.1" }
 }
