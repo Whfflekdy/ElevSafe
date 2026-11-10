@@ -55,7 +55,7 @@ target_link_libraries(elevsafe_backend PRIVATE elevsafe_door_simulation nlohmann
 
 enable_testing()
 add_executable(door_simulation_test tests/door_simulation_test.cpp)
-target_link_libraries(door_simulation_test PRIVATE elevsafe_door_simulation)
+target_link_libraries(door_simulation_test PRIVATE elevsafe_door_simulation elevsafe_websocket nlohmann_json::nlohmann_json)
 add_test(NAME door_simulation_test COMMAND door_simulation_test)
 
 add_executable(ab_profile_test tests/ab_profile_test.cpp)
@@ -148,6 +148,8 @@ add_test(NAME websocket_server_test COMMAND websocket_server_test)
 set_tests_properties(websocket_server_test PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
 add_test(NAME websocket_mock_scenarios_test COMMAND websocket_server_test --case mock-scenarios --diagnostics)
 set_tests_properties(websocket_mock_scenarios_test PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+add_test(NAME websocket_door_risk_test COMMAND websocket_server_test --case door-risk-scenarios --diagnostics)
+set_tests_properties(websocket_door_risk_test PROPERTIES TIMEOUT 40 RUN_SERIAL TRUE)
 add_test(NAME websocket_cli_test COMMAND ${CMAKE_COMMAND}
     -DBACKEND_EXE=$<TARGET_FILE:elevsafe_backend> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/websocket_cli_test.cmake)
 set_tests_properties(websocket_message_test PROPERTIES TIMEOUT 30)

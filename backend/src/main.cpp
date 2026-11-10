@@ -1,5 +1,6 @@
 #include "elevsafe/backend_pipeline.h"
 #include "elevsafe/door_simulation.h"
+#include "elevsafe/mock_door_policy.h"
 #include <nlohmann/json.hpp>
 #include "elevsafe/ab_profile.h"
 #include "elevsafe/radar_reconnect.h"
@@ -65,7 +66,7 @@ namespace
                      "       [--ab-profile [--ab-profile-max-frames N] [--ab-profile-warmup N]]\n"
                      "       [--radar-reconnect [--radar-reconnect-eof]] (numeric radar IP only)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
-                     "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim]\n"
+                     "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim [--ws-door-scenario NAME]]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
     }
 
@@ -113,15 +114,21 @@ namespace
         }
     };
 
-    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim)
+    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim, const std::optional<std::string>& scenario)
     {
         mockStop.store(false, std::memory_order_relaxed);
         const auto previous = std::signal(SIGINT, stopMock);
         std::cerr << "[ws] MOCK ONLY: synthetic session snapshots, target 100ms (10Hz), duration=" << seconds
                   << "s. No radar/C result, no physical door control. Ctrl+C stops this mode.\n";
-        elevsafe::DoorSimulation simulation;
+        elevsafe::DoorSimulation simulation(scenario == "unknown"
+            ? elevsafe::DoorSimulation::State::Unknown : elevsafe::DoorSimulation::State::Closed);
+        elevsafe::MockDoorPolicy policy;
+        const auto scenarioStart = std::chrono::steady_clock::now();
+        bool missingReported = false;
+        if (scenario) std::cerr << "[door-mock-policy] SYNTHETIC ONLY scenario=" << *scenario << '\n';
         std::optional<elevsafe::DoorSimulation::Command> newlyApplied;
-        if (doorSim) std::cerr << "[door-sim] SOFTWARE ONLY mode=AUTO state=CLOSED; no hardware/C input/ACK\n";
+        if (doorSim) std::cerr << "[door-sim] SOFTWARE ONLY mode=AUTO state="
+            << elevsafe::DoorSimulation::name(simulation.state()) << "; no hardware/C input/ACK\n";
         const auto logSimulation = [&](const char* event)
         {
             std::cerr << "[door-sim] " << event << " state=" << elevsafe::DoorSimulation::name(simulation.state())
@@ -138,7 +145,6 @@ namespace
             const auto now = std::chrono::steady_clock::now();
             if (doorSim)
             {
-                if (simulation.update(now)) logSimulation("transition-complete");
                 while (const auto request = server.popCommand())
                 {
                     using Command = elevsafe::DoorSimulation::Command;
@@ -146,9 +152,23 @@ namespace
                         : request->command == "HOLD" ? Command::Hold : Command::Close;
                     if (simulation.apply(command, now))
                     {
-                        newlyApplied = command;
                         logSimulation("command-applied");
                     }
+                }
+                if (scenario)
+                {
+                    policy.accept(elevsafe::mockDoorScenarioInput(*scenario,
+                        std::chrono::duration_cast<std::chrono::microseconds>(now - scenarioStart)));
+                    if (policy.inputMissing() && !missingReported)
+                        std::cerr << "[door-mock-policy] WARNING input missing/invalid; retaining last valid synthetic input; not risk-clear\n";
+                    missingReported = policy.inputMissing();
+                    if (policy.tick(simulation, now)) logSimulation("mock-policy-updated");
+                }
+                else if (simulation.update(now)) logSimulation("state-updated");
+                if (const auto applied = simulation.takeAppliedCommand())
+                {
+                    newlyApplied = applied;
+                    logSimulation("command-event");
                 }
             }
             if (now >= next)
@@ -159,6 +179,7 @@ namespace
                 if (doorSim)
                 {
                     auto snapshot = nlohmann::json::parse(message);
+                    if (scenario) snapshot["passengers"] = policy.passengers();
                     snapshot["door_state"] = elevsafe::DoorSimulation::name(simulation.state());
                     if (newlyApplied) snapshot["door_command"] = elevsafe::DoorSimulation::name(*newlyApplied);
                     message = snapshot.dump();
@@ -202,6 +223,7 @@ int main(int argc, char** argv)
     bool websocketEnabled = false;
     bool mockMode = false;
     bool doorSim = false;
+    std::optional<std::string> doorScenario;
     bool websocketSettings = false;
     bool durationSpecified = false;
     std::size_t mockSeconds = 30;
@@ -210,6 +232,12 @@ int main(int argc, char** argv)
     for (int argument = 1; argument < argc;)
     {
         const std::string_view option(argv[argument]);
+        if (option == "--ws-door-scenario")
+        {
+            if (doorScenario || argument + 1 >= argc || !elevsafe::isMockDoorScenario(argv[argument + 1]))
+            { std::cerr << "Missing, duplicate or invalid --ws-door-scenario\n"; return 2; }
+            doorScenario = argv[argument + 1]; argument += 2; continue;
+        }
         if (option == "--ws-door-sim")
         {
             if (doorSim) { std::cerr << "Duplicate --ws-door-sim\n"; return 2; }
@@ -343,6 +371,11 @@ int main(int argc, char** argv)
         ++argument;
     }
 
+    if (doorScenario && (!mockMode || !doorSim))
+    {
+        std::cerr << "--ws-door-scenario requires --ws-mock --ws-door-sim\n";
+        return 2;
+    }
     if (doorSim && !mockMode)
     {
         std::cerr << "--ws-door-sim requires --ws-mock (software simulation only)\n";
@@ -445,7 +478,7 @@ int main(int argc, char** argv)
         }
         if (mockMode)
         {
-            try { return runMock(*websocket, mockSeconds, doorSim); }
+            try { return runMock(*websocket, mockSeconds, doorSim, doorScenario); }
             catch (const std::exception& error)
             {
                 std::cerr << "[ws] startup/runtime failed: " << error.what() << '\n';
