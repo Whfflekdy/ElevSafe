@@ -65,8 +65,21 @@ int main()
         expect(!elevsafe::isSnapshot(json.dump()), "non-finite/null coordinate accepted");
         json["passengers"] = Json::array();
         expect(elevsafe::isSnapshot(json.dump()), "empty snapshot must be valid");
-        json["door_state"] = "UNKNOWN";
-        expect(!elevsafe::isSnapshot(json.dump()), "UNKNOWN must not be converted to a valid door state");
+        for (const auto* state : {"OPEN", "CLOSED", "OPENING", "CLOSING", "UNKNOWN"})
+        {
+            json["door_state"] = state;
+            json["door_command"] = nullptr;
+            const auto wire = json.dump();
+            expect(elevsafe::isSnapshot(wire), "valid v7 door state rejected");
+            expect(Json::parse(wire)["door_state"] == state && json.size() == 5,
+                "door state/fields changed on round trip");
+        }
+        for (const auto& state : Json::array({"unknown", "INVALID", "", nullptr, 0, true}))
+        {
+            invalid = json;
+            invalid["door_state"] = state;
+            expect(!elevsafe::isSnapshot(invalid.dump()), "invalid door state accepted");
+        }
         expect(!elevsafe::isSnapshot("{\"timestamp\":1e9999}"), "overflowing JSON number accepted");
         expect(elevsafe::isNullDoorRequest("{\"door_command\":null}"), "valid null rejected");
         for (const auto* text : {"null", "{}", "[]", "{", "{\"door_command\":false}",
