@@ -22,7 +22,6 @@ const SCALE = 1.6;
 /* [실제 연동 시 바꿀 설정]
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
- * HTTPS 화면에서는 서버도 wss:// 주소를 사용해야 합니다.
  */
 const USE_REAL_WEBSOCKET = true;
 const RADAR_WS_URL = 'ws://127.0.0.1:8080/radar';
@@ -112,7 +111,7 @@ function App() {
   // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
   const [passengers, setPassengers] = useState([]);
 
-  // ✅ timestamp_us를 저장할 상태 변수 추가
+  // timestamp_us를 저장할 상태 변수 추가
   const [timestampUs, setTimestampUs] = useState(null);
 
   const [systemLogs, setSystemLogs] = useState([
@@ -124,45 +123,46 @@ function App() {
   const doorTimerRef = useRef(null);
   const autoRevertTimerRef = useRef(null); // 수동명령 후 자동 복귀용
 
+  // 🚀 10Hz 수신 렌더링 최적화 및 재접속 딜레이용 (새로 추가)
+  const animationFrameId = useRef(null);
+  const latestDataRef = useRef(null);
+  const reconnectDelay = useRef(1000); // 시작 딜레이 1초
+
   // 10Hz 데이터 수신 시 로그 폭발 방지를 위해 최대 50개 유지
   const log = message => setSystemLogs(prev => {
     const newLogs = [...prev, message];
     return newLogs.length > 50 ? newLogs.slice(newLogs.length - 50) : newLogs;
   });
-
-  /* 
-  ===============================================================
-  [실제 넣어야 할 부분 - WebSocket 연동 영역]
-
-  아래 코드는 미리 구현되어 있습니다. 주석을 해제할 필요 없이
-  파일 상단의 USE_REAL_WEBSOCKET을 true로 바꾸고
-  RADAR_WS_URL을 실제 서버 주소로 바꾸면 활성화됩니다.
-
-  수신 JSON 예시:
-  {
-    "timestamp": "2026-10-01T14:02:05Z",
-    "door_state": "OPEN",
-    "door_command": null,
-    "passengers": [
-      { "id": 1, "x": 0.25, "y": 1.0, "state": "INSIDE",
-        "safety_state": null, "label": "Passenger #1" }
-    ]
-  }
-
-  door_state: OPEN / CLOSED / OPENING / CLOSING
-  door_command: null / OPEN / HOLD / CLOSE
-  state: INSIDE / OUTSIDE / ENTERING / EXITING
-  safety_state: null / FALL / IMMOBILE
-  x, y: 유한한 숫자, 단위 m, 문 중앙이 (0, 0)
-  화면에서 x 양수는 오른쪽, y 양수는 캐빈 안쪽(위쪽)입니다.
-
-  이 예제에는 자동 재연결, 인증 및 명령 응답 확인은 포함하지 않았습니다.
-  서버에서 passengers를 보내면 화면의 전체 승객 목록을 교체합니다.
-  =================================================================
-  */
-
  
-  // 테스트 데이터와 실제 서버 데이터를 똑같이 처리합니다.
+  // 1. 프레임 렌더링 시점에 최신 데이터만 꺼내서 한 번에 상태 업데이트 (Throttling 분리)
+  const updateStateFromLatestData = () => {
+    const data = latestDataRef.current;
+    if (!data) {
+      animationFrameId.current = null;
+      return;
+    }
+
+    if (typeof data.timestamp_us === 'number') {
+      setTimestampUs(data.timestamp_us);
+    }
+
+    if (['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
+      setDoorState(data.door_state);
+    }
+
+    if (Array.isArray(data.passengers)) {
+      setPassengers(
+        data.passengers.filter(p => p && (typeof p.id === 'number' || typeof p.id === 'string') && Number.isFinite(p.x) && Number.isFinite(p.y))
+      );
+    }
+
+    if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
+      setDoorCommand(data.door_command);
+    }
+    animationFrameId.current = null;
+  };
+
+  // 2. 웹소켓 수신 시 상태를 즉시 바꾸지 않고 최신 데이터를 임시 저장만 한 뒤 렌더링 예약
   const receiveMessage = message => {
     try {
       const data = JSON.parse(message);
@@ -171,37 +171,14 @@ function App() {
         throw new Error('JSON 객체가 필요합니다.');
       }
 
-      // ✅ 수신한 JSON에 timestamp_us가 있으면 상태 업데이트
-      if (typeof data.timestamp_us === 'number') {
-        setTimestampUs(data.timestamp_us)
-      }
+      latestDataRef.current = data;
 
-      if (
-        ['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(
-          data.door_state
-        )
-      ) {
-        setDoorState(data.door_state);
-      }
-
-      if (Array.isArray(data.passengers)) {
-        setPassengers(
-          data.passengers.filter(p =>
-            p &&
-            (typeof p.id === 'number' || typeof p.id === 'string') &&
-            Number.isFinite(p.x) &&
-            Number.isFinite(p.y)
-          )
-        );
-      }
-
-      if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
-        setDoorCommand(data.door_command);
+      // 만약 다음 프레임 예약이 안 되어 있다면 예약
+      if (!animationFrameId.current) {
+        animationFrameId.current = requestAnimationFrame(updateStateFromLatestData);
       }
     } catch (error) {
       console.error('수신 데이터 처리 오류:', error);
-      // 너무 잦은 에러 로그 방지: 필요시 주석 해제
-      // log('[데이터] 수신 데이터 형식 오류'); 
     }
   };
 
@@ -215,7 +192,10 @@ function App() {
       const ws = new WebSocket(RADAR_WS_URL);
       wsRef.current = ws;
 
-      ws.onopen = () => log('[WebSocket] 서버 연결 완료 (10Hz 데이터 수신 준비)');
+      ws.onopen = () => {
+        log('[WebSocket] 서버 연결 완료 (10Hz 데이터 수신 준비)');
+        reconnectDelay.current = 1000; // 성공 시 딜레이 초기화 추가
+      };
       ws.onmessage = event => receiveMessage(event.data);
       
       ws.onerror = () => {
@@ -225,8 +205,12 @@ function App() {
 
       ws.onclose = () => {
         if (!isUnmounted) {
-          log('[WebSocket] 연결 종료. 1초 뒤 자동 재접속 시도...');
-          reconnectTimeout = setTimeout(connectWebSocket, 1000);
+          const delay = reconnectDelay.current;
+          log(`[WebSocket] 연결 종료. ${delay / 1000}초 뒤 재접속 시도...`);
+          
+          reconnectTimeout = setTimeout(connectWebSocket, delay);
+          // 다음 번 실패 시 대기 시간 2배로 증가 (최대 30초까지만)
+          reconnectDelay.current = Math.min(delay * 2, 30000); 
         }
       };
     };
@@ -269,6 +253,8 @@ function App() {
       isUnmounted = true;
       clearTimeout(reconnectTimeout);
       if (wsRef.current) wsRef.current.close();
+      // 종료 시 진행 중인 렌더링 프레임 취소 추가
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
     };
   }, []);
 
