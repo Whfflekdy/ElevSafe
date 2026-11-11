@@ -12,6 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # C 트래킹(tracking_core)이 Eigen3를 필요로 해서 CI 컴퓨터에 설치
+      - name: Install Eigen3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeigen3-dev
       
       # 백엔드(A) 폴더를 타겟으로 지정하면, 내부 CMakeLists.txt의 지시에 따라
       # ../signal_processing 경로의 B 모듈까지 함께 묶어서 빌드를 구성합니다.
@@ -29,6 +35,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Eigen3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeigen3-dev
       - name: Configure Signal Processing
         run: cmake -S signal_processing -B build/sp -DCMAKE_BUILD_TYPE=Release
       - name: Build Signal Processing
