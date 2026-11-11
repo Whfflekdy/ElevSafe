@@ -8,7 +8,7 @@ const CONFIG_CM = {
   ELEV_DEPTH: 137,      // 카 깊이 (세로)
   DOOR_WIDTH: 88,       // 출입구 폭
   DOOR_THICKNESS:24,    // 문틈 두께 (세로 폭)
-  WAITING_DEPTH: 90,   // 승강장(대기 구역) 길이
+  WAITING_DEPTH: 250,   // 승강장(대기 구역) 길이
   WAITING_WIDTH: 166,   // 승강장 최대 폭
   TRAP_DEPTH: 52,       // 사다리꼴 깊이
   TRAP_BOTTOM_W: 101,   // 사다리꼴 하단 폭
@@ -16,15 +16,20 @@ const CONFIG_CM = {
 
 // 🔍 화면 확대/축소 비율 (1cm = 몇 px로 그릴 것인가?)
 // 도면이 화면에 비해 너무 작으면 이 숫자를 2.5, 3.0으로 늘리고, 너무 크면 1.5 등으로 줄이세요.
-const SCALE = 1.6;
+const SCALE = 1.1;
 
 
 /* [실제 연동 시 바꿀 설정]
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
  */
-const USE_REAL_WEBSOCKET = true;
-const RADAR_WS_URL = 'ws://127.0.0.1:8080/radar';
+const USE_REAL_WEBSOCKET = false;
+// 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
+const RADAR_WS_URL = process.env.REACT_APP_WS_URL
+  || (process.env.NODE_ENV === 'production'
+    ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/radar`
+    : 'ws://127.0.0.1:8080/radar');
+    
 const MAX_WIDTH = Math.max(CONFIG_CM.ELEV_WIDTH, CONFIG_CM.WAITING_WIDTH);
 // 외곽선을 한 번 계산합니다. 내부 구분선과 면 채우기는 없습니다.
 const PLAN = (() => {
@@ -104,7 +109,7 @@ function FloorPlan({ doorState, children }) {
 
 
 function App() {
-  const [doorState, setDoorState] = useState('CLOSED');
+  const [doorState, setDoorState] = useState('UNKNOWN');
   const [doorCommand, setDoorCommand] = useState(null);
   const [selectedDot, setSelectedDot] = useState(null); // 클릭한 승객 말풍선 띄우기용
   // 실제 연동에서는 빈 배열로 시작하고 서버 데이터로 채웁니다.
@@ -123,7 +128,7 @@ function App() {
   const doorTimerRef = useRef(null);
   const autoRevertTimerRef = useRef(null); // 수동명령 후 자동 복귀용
 
-  // 🚀 10Hz 수신 렌더링 최적화 및 재접속 딜레이용 (새로 추가)
+  // 10Hz 수신 렌더링 최적화 및 재접속 딜레이용 (새로 추가)
   const animationFrameId = useRef(null);
   const latestDataRef = useRef(null);
   const reconnectDelay = useRef(1000); // 시작 딜레이 1초
@@ -146,7 +151,7 @@ function App() {
       setTimestampUs(data.timestamp_us);
     }
 
-    if (['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
+    if (['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
       setDoorState(data.door_state);
     }
 
@@ -223,7 +228,7 @@ function App() {
       const sampleData = {
         timestamp: "2026-11-01T10:30:00Z",
         timestamp_us: 9382050,
-        door_state: 'OPEN',
+        door_state: 'UNKNOWN',
         door_command: 'OPEN',
         passengers: [
           {
@@ -362,7 +367,7 @@ function App() {
         <h1>ElevSafe 관제 시스템 — [RETINA-4SN 4D Radar 연동]</h1>
         <div className="spec-badge">
           <span>Range: 12m(Person) / 7m×7m</span> | <span>FoV: 90°(±45°)</span> | <span>Rate: 50ms</span>
-          {/* ✅ 개발자 데이터 갱신 확인용 필요없음 지움*/}
+          {/* 개발자 데이터 갱신 확인용 필요없음 지움*/}
           {timestampUs !== null && <span> | Time: {timestampUs}µs</span>}
         </div>
       </header>
@@ -392,6 +397,12 @@ function App() {
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
+            {/* doorState가 UNKNOWN일 때만 표시되는 오버레이 추가 */}
+            {doorState === 'UNKNOWN' && (
+              <div className="unknown-overlay">
+                <span className="unknown-text">확인 중...</span>
+              </div>
+            )}
 
             <FloorPlan doorState={doorState}>
 
