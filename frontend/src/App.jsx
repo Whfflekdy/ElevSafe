@@ -25,7 +25,13 @@ const SCALE = 1.6;
  * HTTPS 화면에서는 서버도 wss:// 주소를 사용해야 합니다.
  */
 const USE_REAL_WEBSOCKET = true;
-const RADAR_WS_URL = 'ws://127.0.0.1:8080/radar';
+// 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
+const RADAR_WS_URL = process.env.REACT_APP_WS_URL
+  || (process.env.NODE_ENV === 'production'
+    ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/radar`
+    : 'ws://127.0.0.1:8080/radar');
+// TODO 5 (나중에): 원격 화면에서는 문 제어 버튼 숨기기 (채민님과 상의)
+
 const MAX_WIDTH = Math.max(CONFIG_CM.ELEV_WIDTH, CONFIG_CM.WAITING_WIDTH);
 // 외곽선을 한 번 계산합니다. 내부 구분선과 면 채우기는 없습니다.
 const PLAN = (() => {
