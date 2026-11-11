@@ -1,12 +1,18 @@
-/* 전체 컨테이너 및 헤더 */
+body {
+  margin: 0;
+  padding: 0;
+}
+
 .dashboard-container {
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   background-color: #1e293b;
   color: #f8fafc;
   min-height: 100vh;
-  margin: -8px;
+  margin: 0;
   padding-bottom: 20px;
   transition: background-color 0.5s ease-in-out;
+  display: flex;
+  flex-direction: column;
 }
 .header {
   background-color: #0f172a;
@@ -25,17 +31,20 @@
   font-size: 13px;
   color: #38bdf8;
 }
+
 /* 본문: 승객 정보 / 도면 / 제어 및 로그의 3개 패널 */
 .main-content {
   display: flex;
   gap: 20px;
   padding: 20px;
-  height: calc(100vh - 100px);
+  flex: 1;
+  flex-wrap: wrap;
 }
 
 /* 좌측 패널 (상세 정보) */
 .left-panel {
-  flex: 2; /* 좌측 비율 */
+  flex: 1.5;
+  min-width: 250px;
   background-color: #334155;
   border-radius: 12px;
   padding: 20px;
@@ -74,13 +83,13 @@
 
 /* 중앙 시각화 영역 */
 .visualization-section {
-  flex: 4.5;
+  flex: 2;
+  min-width: 400px; /* 도면이 찌그러지지 않을 최소 크기 보장 */
   background-color: #334155;
   border-radius: 12px;
   padding: 20px;
   display: flex;
   flex-direction: column;
-  transition: all 0.5s ease-in-out;
 }
 .visualization-section h2 { margin-top: 0; font-size: 18px; color: #cbd5e1; }
 .canvas-container {
@@ -216,7 +225,7 @@
 }
 
 /* 우측 패널 */
-.side-panel { flex: 2.5; display: flex; flex-direction: column; gap: 20px; }
+.side-panel { flex: 2; min-width: 300px; display: flex; flex-direction: column; gap: 20px; }
 .control-panel, .log-monitor { background-color: #334155; border-radius: 12px; padding: 20px; transition: all 0.5s ease-in-out;}
 .control-panel h2, .log-monitor h2 { margin-top: 0; font-size: 16px; color: #cbd5e1; }
 .status-box { background-color: #0f172a; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #475569; }
@@ -242,3 +251,28 @@
 .terminal-window { background-color: #020617; color: #34d399; font-family: 'Courier New', monospace; padding: 12px; border-radius: 8px; height: 200px; overflow-y: auto; font-size: 13px; border: 1px solid #475569; }
 .terminal-window p { margin: 6px 0; }
 .log-danger { color: #f43f5e; font-weight: bold; }
+
+
+/* UNKNOWN 상태 띠 오버레이 */
+.unknown-overlay {
+  position: fixed;
+  top: 50%;
+  left: 0;
+  width: 100vw;
+  transform: translateY(-50%);
+  background-color: rgba(119, 119, 119, 0.6);
+  padding: 15px 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.unknown-text {
+  color: #ffffff;
+  font-size: 24px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  text-shadow: 1px 1px 4px rgba(0, 0, 0, 0.8);
+}
