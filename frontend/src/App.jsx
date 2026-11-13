@@ -2,28 +2,31 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 // 🛠️ [실제 도면 규격 설정 - 단위: cm]
+
+const WAITING_COMPRESSION = 0.5; // 승강장 화면 왜곡 비율 (0.5 = 50% 길이로 축소. 원하면 조절하세요)
+
 // 이제 px 단위로 머리 아프게 고민할 필요 없이 실제 줄자로 잰 cm 길이를 넣으세요!
 const CONFIG_CM = {
   ELEV_WIDTH: 162,      // 카 폭 (가로)
   ELEV_DEPTH: 137,      // 카 깊이 (세로)
   DOOR_WIDTH: 88,       // 출입구 폭
   DOOR_THICKNESS:24,    // 문틈 두께 (세로 폭)
-  WAITING_DEPTH: 250,   // 승강장(대기 구역) 길이
+  WAITING_DEPTH: 250 * WAITING_COMPRESSION,   // 승강장(대기 구역) 길이
   WAITING_WIDTH: 166,   // 승강장 최대 폭
-  TRAP_DEPTH: 52,       // 사다리꼴 깊이
+  TRAP_DEPTH: 52 * WAITING_COMPRESSION,       // 사다리꼴 깊이
   TRAP_BOTTOM_W: 101,   // 사다리꼴 하단 폭
 };
 
 // 🔍 화면 확대/축소 비율 (1cm = 몇 px로 그릴 것인가?)
 // 도면이 화면에 비해 너무 작으면 이 숫자를 2.5, 3.0으로 늘리고, 너무 크면 1.5 등으로 줄이세요.
-const SCALE = 1.1;
+const SCALE = 1.6;
 
 
 /* [실제 연동 시 바꿀 설정]
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
  */
-const USE_REAL_WEBSOCKET = true;
+const USE_REAL_WEBSOCKET = false;
 // 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
 const RADAR_WS_URL = process.env.REACT_APP_WS_URL
   || (process.env.NODE_ENV === 'production'
@@ -233,7 +236,7 @@ function App() {
         passengers: [
           {
             id: 1,
-            x: 0.25,
+            x: 0.0,
             y: 1.0,
             state: 'INSIDE',
             safety_state: null,
@@ -245,6 +248,30 @@ function App() {
             y: 0.0,
             state: 'ENTERING',
             safety_state: 'FALL',
+            label: 'Passenger #2'
+          },
+          {
+            id: 3,
+            x: 0.0,
+            y: -1.0,
+            state: 'OUTSIDE',
+            safety_state: null,
+            label: 'Passenger #2'
+          },
+          {
+            id: 4,
+            x: 0.0,
+            y: -2.0,
+            state: 'OUTSIED',
+            safety_state: null,
+            label: 'Passenger #2'
+          },
+          {
+            id: 5,
+            x: 0.0,
+            y: -3.0,
+            state: 'OUTSIED',
+            safety_state: null,
             label: 'Passenger #2'
           }
         ]
@@ -413,7 +440,16 @@ function App() {
                 const theme = getTheme(p.safety_state);
                 // 수신 좌표 m를 cm로 바꾼 뒤 화면 배율을 적용합니다.
                 const x_cm = p.x * 100;
-                const y_cm = p.y * 100;
+                let y_cm = p.y * 100;
+
+                // 화면 왜곡 로직: 문 바깥쪽(승강장 영역)인 경우에만 Y좌표 압축
+                const doorOuterBoundary = -(CONFIG_CM.DOOR_THICKNESS / 2);
+                if (y_cm < doorOuterBoundary) {
+                  // 문 경계선을 넘어간 거리(음수)만큼만 압축 비율 적용
+                  const overDistance = y_cm - doorOuterBoundary;
+                  y_cm = doorOuterBoundary + (overDistance * WAITING_COMPRESSION);
+                }
+
                 const leftPos = (MAX_WIDTH / 2 + x_cm) * SCALE;
                 // y=0은 문 두께 중앙, y 양수는 화면 위쪽입니다.
                 const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm + (CONFIG_CM.DOOR_THICKNESS / 2)) * SCALE;
