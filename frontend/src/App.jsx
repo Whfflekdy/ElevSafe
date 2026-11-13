@@ -228,7 +228,7 @@ function App() {
       const sampleData = {
         timestamp: "2026-11-01T10:30:00Z",
         timestamp_us: 9382050,
-        door_state: 'UNKNOWN',
+        door_state: 'CLOSED',
         door_command: 'OPEN',
         passengers: [
           {
@@ -259,7 +259,10 @@ function App() {
       clearTimeout(reconnectTimeout);
       if (wsRef.current) wsRef.current.close();
       // 종료 시 진행 중인 렌더링 프레임 취소 추가
-      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+      if (animationFrameId.current) {
+        cancelAnimationFrame(animationFrameId.current);
+        animationFrameId.current=null;
+      }
     };
   }, []);
 
@@ -380,7 +383,7 @@ function App() {
             <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
               <h3>ID: {selectedPassenger.id}</h3>
               <strong>{selectedPassenger.label}</strong>
-              <p>수신 좌표:<br/>X {selectedPassenger.x}m / Y {selectedPassenger.y}m</p>
+              <p>수신 좌표:<br/>X {selectedPassenger.x.toFixed(2)}m / Y {selectedPassenger.y.toFixed(2)}m</p>
               <p className="state-text">
                 상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
               </p>
