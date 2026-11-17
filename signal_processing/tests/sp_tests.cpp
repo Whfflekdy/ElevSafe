@@ -167,6 +167,26 @@ void testRoiDoorWins() {
     EXPECT(roi.classify(out) == Zone::NONE);
 }
 
+void testRoiHall() {
+    ROIConfig c;
+    c.door_zone = {-0.44f, 0.44f, -0.5f, 0.3f, 0.1f, 2.1f};
+    c.cabin_zone = {-0.75f, 0.75f, 0.3f, 1.35f, 0.1f, 2.2f};
+    c.hall_zone = {-0.35f, 1.20f, -2.5f, -0.5f, 0.1f, 2.1f};
+    RadarPoint hall, near_door, edge;
+    hall.y = -1.0f;       hall.z = 1.0f;       // 승강장 한가운데
+    near_door.y = -0.3f;  near_door.z = 1.0f;  // 문 바로 앞 (DOOR 안)
+    edge.y = -0.5f;       edge.z = 1.0f;       // DOOR와 HALL 경계는 DOOR 우선
+
+    ROIFilter off(c);                          // 기본은 꺼짐
+    EXPECT(off.classify(hall) == Zone::NONE);  // 꺼져 있으면 예전처럼 버림
+
+    c.hall_enabled = true;
+    ROIFilter on(c);
+    EXPECT(on.classify(hall) == Zone::HALL);
+    EXPECT(on.classify(near_door) == Zone::DOOR);
+    EXPECT(on.classify(edge) == Zone::DOOR);
+}
+
 void run(const char* name, void (*fn)()) {
     const int before = g_failed;
     fn();
@@ -185,5 +205,6 @@ int main() {
     run("문 상태: 창이 찰 때까지 UNKNOWN", testDoorUnknownUntilWindowFull);
     run("문 상태: 히스테리시스", testDoorHysteresis);
     run("ROI: DOOR 우선", testRoiDoorWins);
+    run("ROI: HALL 켜짐/꺼짐", testRoiHall);
     return g_failed == 0 ? 0 : 1;
 }

@@ -89,6 +89,7 @@ PipelineResult SignalPipeline::process(const FrameData& frame, const FrameContex
     r.timestamp_us = frame.timestamp_us;
     r.clusters = summarize(kept, sr);          // kept 를 넘기기 전에 요약부터!
     r.estimated_door_state = ds;
+    r.hall_enabled = roi_.config().hall_enabled;
 
     // 오프라인용 점 출력 (요약이 끝났으니 이제 넘겨도 됨)
     if (processed_points != nullptr) *processed_points = std::move(kept);
@@ -106,6 +107,7 @@ std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const SplitR
     // 덩어리마다 모아 둘 것 (합은 double 로: float 로 수백 번 더하면 오차가 쌓임)
     std::vector<double> sx(n_cl, 0.0), sy(n_cl, 0.0), sz(n_cl, 0.0), sd(n_cl, 0.0);
     std::vector<int> n_door(n_cl, 0), n_cabin(n_cl, 0);
+    std::vector<int> n_hall(n_cl, 0);    
     std::vector<std::vector<float>> zs(n_cl);   // z_top 계산용 높이 목록
 
     // 1. 점을 한 번 훑으며 모으기
@@ -129,6 +131,7 @@ std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const SplitR
         sx[k] += p.x;  sy[k] += p.y;  sz[k] += p.z;  sd[k] += p.doppler;
         if (p.zone == Zone::DOOR)  n_door[k]++;
         if (p.zone == Zone::CABIN) n_cabin[k]++;
+        if (p.zone == Zone::HALL)  n_hall[k]++;
         zs[k].push_back(p.z);
         c.num_points++;
     }
@@ -145,8 +148,10 @@ std::vector<Cluster> SignalPipeline::summarize(const Frame& points, const SplitR
         c.cz = static_cast<float>(sz[k] / n);
         c.mean_doppler = static_cast<float>(sd[k] / n);
 
-        // 가장 많은 zone. 같으면 DOOR (ROI 의 "겹치면 Door 우선" 과 맞춤)
-        c.zone = (n_door[k] >= n_cabin[k]) ? Zone::DOOR : Zone::CABIN;
+        // 가장 많은 zone. 같으면 DOOR > CABIN > HALL 순으로 우선
+        if (n_door[k] >= n_cabin[k] && n_door[k] >= n_hall[k])  c.zone = Zone::DOOR;
+        else if (n_cabin[k] >= n_hall[k])                       c.zone = Zone::CABIN;
+        else                                                    c.zone = Zone::HALL;
 
         // z_top: 상위 95% 높이 (가장 가까운 순위 방식)
         // 예: 점 40개 → ceil(38) - 1 = 37번째(0부터) = 위에서 3번째

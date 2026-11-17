@@ -21,10 +21,13 @@ namespace elevsafe::sp {
 struct ROIConfig{
     Box3D door_zone;  // 출입구 영역
     Box3D cabin_zone; // 엘리베이터 내부 영역
+    bool hall_enabled = false; // roi.hall_enable. 꺼져 있으면 HALL 분류 안 함 (기존 결과 그대로)
+    Box3D hall_zone;           // 승강장 상자. 3차 데이터 기준 x -0.35~+1.20, y -2.50~-0.50
 
     static ROIConfig fromConfig(const Config& cfg);
     bool isValid() const{
-        return door_zone.isValid() && cabin_zone.isValid();
+        return door_zone.isValid() && cabin_zone.isValid()
+            && (!hall_enabled || hall_zone.isValid());
     }
 };
 
@@ -33,12 +36,14 @@ struct ROIStats{
     std::size_t input = 0;  // 필터에 들어온 포인트 수
     std::size_t door = 0;   // Door Zone으로 분류되어 남은 포인트 수
     std::size_t cabin = 0;  // Cabin Zone으로 분류되어 남은 포인트 수
+    std::size_t hall = 0;   // Hall Zone으로 분류되어 남은 포인트 수
     std::size_t dropped = 0; // 필터링되어 제거된 포인트 수
 
     ROIStats& operator+=(const ROIStats& o){
         input   += o.input;
         door    += o.door;
         cabin   += o.cabin;
+        hall += o.hall;
         dropped += o.dropped;
         return *this;
     }

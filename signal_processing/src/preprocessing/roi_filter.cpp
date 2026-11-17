@@ -24,11 +24,16 @@ ROIConfig ROIConfig::fromConfig(const Config& cfg){
     // 설정 파일에 값이 없을 때 쓸 기본값
     const Box3D default_door {-0.45f, 0.45f, -0.50f, 0.30f, 0.10f, 2.10f};
     const Box3D default_cabin{-0.75f, 0.75f,  0.30f, 1.35f, 0.10f, 2.20f};
+    const Box3D default_hall {-0.35f, 1.20f, -2.50f, -0.50f, 0.10f, 2.10f};  // 3차 데이터 (11/17)
 
     ROIConfig c;
     // c.door_zone, c.cabin_zone을 readBox로 읽기
     c.door_zone = readBox(cfg, "door", default_door);
     c.cabin_zone = readBox(cfg, "cabin", default_cabin);
+
+    // HALL은 기본 꺼짐. cfg에 roi.hall_enable = 1 이 있을 때만 켜짐
+    c.hall_enabled = cfg.getFloat("roi.hall_enable", 0.0f) != 0.0f;
+    c.hall_zone = readBox(cfg, "hall", default_hall);
 
     if(!c.isValid()){
         std::cerr << "[ROIConfig] 잘못된 ROI 범위 (min >= max). 설정 파일을 확인하세요. \n";
@@ -39,12 +44,16 @@ ROIConfig ROIConfig::fromConfig(const Config& cfg){
 ROIFilter::ROIFilter(const ROIConfig& config): config_(config){}
 
 Zone ROIFilter::classify(const RadarPoint& p) const{
-    // door_zone 안이면 DOOR, 아니고 cabin_zone 안이면 CABIN, 아니면 NONE
+    // door_zone 안이면 DOOR, 아니고 cabin_zone 안이면 CABIN,
+    // 아니고 HALL이 켜져 있고 hall_zone 안이면 HALL, 아니면 NONE (겹치면 DOOR > CABIN > HALL)
     if(config_.door_zone.contains(p)){
         return Zone::DOOR;
     }
     else if(config_.cabin_zone.contains(p)){
         return Zone::CABIN;
+    }
+    else if(config_.hall_enabled && config_.hall_zone.contains(p)){
+        return Zone::HALL;
     }
     else return Zone::NONE;
 }
@@ -74,6 +83,7 @@ Frame ROIFilter::filter(const Frame& points, ROIStats* stats) const{
         // DOOR / CABIN count 증가
         if(zone == Zone::DOOR) local.door++;
         else if(zone == Zone::CABIN) local.cabin++;
+        else if(zone == Zone::HALL) local.hall++;
     }
     // 통계를 받지 않는 호출(stats == nullptr)도 있으므로, stats가 nullptr이 아니면 local을 복사해서 전달
     if(stats) *stats = local;
