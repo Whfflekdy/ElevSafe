@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   backend:
     name: Backend (A) build + ctest (Includes B)
@@ -15,7 +19,15 @@ jobs:
 
       # C 트래킹(tracking_core)이 Eigen3를 필요로 해서 공식 소스(3.4.0)를 받아 설치
       # (apt 대신 GitLab에서 직접 받음: Ubuntu 패키지 서버 장애 영향을 받지 않게)
+      - name: Cache Eigen3
+        id: eigen-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/eigen
+          key: eigen-3.4.0-${{ runner.os }}
+
       - name: Install Eigen3
+        if: steps.eigen-cache.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz -o eigen.tar.gz
           tar xzf eigen.tar.gz
@@ -24,8 +36,14 @@ jobs:
 
       # 백엔드(A) 폴더를 타겟으로 지정하면, 내부 CMakeLists.txt의 지시에 따라
       # ../signal_processing 경로의 B 모듈까지 함께 묶어서 빌드를 구성합니다.
+      # 설치 결과(~/eigen)는 캐시에 저장해서, 두 번째 실행부터는 설치 단계를 건너뜀
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: backend
+
       - name: Configure Backend
-        run: cmake -S backend -B build/backend -DCMAKE_BUILD_TYPE=Release -DEigen3_DIR="$HOME/eigen/share/eigen3/cmake"
+        run: cmake -S backend -B build/backend -DCMAKE_BUILD_TYPE=Release -DEigen3_DIR="$HOME/eigen/share/eigen3/cmake" -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build Backend
         run: cmake --build build/backend -j
