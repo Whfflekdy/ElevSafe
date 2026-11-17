@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
     const std::string door_path = withSuffix(output_path, "_door");
     const std::string cl_path   = withSuffix(output_path, "_clusters");
 
-    // door_file 열고 머리글 "frame_id,timestamp_us,state" (count·average 는 이제 파이프라인 안이라 빠짐)
+    // door_file 열고 머리글 "frame_id,timestamp_us,state,hall_enabled" (count·average 는 이제 파이프라인 안이라 빠짐)
     std::ofstream door_file(door_path);
     std::ofstream cl_file(cl_path);
     // 둘 다 열기 실패하면 에러 메시지 후 return 1
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     // 두 파일 모두 std::fixed << std::setprecision(3)
-    door_file << "frame_id,timestamp_us,state\n";
+    door_file << "frame_id,timestamp_us,state,hall_enabled\n";
     cl_file << "frame_id,timestamp_us,cluster_id,cx,cy,cz,x_min,x_max,y_min,y_max,"
                "z_min,z_max,z_top,mean_doppler,num_points,zone,maybe_merged\n";
     door_file << std::fixed << std::setprecision(3);
@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
     std::vector<FrameData> outputs;
     outputs.reserve(frames.size());
     std::size_t open_frames = 0, transitions = 0;
+    bool hall_on = false;   // 마지막 결과 출력할 때 HALL 줄을 찍을지
     DoorState prev_state = DoorState::UNKNOWN;
     const FrameContext ctx;   // 오프라인에는 백엔드 문 상태가 없으니 기본값(UNKNOWN)
 
@@ -82,9 +83,10 @@ int main(int argc, char** argv) {
         out.points = std::move(pts);
         outputs.push_back(std::move(out));
 
-        // TODO: 문 상태 한 줄 쓰기, open_frames·transitions 세기 (기존 코드와 같은 규칙)
+        // 문 상태 한 줄 쓰기, open_frames·transitions 세기 (기존 코드와 같은 규칙)
         const DoorState ds = r.estimated_door_state;
-        door_file << r.frame_id << ',' << r.timestamp_us << ',' << doorStateToString(ds) << '\n';
+        hall_on = r.hall_enabled;
+        door_file << r.frame_id << ',' << r.timestamp_us << ',' << doorStateToString(ds) << ',' << (r.hall_enabled ? 1 : 0) << '\n';
         if (ds == DoorState::OPEN) ++open_frames;
         if (prev_state != DoorState::UNKNOWN && ds != prev_state) ++transitions;
         prev_state = ds;
@@ -116,6 +118,7 @@ int main(int argc, char** argv) {
               << "입력 포인트 : " << s.roi.input   << "\n"
               << "DOOR        : " << s.roi.door    << "\n"
               << "CABIN       : " << s.roi.cabin   << "\n"
+              << (hall_on ? "HALL        : " + std::to_string(s.roi.hall) + "\n" : std::string())              
               << "ROI 제거    : " << s.roi.dropped << "\n";
     if (pipeline.usesBackground()) {
         std::cout << "배경 제거   : " << s.bg.removed;

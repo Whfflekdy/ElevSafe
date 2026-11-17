@@ -45,7 +45,7 @@ struct Cluster {
     
     float mean_doppler = 0.0f; // 평균 속도(m/s, 센서 시선 방향: 다가오면 -, 멀어지면 +)
     int num_points = 0;        // 덩어리에 속한 점 수
-    Zone zone = Zone::NONE;    // 덩어리 점 중 가장 많은 zone(DOOR/CABIN)
+    Zone zone = Zone::NONE;    // 덩어리 점 중 가장 많은 zone(DOOR/CABIN/HALL, 같으면 DOOR > CABIN > HALL)
     bool maybe_merged = false; // 여러 사람이 합쳐졌을 수 있음(1차는 항상 false, 봉우리 분할은 이후)
 };
 
@@ -55,6 +55,7 @@ struct PipelineResult {
     std::int64_t timestamp_us = 0;
     std::vector<Cluster> clusters;                          // C 에게 넘길 덩어리 (없으면 빈 목록)
     DoorState estimated_door_state = DoorState::UNKNOWN;    // 레이더로 추정한 문 상태
+    bool hall_enabled = false;   // HALL 구역을 출력하는지 (설정값). false면 C는 승강장 쪽을 UNKNOWN으로 취급
 };
 
 // 오프라인 실행기(main.cpp)의 결과 요약용 누적 통계. 백엔드는 안 써도 됨
