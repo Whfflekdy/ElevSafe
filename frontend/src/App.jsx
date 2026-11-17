@@ -26,7 +26,7 @@ const SCALE = 1.6;
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
  */
-const USE_REAL_WEBSOCKET = false;
+const USE_REAL_WEBSOCKET = true;
 // 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
 const RADAR_WS_URL = process.env.REACT_APP_WS_URL
   || (process.env.NODE_ENV === 'production'
@@ -406,18 +406,45 @@ function App() {
 
         <div className="left-panel" onClick={(e) => e.stopPropagation()}>
           <h2>승객 상세 정보</h2>
-          {selectedPassenger ? (
-            <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
-              <h3>ID: {selectedPassenger.id}</h3>
-              <strong>{selectedPassenger.label}</strong>
-              <p>수신 좌표:<br/>X {selectedPassenger.x.toFixed(2)}m / Y {selectedPassenger.y.toFixed(2)}m</p>
-              <p className="state-text">
-                상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
-              </p>
-              <button onClick={() => setSelectedDot(null)}>선택 해제</button>
-            </div>
-          ) : (
+          {selectedPassenger ? (() => {
+            const statusText = getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state);
+            const hasEmoji = statusText !== '알 수 없음';
+            const statusIcon = hasEmoji ? statusText.split(' ')[0] : '❓';
+            const statusLabel = hasEmoji ? statusText.slice(statusText.indexOf(' ') + 1) : statusText;
+
+            return (
+              <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
+                {/* 1. 상단: ID 및 이름 */}
+                <div className="info-header">
+                  <span className="id-badge">ID #{selectedPassenger.id}</span>
+                  <strong>{selectedPassenger.label}</strong>
+                </div>
+
+                {/* 2. 중단: 남은 세로 공간을 채우는 대형 상태 표시창 */}
+                <div className="status-hero">
+                  <span className="status-icon">{statusIcon}</span>
+                  <span className="status-label">{statusLabel}</span>
+                </div>
+
+                {/* 3. 하단: 큼직한 X / Y 좌표 2단 블록 */}
+                <div className="coord-stack">
+                  <div className="coord-row">
+                    <span className="coord-title">X 좌표 (좌우)</span>
+                    <span className="coord-value">{selectedPassenger.x.toFixed(2)} m</span>
+                  </div>
+                  <div className="coord-row">
+                    <span className="coord-title">Y 좌표 (거리)</span>
+                    <span className="coord-value">{selectedPassenger.y.toFixed(2)} m</span>
+                  </div>
+                </div>
+
+                {/* 4. 최하단: 대형 선택 해제 버튼 */}
+                <button onClick={() => setSelectedDot(null)}>선택 해제</button>
+              </div>
+            );
+          })() : (
             <div className="empty-info">
+              <span className="empty-icon">🔍</span>
               <p>도면에서 승객(점)을 클릭하면<br/>여기에 상세 정보가 표시됩니다.</p>
             </div>
           )}
