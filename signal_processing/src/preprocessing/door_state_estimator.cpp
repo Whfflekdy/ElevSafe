@@ -19,8 +19,8 @@ DoorStateConfig DoorStateConfig::fromConfig(const Config& cfg) {
     //       (roi_filter.cpp 의 readBox 와 같은 방식. 그 함수는 헤더에 없어서 여기선 직접 6번 getFloat)
     c.view_zone.x_min = cfg.getFloat("door_state.view.x_min", -0.44f);
     c.view_zone.x_max = cfg.getFloat("door_state.view.x_max",  0.44f);
-    c.view_zone.y_min = cfg.getFloat("door_state.view.y_min", -3.00f);
-    c.view_zone.y_max = cfg.getFloat("door_state.view.y_max", -0.30f);
+    c.view_zone.y_min = cfg.getFloat("door_state.view.y_min", -2.88f);
+    c.view_zone.y_max = cfg.getFloat("door_state.view.y_max", -0.18f);
     c.view_zone.z_min = cfg.getFloat("door_state.view.z_min",  0.10f);
     c.view_zone.z_max = cfg.getFloat("door_state.view.z_max",  2.10f);
 

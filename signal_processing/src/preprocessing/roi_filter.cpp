@@ -22,9 +22,9 @@ Box3D readBox(const Config& cfg, const std::string& prefix, const Box3D& def){
 
 ROIConfig ROIConfig::fromConfig(const Config& cfg){
     // 설정 파일에 값이 없을 때 쓸 기본값
-    const Box3D default_door {-0.45f, 0.45f, -0.50f, 0.30f, 0.10f, 2.10f};
-    const Box3D default_cabin{-0.75f, 0.75f,  0.30f, 1.35f, 0.10f, 2.20f};
-    const Box3D default_hall {-0.35f, 1.20f, -2.50f, -0.50f, 0.10f, 2.10f};  // 3차 데이터 (11/17)
+    const Box3D default_door {-0.45f, 0.45f, -0.38f, 0.42f, 0.10f, 2.10f};
+    const Box3D default_cabin{-0.75f, 0.75f,  0.42f, 1.47f, 0.10f, 2.20f};
+    const Box3D default_hall {-0.35f, 1.20f, -2.38f, -0.38f, 0.10f, 2.10f};  // 3차 데이터 (11/17)
 
     ROIConfig c;
     // c.door_zone, c.cabin_zone을 readBox로 읽기
