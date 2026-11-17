@@ -51,34 +51,153 @@ body {
   display: flex;
   flex-direction: column;
 }
-.left-panel h2 { margin-top: 0; font-size: 16px; color: #cbd5e1; margin-bottom: 20px; }
-
-.info-box {
-  background-color: #1e293b;
-  border: 1px solid #475569;
-  padding: 15px 20px;
-  border-radius: 8px;
-  color: white;
+.left-panel h2 {
+  margin: 0 0 16px 0;
+  font-size: 18px;
+  color: #cbd5e1;
 }
-.info-box h3 { margin: 0 0 10px 0; font-size: 13px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 5px; }
-.info-box strong { font-size: 18px; color: #38bdf8; display: block; margin-bottom: 5px; }
-.info-box p { margin: 10px 0; font-size: 14px; color: #cbd5e1; line-height: 1.5; }
-.info-box button { margin-top: 15px; padding: 8px 10px; width: 100%; background: #334155; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
-.info-box button:hover { background: #475569; }
 
-.info-box.alert { border-color: #f43f5e; background-color: rgba(244, 63, 94, 0.1); }
-.info-box.alert strong { color: #f43f5e; }
-.info-box.alert .state-text { color: #fda4af; font-weight: bold; }
+/* 단일 승객 상세 카드: 패널 높이 전체를 채움 */
+.info-box {
+  flex: 1;
+  background-color: #1e293b;
+  border: 1.5px solid #475569;
+  padding: 20px;
+  border-radius: 10px;
+  color: white;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+}
 
-.empty-info {
+/* 1. 상단 ID + 이름 */
+.info-header {
+  border-bottom: 1px solid #334155;
+  padding-bottom: 12px;
+}
+.id-badge {
+  display: inline-block;
   background-color: #0f172a;
-  border: 1px dashed #475569;
-  border-radius: 8px;
-  padding: 40px 10px;
-  text-align: center;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 14px;
+  font-weight: bold;
+  padding: 4px 10px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+.info-header strong {
+  display: block;
+  font-size: 24px;
+  color: #38bdf8;
+  line-height: 1.2;
+}
+
+.status-hero {
+  flex: 1;
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+}
+.status-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+.status-label {
+  font-size: 25px;
+  font-weight: bold;
+  color: #f8fafc;
+  line-height: 1.35;
+  word-break: keep-all;
+}
+
+/* 3. 하단 좌표 2단 스택 */
+.coord-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.coord-row {
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.coord-title {
+  font-size: 14px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+.coord-value {
+  font-size: 23px;
+  font-weight: bold;
+  color: #38bdf8;
+  font-family: 'Courier New', monospace;
+}
+
+/* 4. 선택 해제 버튼 */
+.info-box button {
+  padding: 14px;
+  width: 100%;
+  background: #334155;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: bold;
+  transition: background 0.2s;
+}
+.info-box button:hover {
+  background: #475569;
+}
+
+/* 위험(Alert) 상태 강조 */
+.info-box.alert {
+  border-color: #f43f5e;
+  background-color: rgba(244, 63, 94, 0.12);
+}
+.info-box.alert .info-header strong {
+  color: #f43f5e;
+}
+.info-box.alert .status-hero {
+  background-color: #881337;
+  border-color: #f43f5e;
+}
+.info-box.alert .status-label {
+  color: #ffffff;
+}
+
+/* 미선택 시 빈 화면도 패널 전체 높이로 정중앙 배치 */
+.empty-info {
+  flex: 1;
+  background-color: #0f172a;
+  border: 1.5px dashed #475569;
+  border-radius: 10px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 16px;
   line-height: 1.6;
+  word-break: keep-all;
+}
+.empty-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
 }
 
 /* 중앙 시각화 영역 */
