@@ -53,7 +53,22 @@ add_library(elevsafe_door_simulation src/door_simulation.cpp)
 target_include_directories(elevsafe_door_simulation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(elevsafe_backend PRIVATE elevsafe_door_simulation nlohmann_json::nlohmann_json)
 
+# C's existing UTF-8 test strings also need UTF-8 under MSVC.
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+# C retains its own algorithms, tests and Eigen3 package requirement.
+if(NOT TARGET tracking_core)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tracking tracking)
+endif()
+add_library(elevsafe_tracking_adapter src/tracking_adapter.cpp)
+target_link_libraries(elevsafe_tracking_adapter PUBLIC elevsafe_signal_adapter tracking_core
+    PRIVATE elevsafe_websocket nlohmann_json::nlohmann_json)
+target_compile_options(elevsafe_tracking_adapter PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+target_link_libraries(elevsafe_backend PRIVATE elevsafe_tracking_adapter)
+
 enable_testing()
+add_executable(tracking_adapter_test tests/tracking_adapter_test.cpp)
+target_link_libraries(tracking_adapter_test PRIVATE elevsafe_tracking_adapter elevsafe_websocket nlohmann_json::nlohmann_json)
+add_test(NAME tracking_adapter_test COMMAND tracking_adapter_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
 add_executable(door_simulation_test tests/door_simulation_test.cpp)
 target_link_libraries(door_simulation_test PRIVATE elevsafe_door_simulation elevsafe_websocket nlohmann_json::nlohmann_json)
 add_test(NAME door_simulation_test COMMAND door_simulation_test)
@@ -154,3 +169,10 @@ add_test(NAME websocket_cli_test COMMAND ${CMAKE_COMMAND}
     -DBACKEND_EXE=$<TARGET_FILE:elevsafe_backend> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/websocket_cli_test.cmake)
 set_tests_properties(websocket_message_test PROPERTIES TIMEOUT 30)
 set_tests_properties(websocket_cli_test PROPERTIES TIMEOUT 40)
+
+if(WIN32)
+    add_test(NAME tracking_radar_websocket_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg'")
+    set_tests_properties(tracking_radar_websocket_test PROPERTIES TIMEOUT 25 RUN_SERIAL TRUE)
+endif()
