@@ -30,7 +30,7 @@ namespace elevsafe
             || !json.contains("timestamp_us")
             || !(json["timestamp_us"].is_number_unsigned()
                 || (json["timestamp_us"].is_number_integer() && json["timestamp_us"].get<std::int64_t>() >= 0))
-            || !json.contains("door_state") || !oneOf(json["door_state"], {"OPEN", "CLOSED", "OPENING", "CLOSING"})
+            || !json.contains("door_state") || !oneOf(json["door_state"], {"OPEN", "CLOSED", "OPENING", "CLOSING", "UNKNOWN"})
             || !json.contains("door_command")
             || !(json["door_command"].is_null() || oneOf(json["door_command"], {"OPEN", "HOLD", "CLOSE"}))
             || !json.contains("passengers") || !json["passengers"].is_array())

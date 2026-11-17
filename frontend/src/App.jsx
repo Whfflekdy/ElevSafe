@@ -2,15 +2,18 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 // 🛠️ [실제 도면 규격 설정 - 단위: cm]
+
+const WAITING_COMPRESSION = 0.5; // 승강장 화면 왜곡 비율 (0.5 = 50% 길이로 축소. 원하면 조절하세요)
+
 // 이제 px 단위로 머리 아프게 고민할 필요 없이 실제 줄자로 잰 cm 길이를 넣으세요!
 const CONFIG_CM = {
   ELEV_WIDTH: 162,      // 카 폭 (가로)
   ELEV_DEPTH: 137,      // 카 깊이 (세로)
   DOOR_WIDTH: 88,       // 출입구 폭
   DOOR_THICKNESS:24,    // 문틈 두께 (세로 폭)
-  WAITING_DEPTH: 90,   // 승강장(대기 구역) 길이
+  WAITING_DEPTH: 250 * WAITING_COMPRESSION,   // 승강장(대기 구역) 길이
   WAITING_WIDTH: 166,   // 승강장 최대 폭
-  TRAP_DEPTH: 52,       // 사다리꼴 깊이
+  TRAP_DEPTH: 52 * WAITING_COMPRESSION,       // 사다리꼴 깊이
   TRAP_BOTTOM_W: 101,   // 사다리꼴 하단 폭
 };
 
@@ -22,7 +25,6 @@ const SCALE = 1.6;
 /* [실제 연동 시 바꿀 설정]
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
- * HTTPS 화면에서는 서버도 wss:// 주소를 사용해야 합니다.
  */
 const USE_REAL_WEBSOCKET = true;
 // 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
@@ -30,8 +32,7 @@ const RADAR_WS_URL = process.env.REACT_APP_WS_URL
   || (process.env.NODE_ENV === 'production'
     ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/radar`
     : 'ws://127.0.0.1:8080/radar');
-// TODO 5 (나중에): 원격 화면에서는 문 제어 버튼 숨기기 (채민님과 상의)
-
+    
 const MAX_WIDTH = Math.max(CONFIG_CM.ELEV_WIDTH, CONFIG_CM.WAITING_WIDTH);
 // 외곽선을 한 번 계산합니다. 내부 구분선과 면 채우기는 없습니다.
 const PLAN = (() => {
@@ -111,14 +112,14 @@ function FloorPlan({ doorState, children }) {
 
 
 function App() {
-  const [doorState, setDoorState] = useState('CLOSED');
+  const [doorState, setDoorState] = useState('UNKNOWN');
   const [doorCommand, setDoorCommand] = useState(null);
   const [selectedDot, setSelectedDot] = useState(null); // 클릭한 승객 말풍선 띄우기용
   // 실제 연동에서는 빈 배열로 시작하고 서버 데이터로 채웁니다.
   // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
   const [passengers, setPassengers] = useState([]);
 
-  // ✅ timestamp_us를 저장할 상태 변수 추가
+  // timestamp_us를 저장할 상태 변수 추가
   const [timestampUs, setTimestampUs] = useState(null);
 
   const [systemLogs, setSystemLogs] = useState([
@@ -130,45 +131,46 @@ function App() {
   const doorTimerRef = useRef(null);
   const autoRevertTimerRef = useRef(null); // 수동명령 후 자동 복귀용
 
+  // 10Hz 수신 렌더링 최적화 및 재접속 딜레이용 (새로 추가)
+  const animationFrameId = useRef(null);
+  const latestDataRef = useRef(null);
+  const reconnectDelay = useRef(1000); // 시작 딜레이 1초
+
   // 10Hz 데이터 수신 시 로그 폭발 방지를 위해 최대 50개 유지
   const log = message => setSystemLogs(prev => {
     const newLogs = [...prev, message];
     return newLogs.length > 50 ? newLogs.slice(newLogs.length - 50) : newLogs;
   });
-
-  /* 
-  ===============================================================
-  [실제 넣어야 할 부분 - WebSocket 연동 영역]
-
-  아래 코드는 미리 구현되어 있습니다. 주석을 해제할 필요 없이
-  파일 상단의 USE_REAL_WEBSOCKET을 true로 바꾸고
-  RADAR_WS_URL을 실제 서버 주소로 바꾸면 활성화됩니다.
-
-  수신 JSON 예시:
-  {
-    "timestamp": "2026-10-01T14:02:05Z",
-    "door_state": "OPEN",
-    "door_command": null,
-    "passengers": [
-      { "id": 1, "x": 0.25, "y": 1.0, "state": "INSIDE",
-        "safety_state": null, "label": "Passenger #1" }
-    ]
-  }
-
-  door_state: OPEN / CLOSED / OPENING / CLOSING
-  door_command: null / OPEN / HOLD / CLOSE
-  state: INSIDE / OUTSIDE / ENTERING / EXITING
-  safety_state: null / FALL / IMMOBILE
-  x, y: 유한한 숫자, 단위 m, 문 중앙이 (0, 0)
-  화면에서 x 양수는 오른쪽, y 양수는 캐빈 안쪽(위쪽)입니다.
-
-  이 예제에는 자동 재연결, 인증 및 명령 응답 확인은 포함하지 않았습니다.
-  서버에서 passengers를 보내면 화면의 전체 승객 목록을 교체합니다.
-  =================================================================
-  */
-
  
-  // 테스트 데이터와 실제 서버 데이터를 똑같이 처리합니다.
+  // 1. 프레임 렌더링 시점에 최신 데이터만 꺼내서 한 번에 상태 업데이트 (Throttling 분리)
+  const updateStateFromLatestData = () => {
+    const data = latestDataRef.current;
+    if (!data) {
+      animationFrameId.current = null;
+      return;
+    }
+
+    if (typeof data.timestamp_us === 'number') {
+      setTimestampUs(data.timestamp_us);
+    }
+
+    if (['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
+      setDoorState(data.door_state);
+    }
+
+    if (Array.isArray(data.passengers)) {
+      setPassengers(
+        data.passengers.filter(p => p && (typeof p.id === 'number' || typeof p.id === 'string') && Number.isFinite(p.x) && Number.isFinite(p.y))
+      );
+    }
+
+    if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
+      setDoorCommand(data.door_command);
+    }
+    animationFrameId.current = null;
+  };
+
+  // 2. 웹소켓 수신 시 상태를 즉시 바꾸지 않고 최신 데이터를 임시 저장만 한 뒤 렌더링 예약
   const receiveMessage = message => {
     try {
       const data = JSON.parse(message);
@@ -177,37 +179,14 @@ function App() {
         throw new Error('JSON 객체가 필요합니다.');
       }
 
-      // ✅ 수신한 JSON에 timestamp_us가 있으면 상태 업데이트
-      if (typeof data.timestamp_us === 'number') {
-        setTimestampUs(data.timestamp_us)
-      }
+      latestDataRef.current = data;
 
-      if (
-        ['OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(
-          data.door_state
-        )
-      ) {
-        setDoorState(data.door_state);
-      }
-
-      if (Array.isArray(data.passengers)) {
-        setPassengers(
-          data.passengers.filter(p =>
-            p &&
-            (typeof p.id === 'number' || typeof p.id === 'string') &&
-            Number.isFinite(p.x) &&
-            Number.isFinite(p.y)
-          )
-        );
-      }
-
-      if ([null, 'OPEN', 'HOLD', 'CLOSE'].includes(data.door_command)) {
-        setDoorCommand(data.door_command);
+      // 만약 다음 프레임 예약이 안 되어 있다면 예약
+      if (!animationFrameId.current) {
+        animationFrameId.current = requestAnimationFrame(updateStateFromLatestData);
       }
     } catch (error) {
       console.error('수신 데이터 처리 오류:', error);
-      // 너무 잦은 에러 로그 방지: 필요시 주석 해제
-      // log('[데이터] 수신 데이터 형식 오류'); 
     }
   };
 
@@ -221,7 +200,10 @@ function App() {
       const ws = new WebSocket(RADAR_WS_URL);
       wsRef.current = ws;
 
-      ws.onopen = () => log('[WebSocket] 서버 연결 완료 (10Hz 데이터 수신 준비)');
+      ws.onopen = () => {
+        log('[WebSocket] 서버 연결 완료 (10Hz 데이터 수신 준비)');
+        reconnectDelay.current = 1000; // 성공 시 딜레이 초기화 추가
+      };
       ws.onmessage = event => receiveMessage(event.data);
       
       ws.onerror = () => {
@@ -231,8 +213,12 @@ function App() {
 
       ws.onclose = () => {
         if (!isUnmounted) {
-          log('[WebSocket] 연결 종료. 1초 뒤 자동 재접속 시도...');
-          reconnectTimeout = setTimeout(connectWebSocket, 1000);
+          const delay = reconnectDelay.current;
+          log(`[WebSocket] 연결 종료. ${delay / 1000}초 뒤 재접속 시도...`);
+          
+          reconnectTimeout = setTimeout(connectWebSocket, delay);
+          // 다음 번 실패 시 대기 시간 2배로 증가 (최대 30초까지만)
+          reconnectDelay.current = Math.min(delay * 2, 30000); 
         }
       };
     };
@@ -245,12 +231,12 @@ function App() {
       const sampleData = {
         timestamp: "2026-11-01T10:30:00Z",
         timestamp_us: 9382050,
-        door_state: 'OPEN',
+        door_state: 'CLOSED',
         door_command: 'OPEN',
         passengers: [
           {
             id: 1,
-            x: 0.25,
+            x: 0.0,
             y: 1.0,
             state: 'INSIDE',
             safety_state: null,
@@ -262,6 +248,30 @@ function App() {
             y: 0.0,
             state: 'ENTERING',
             safety_state: 'FALL',
+            label: 'Passenger #2'
+          },
+          {
+            id: 3,
+            x: 0.0,
+            y: -1.0,
+            state: 'OUTSIDE',
+            safety_state: null,
+            label: 'Passenger #2'
+          },
+          {
+            id: 4,
+            x: 0.0,
+            y: -2.0,
+            state: 'OUTSIDE',
+            safety_state: null,
+            label: 'Passenger #2'
+          },
+          {
+            id: 5,
+            x: 0.0,
+            y: -3.0,
+            state: 'OUTSIDE',
+            safety_state: null,
             label: 'Passenger #2'
           }
         ]
@@ -275,6 +285,11 @@ function App() {
       isUnmounted = true;
       clearTimeout(reconnectTimeout);
       if (wsRef.current) wsRef.current.close();
+      // 종료 시 진행 중인 렌더링 프레임 취소 추가
+      if (animationFrameId.current) {
+        cancelAnimationFrame(animationFrameId.current);
+        animationFrameId.current=null;
+      }
     };
   }, []);
 
@@ -382,7 +397,7 @@ function App() {
         <h1>ElevSafe 관제 시스템 — [RETINA-4SN 4D Radar 연동]</h1>
         <div className="spec-badge">
           <span>Range: 12m(Person) / 7m×7m</span> | <span>FoV: 90°(±45°)</span> | <span>Rate: 50ms</span>
-          {/* ✅ 개발자 데이터 갱신 확인용 필요없음 지움*/}
+          {/* 개발자 데이터 갱신 확인용 필요없음 지움*/}
           {timestampUs !== null && <span> | Time: {timestampUs}µs</span>}
         </div>
       </header>
@@ -391,18 +406,45 @@ function App() {
 
         <div className="left-panel" onClick={(e) => e.stopPropagation()}>
           <h2>승객 상세 정보</h2>
-          {selectedPassenger ? (
-            <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
-              <h3>ID: {selectedPassenger.id}</h3>
-              <strong>{selectedPassenger.label}</strong>
-              <p>수신 좌표:<br/>X {selectedPassenger.x}m / Y {selectedPassenger.y}m</p>
-              <p className="state-text">
-                상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
-              </p>
-              <button onClick={() => setSelectedDot(null)}>선택 해제</button>
-            </div>
-          ) : (
+          {selectedPassenger ? (() => {
+            const statusText = getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state);
+            const hasEmoji = statusText !== '알 수 없음';
+            const statusIcon = hasEmoji ? statusText.split(' ')[0] : '❓';
+            const statusLabel = hasEmoji ? statusText.slice(statusText.indexOf(' ') + 1) : statusText;
+
+            return (
+              <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
+                {/* 1. 상단: ID 및 이름 */}
+                <div className="info-header">
+                  <span className="id-badge">ID #{selectedPassenger.id}</span>
+                  <strong>{selectedPassenger.label}</strong>
+                </div>
+
+                {/* 2. 중단: 남은 세로 공간을 채우는 대형 상태 표시창 */}
+                <div className="status-hero">
+                  <span className="status-icon">{statusIcon}</span>
+                  <span className="status-label">{statusLabel}</span>
+                </div>
+
+                {/* 3. 하단: 큼직한 X / Y 좌표 2단 블록 */}
+                <div className="coord-stack">
+                  <div className="coord-row">
+                    <span className="coord-title">X 좌표 (좌우)</span>
+                    <span className="coord-value">{selectedPassenger.x.toFixed(2)} m</span>
+                  </div>
+                  <div className="coord-row">
+                    <span className="coord-title">Y 좌표 (거리)</span>
+                    <span className="coord-value">{selectedPassenger.y.toFixed(2)} m</span>
+                  </div>
+                </div>
+
+                {/* 4. 최하단: 대형 선택 해제 버튼 */}
+                <button onClick={() => setSelectedDot(null)}>선택 해제</button>
+              </div>
+            );
+          })() : (
             <div className="empty-info">
+              <span className="empty-icon">🔍</span>
               <p>도면에서 승객(점)을 클릭하면<br/>여기에 상세 정보가 표시됩니다.</p>
             </div>
           )}
@@ -412,6 +454,12 @@ function App() {
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
+            {/* doorState가 UNKNOWN일 때만 표시되는 오버레이 추가 */}
+            {doorState === 'UNKNOWN' && (
+              <div className="unknown-overlay">
+                <span className="unknown-text">확인 중...</span>
+              </div>
+            )}
 
             <FloorPlan doorState={doorState}>
 
@@ -419,7 +467,16 @@ function App() {
                 const theme = getTheme(p.safety_state);
                 // 수신 좌표 m를 cm로 바꾼 뒤 화면 배율을 적용합니다.
                 const x_cm = p.x * 100;
-                const y_cm = p.y * 100;
+                let y_cm = p.y * 100;
+
+                // 화면 왜곡 로직: 문 바깥쪽(승강장 영역)인 경우에만 Y좌표 압축
+                const doorOuterBoundary = -(CONFIG_CM.DOOR_THICKNESS / 2);
+                if (y_cm < doorOuterBoundary) {
+                  // 문 경계선을 넘어간 거리(음수)만큼만 압축 비율 적용
+                  const overDistance = y_cm - doorOuterBoundary;
+                  y_cm = doorOuterBoundary + (overDistance * WAITING_COMPRESSION);
+                }
+
                 const leftPos = (MAX_WIDTH / 2 + x_cm) * SCALE;
                 // y=0은 문 두께 중앙, y 양수는 화면 위쪽입니다.
                 const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm + (CONFIG_CM.DOOR_THICKNESS / 2)) * SCALE;

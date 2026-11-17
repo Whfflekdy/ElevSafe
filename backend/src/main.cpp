@@ -1,10 +1,12 @@
 #include "elevsafe/backend_pipeline.h"
 #include "elevsafe/door_simulation.h"
+#include "elevsafe/mock_door_policy.h"
 #include <nlohmann/json.hpp>
 #include "elevsafe/ab_profile.h"
 #include "elevsafe/radar_reconnect.h"
 #include "elevsafe/retina_client.h"
 #include "elevsafe/signal_adapter.h"
+#include "elevsafe/tracking_adapter.h"
 #include "pipeline/signal_pipeline.h"
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
@@ -65,7 +67,7 @@ namespace
                      "       [--ab-profile [--ab-profile-max-frames N] [--ab-profile-warmup N]]\n"
                      "       [--radar-reconnect [--radar-reconnect-eof]] (numeric radar IP only)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
-                     "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim]\n"
+                     "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim [--ws-door-scenario NAME]]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
     }
 
@@ -113,15 +115,21 @@ namespace
         }
     };
 
-    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim)
+    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim, const std::optional<std::string>& scenario)
     {
         mockStop.store(false, std::memory_order_relaxed);
         const auto previous = std::signal(SIGINT, stopMock);
         std::cerr << "[ws] MOCK ONLY: synthetic session snapshots, target 100ms (10Hz), duration=" << seconds
                   << "s. No radar/C result, no physical door control. Ctrl+C stops this mode.\n";
-        elevsafe::DoorSimulation simulation;
+        elevsafe::DoorSimulation simulation(scenario == "unknown"
+            ? elevsafe::DoorSimulation::State::Unknown : elevsafe::DoorSimulation::State::Closed);
+        elevsafe::MockDoorPolicy policy;
+        const auto scenarioStart = std::chrono::steady_clock::now();
+        bool missingReported = false;
+        if (scenario) std::cerr << "[door-mock-policy] SYNTHETIC ONLY scenario=" << *scenario << '\n';
         std::optional<elevsafe::DoorSimulation::Command> newlyApplied;
-        if (doorSim) std::cerr << "[door-sim] SOFTWARE ONLY mode=AUTO state=CLOSED; no hardware/C input/ACK\n";
+        if (doorSim) std::cerr << "[door-sim] SOFTWARE ONLY mode=AUTO state="
+            << elevsafe::DoorSimulation::name(simulation.state()) << "; no hardware/C input/ACK\n";
         const auto logSimulation = [&](const char* event)
         {
             std::cerr << "[door-sim] " << event << " state=" << elevsafe::DoorSimulation::name(simulation.state())
@@ -138,7 +146,6 @@ namespace
             const auto now = std::chrono::steady_clock::now();
             if (doorSim)
             {
-                if (simulation.update(now)) logSimulation("transition-complete");
                 while (const auto request = server.popCommand())
                 {
                     using Command = elevsafe::DoorSimulation::Command;
@@ -146,9 +153,23 @@ namespace
                         : request->command == "HOLD" ? Command::Hold : Command::Close;
                     if (simulation.apply(command, now))
                     {
-                        newlyApplied = command;
                         logSimulation("command-applied");
                     }
+                }
+                if (scenario)
+                {
+                    policy.accept(elevsafe::mockDoorScenarioInput(*scenario,
+                        std::chrono::duration_cast<std::chrono::microseconds>(now - scenarioStart)));
+                    if (policy.inputMissing() && !missingReported)
+                        std::cerr << "[door-mock-policy] WARNING input missing/invalid; retaining last valid synthetic input; not risk-clear\n";
+                    missingReported = policy.inputMissing();
+                    if (policy.tick(simulation, now)) logSimulation("mock-policy-updated");
+                }
+                else if (simulation.update(now)) logSimulation("state-updated");
+                if (const auto applied = simulation.takeAppliedCommand())
+                {
+                    newlyApplied = applied;
+                    logSimulation("command-event");
                 }
             }
             if (now >= next)
@@ -159,6 +180,7 @@ namespace
                 if (doorSim)
                 {
                     auto snapshot = nlohmann::json::parse(message);
+                    if (scenario) snapshot["passengers"] = policy.passengers();
                     snapshot["door_state"] = elevsafe::DoorSimulation::name(simulation.state());
                     if (newlyApplied) snapshot["door_command"] = elevsafe::DoorSimulation::name(*newlyApplied);
                     message = snapshot.dump();
@@ -202,6 +224,7 @@ int main(int argc, char** argv)
     bool websocketEnabled = false;
     bool mockMode = false;
     bool doorSim = false;
+    std::optional<std::string> doorScenario;
     bool websocketSettings = false;
     bool durationSpecified = false;
     std::size_t mockSeconds = 30;
@@ -210,6 +233,12 @@ int main(int argc, char** argv)
     for (int argument = 1; argument < argc;)
     {
         const std::string_view option(argv[argument]);
+        if (option == "--ws-door-scenario")
+        {
+            if (doorScenario || argument + 1 >= argc || !elevsafe::isMockDoorScenario(argv[argument + 1]))
+            { std::cerr << "Missing, duplicate or invalid --ws-door-scenario\n"; return 2; }
+            doorScenario = argv[argument + 1]; argument += 2; continue;
+        }
         if (option == "--ws-door-sim")
         {
             if (doorSim) { std::cerr << "Duplicate --ws-door-sim\n"; return 2; }
@@ -343,6 +372,11 @@ int main(int argc, char** argv)
         ++argument;
     }
 
+    if (doorScenario && (!mockMode || !doorSim))
+    {
+        std::cerr << "--ws-door-scenario requires --ws-mock --ws-door-sim\n";
+        return 2;
+    }
     if (doorSim && !mockMode)
     {
         std::cerr << "--ws-door-sim requires --ws-mock (software simulation only)\n";
@@ -445,7 +479,7 @@ int main(int argc, char** argv)
         }
         if (mockMode)
         {
-            try { return runMock(*websocket, mockSeconds, doorSim); }
+            try { return runMock(*websocket, mockSeconds, doorSim, doorScenario); }
             catch (const std::exception& error)
             {
                 std::cerr << "[ws] startup/runtime failed: " << error.what() << '\n';
@@ -453,10 +487,12 @@ int main(int argc, char** argv)
             }
         }
         if (websocket)
-            std::cerr << "[ws] transport only: no C result, no live snapshot generation or door control\n";
+            std::cerr << (signal && !benchmarkMode
+                ? "[ws] DEMO tracking: B clusters >=40 points -> C CONFIRMED; y-only state, no safety/physical control\n"
+                : "[ws] transport only: no C result, no live snapshot generation or door control\n");
     }
 
-    // WebSocket remains outside the Radar session lifetime; no live C snapshots are invented.
+    // WebSocket survives Radar reconnect; B/C history belongs to each TCP session.
     const bool initialBackground = signal && signal->usesBackground();
     int result = 1;
     try
@@ -490,11 +526,15 @@ int main(int argc, char** argv)
             client.setProcessingMetricsEnabled(benchmarkMode);
             client.setProcessingMetricsFrameLimit(benchmarkFrameLimit);
 
+            std::unique_ptr<elevsafe::TrackingDemo> tracking;
+            if (websocket && signal && !benchmarkMode)
+                tracking = std::make_unique<elevsafe::TrackingDemo>();
+            std::size_t snapshotsPublished = 0;
             bool summaryPrinted = false;
             std::optional<std::uint64_t> firstTimestamp;
             auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
             client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
-                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState](const elevsafe::RadarFrame& frame)
+                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished](const elevsafe::RadarFrame& frame)
             {
                 if (reconnectEnabled && !firstTimestamp) firstTimestamp = frame.timestampUs;
                 using Profile = elevsafe::AbProfile;
@@ -503,7 +543,7 @@ int main(int argc, char** argv)
                     profiled.emplace(*abProfile, frame.frameCount, frame.points.size(), pipeline.pendingSize() >= kSynchronousFrameBufferCapacity);
                 const auto pipelineStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
                 pipeline.onFrame(frame);
-                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState](const elevsafe::RadarFrame& pendingFrame)
+                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState, &tracking, &websocket, &snapshotsPublished](const elevsafe::RadarFrame& pendingFrame)
                 {
                     if (signal)
                     {
@@ -522,6 +562,17 @@ int main(int argc, char** argv)
                                 profiled->sample.b = bEnd - bStart;
                                 profiled->sample.ab = bEnd - adapterStart;
                                 profiled->sample.success = true;
+                            }
+                            if (tracking)
+                            {
+                                const auto snapshot = tracking->process(result, elevsafe::TrackingDemo::Clock::now(),
+                                    std::chrono::system_clock::now());
+                                if (snapshot)
+                                {
+                                    if (!websocket->publishSnapshot(*snapshot))
+                                        throw std::runtime_error("tracking snapshot publish failed");
+                                    ++snapshotsPublished;
+                                }
                             }
                             if (!quietFrames)
                                 std::cout << "signal frame_id=" << result.frame_id
@@ -598,6 +649,9 @@ int main(int argc, char** argv)
                 std::cerr << "Backend stopped: " << exception.what() << '\n';
             }
 
+            if (tracking)
+                std::cerr << "[tracking-demo] session=" << session << " frames=" << tracking->processedFrames()
+                          << " snapshots=" << snapshotsPublished << " exit=" << result << '\n';
             if (benchmarkMode && !summaryPrinted)
                 printProcessingSummary(client.processingSummary());
 
