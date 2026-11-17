@@ -6,6 +6,7 @@
 #include "elevsafe/radar_reconnect.h"
 #include "elevsafe/retina_client.h"
 #include "elevsafe/signal_adapter.h"
+#include "elevsafe/tracking_adapter.h"
 #include "pipeline/signal_pipeline.h"
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
@@ -486,10 +487,12 @@ int main(int argc, char** argv)
             }
         }
         if (websocket)
-            std::cerr << "[ws] transport only: no C result, no live snapshot generation or door control\n";
+            std::cerr << (signal && !benchmarkMode
+                ? "[ws] DEMO tracking: B clusters >=40 points -> C CONFIRMED; y-only state, no safety/physical control\n"
+                : "[ws] transport only: no C result, no live snapshot generation or door control\n");
     }
 
-    // WebSocket remains outside the Radar session lifetime; no live C snapshots are invented.
+    // WebSocket survives Radar reconnect; B/C history belongs to each TCP session.
     const bool initialBackground = signal && signal->usesBackground();
     int result = 1;
     try
@@ -523,11 +526,15 @@ int main(int argc, char** argv)
             client.setProcessingMetricsEnabled(benchmarkMode);
             client.setProcessingMetricsFrameLimit(benchmarkFrameLimit);
 
+            std::unique_ptr<elevsafe::TrackingDemo> tracking;
+            if (websocket && signal && !benchmarkMode)
+                tracking = std::make_unique<elevsafe::TrackingDemo>();
+            std::size_t snapshotsPublished = 0;
             bool summaryPrinted = false;
             std::optional<std::uint64_t> firstTimestamp;
             auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
             client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
-                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState](const elevsafe::RadarFrame& frame)
+                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished](const elevsafe::RadarFrame& frame)
             {
                 if (reconnectEnabled && !firstTimestamp) firstTimestamp = frame.timestampUs;
                 using Profile = elevsafe::AbProfile;
@@ -536,7 +543,7 @@ int main(int argc, char** argv)
                     profiled.emplace(*abProfile, frame.frameCount, frame.points.size(), pipeline.pendingSize() >= kSynchronousFrameBufferCapacity);
                 const auto pipelineStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
                 pipeline.onFrame(frame);
-                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState](const elevsafe::RadarFrame& pendingFrame)
+                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState, &tracking, &websocket, &snapshotsPublished](const elevsafe::RadarFrame& pendingFrame)
                 {
                     if (signal)
                     {
@@ -555,6 +562,17 @@ int main(int argc, char** argv)
                                 profiled->sample.b = bEnd - bStart;
                                 profiled->sample.ab = bEnd - adapterStart;
                                 profiled->sample.success = true;
+                            }
+                            if (tracking)
+                            {
+                                const auto snapshot = tracking->process(result, elevsafe::TrackingDemo::Clock::now(),
+                                    std::chrono::system_clock::now());
+                                if (snapshot)
+                                {
+                                    if (!websocket->publishSnapshot(*snapshot))
+                                        throw std::runtime_error("tracking snapshot publish failed");
+                                    ++snapshotsPublished;
+                                }
                             }
                             if (!quietFrames)
                                 std::cout << "signal frame_id=" << result.frame_id
@@ -631,6 +649,9 @@ int main(int argc, char** argv)
                 std::cerr << "Backend stopped: " << exception.what() << '\n';
             }
 
+            if (tracking)
+                std::cerr << "[tracking-demo] session=" << session << " frames=" << tracking->processedFrames()
+                          << " snapshots=" << snapshotsPublished << " exit=" << result << '\n';
             if (benchmarkMode && !summaryPrinted)
                 printProcessingSummary(client.processingSummary());
 

@@ -7,12 +7,13 @@ Radar interface와 초기 처리 파이프라인을 담당합니다.
 현재 Backend는 수신한 frame을 `BackendPipeline`과 `FrameBuffer`를 거쳐
 consumer로 전달하는 단일 스레드 runtime입니다. `--signal-config PATH`를
 지정하면 Adapter를 통해 B `SignalPipeline`을 호출하고 결과를 console에 출력합니다.
-옵션을 생략하면 기존 수신/console 경로를 유지합니다. C Tracking/State와
-D Frontend는 현재 Backend에 연결되어 있지 않습니다.
+옵션을 생략하면 기존 수신/console 경로를 유지합니다. Radar 모드에서 `--signal-config`와
+`--websocket`을 함께 지정하면 아래 시연용 B→C→WebSocket 경로를 활성화합니다.
+C Safety/State 판단과 물리 문 제어는 연결하지 않습니다.
 
 기존 WebSocket transport와 명시적 Mock 모드가 A-B 실행 경로와 공존합니다.
-WebSocket 전용 코드는 `7c86f77`의 기존 구현을 재사용했으며, 실제 B/C 결과를
-승객 Snapshot으로 전송하거나 수동 문 제어를 실행하지 않습니다.
+기존 WebSocket transport를 재사용하여 B 문 추정 상태와 C CONFIRMED Track을 전송합니다.
+수동 FIFO와 Door Mock은 유지하며 Radar 결과로 물리 문 제어를 실행하지 않습니다.
 
 ## 디렉터리 구조
 
@@ -134,7 +135,7 @@ producer와 consumer가 분리되는 구조에서는 별도 검토가 필요합�
 - `drain()`에서 대기 중인 frame을 FIFO 순서로 consumer에 전달합니다.
 - 현재는 generic `FrameConsumer` callback만 제공합니다.
 - B 호출은 main의 consumer에서 수행하며 BackendPipeline 공개 API는 그대로입니다.
-- C Tracking/State 실제 모듈은 연결되어 있지 않습니다.
+- B 결과의 C Tracking 연결은 main consumer의 시연 Adapter에서 수행합니다. C State/Safety 판단은 연결하지 않습니다.
 
 ### main.cpp
 
@@ -414,7 +415,7 @@ Mock의 timestamp는 `2026-10-30T11:00:00Z`라는 **고정 예시**이며 현재
 0으로 하는 steady clock 경과 µs(정수)이며 재접속으로 초기화하지 않습니다. 실제 RadarFrame의
 시각이나 처리 지연이 아닙니다. 스케줄이 늦으면 놓친 주기를 건너뛰며 몰아서 전송하지 않습니다.
 10Hz는 목표 전송 주기이며 OS 스케줄링·큐 교체·느린 클라이언트에 따른 지연/누락이 가능합니다.
-실제 C 결과의 10Hz 갱신이나 새 결과가 없을 때의 재전송 정책은 아직 구현하지 않았습니다.
+Radar 시연 모드는 모든 B 프레임을 C에 전달하고 발행만 최대 약 10Hz로 제한합니다. 입력 중단 시 재전송하지 않습니다.
 
 `--mock-websocket`은 기존 `--ws-mock`의 별칭입니다. Mock은 host/port,
 benchmark 및 `--signal-config`와 함께 사용할 수 없습니다.
@@ -426,7 +427,7 @@ benchmark 및 `--signal-config`와 함께 사용할 수 없습니다.
 ```
 
 이 모드는 기존 TCP/Parser/FrameBuffer/console 경로와 WebSocket 접속·요청 수신을
-함께 실행합니다. C 결과가 없으므로 **실시간 Snapshot은 생성하지 않습니다.**
+함께 실행합니다. 위 명령에는 `--signal-config`가 없으므로 실시간 Snapshot은 생성하지 않습니다. B 설정을 함께 지정하면 아래 시연용 Snapshot을 발행합니다.
 옵션을 생략하면 서버를 시작하지 않고 기존 동작을 유지합니다. Radar 모드에서 WebSocket
 시작이 실패하면 원래 예외 정보를 `[ws] startup failed:`로 출력하고 실패 객체를 정리합니다.
 `[ws] disabled for this run; continuing radar processing`을 기록한 뒤 활성 WebSocket 없이
@@ -614,7 +615,7 @@ Frontend → Backend 요청은 각각 별도 text 메시지로 보냅니다.
 송신 클라이언트가 종료돼도 큐에 남고, 만료 시각이나 종료 시 취소 정책은 없습니다.
 기본 Mock은 FIFO를 소비해 폐기하고 문 상태를 바꾸지 않습니다. 모든 Mock Snapshot의
 `door_command=null`은 개별 수동 요청의 ACK나 거부 응답으로 해석하지 마세요.
-실제 C Tracking, AUTO/MANUAL 제어 실행, 물리 문 상태 확인은 미연동입니다.
+기본 Mock은 실제 C Tracking을 사용하지 않습니다. Radar 시연 연결은 아래 별도 절을 참고하세요. 물리 문 상태 확인은 미연동입니다.
 
 인증·Origin 검증·접속 IP별 권한·TLS는 구현하지 않았습니다. LAN에서 접근 가능한
 클라이언트는 Snapshot 수신뿐 아니라 OPEN/HOLD/CLOSE 요청도 보낼 수 있습니다.
@@ -680,10 +681,10 @@ OPEN/CLOSE의 AUTO 복귀는 상태 머신 자체 완료 시간에 의해 수행
 `null door request no-op` 로그를 남기되 접수 명령 수·거부 수·FIFO는 변경하지 않습니다.
 기본 Mock과 Radar 모드는 계속 null을 거부합니다. AUTO 문자열, 잘못된 타입, 추가 필드,
 binary 요청은 모두 거부합니다. null은 접수 또는 완료 ACK가 아니며 기존 JSON 최상위 필드는 그대로입니다.
-C 입력은 현재 제품 실행 경로에 연결하지 않았고 승객 상태를 A에서 재판정하지 않습니다.
+Door Mock에는 C 자동 제어 입력을 연결하지 않았습니다. Radar 시연 경로의 y-only 분류는 C State Machine이 아닙니다.
 `applyAuto()`는 로컬 중재 시험용 진입점이며 C 공개 인터페이스를 확정한 것이 아닙니다.
 실제 C의 위험 해소·입력 소실 표현과 복구 정책은 별도 합의 대상입니다. 아래 선택형 Mock에서는 시험용 정책을 명시적으로 적용합니다.
-실행 중 B UNKNOWN 주입 및 C 결과 기반 Snapshot 생성도 이번 범위 밖입니다.
+위 Door Mock 설명과 아래 Radar 시연의 B UNKNOWN/C Track Snapshot 발행 경로는 구분합니다.
 D의 UNKNOWN 수신·'확인 중' 표시와 null 송신 로그 정정은 D팀 작업이며 현재 Frontend는 수정하지 않았습니다.
 
 아래 자동 시험 기록과 위 사용자 수동 A–D 화면 검증 결과를 구분합니다.
@@ -1448,16 +1449,122 @@ Backend 독립 CTest는 12/14가 통과했습니다. Backend의 WebSocket 서버
 
 ## 현재 구현되지 않음
 
-- C Tracking / State 실제 연결
-- 실제 B/C 결과의 WebSocket Snapshot 생성 및 전송
+- C State Machine / SafetyJudge 연결
+- 실제 센서와 D 화면을 포함한 전체 통합 검증
 - 수동 문 제어 실행 및 ACK
 - Radar 처리의 producer/consumer multithreading
 - 무응답 TCP 수신 idle timeout / heartbeat
 - Device Discovery
 - Target Section 상세 Parsing
 
-실제 레이더/B 처리 결과는 console까지이며 WebSocket JSON 송신은 명시적 Mock에
-한정됩니다. C/D 통합 및 실제 문 제어가 완료된 것으로 간주하지 않습니다.
+Radar의 B/C 결과는 아래 시연 Adapter를 통해 WebSocket으로 발행합니다.
+C State/Safety 및 실제 문 제어가 완료된 것으로 간주하지 않습니다.
 
 기존 S0-3 TCP E2E와 WebSocket 반복 테스트는 각 브랜치의 이전 검증입니다.
 통합 코드의 재검증 결과와 구분해야 하며 Winsock 10014의 근본 원인은 미확정입니다.
+
+## 11/13 A-B-C-D 시연용 Radar Tracking 연결
+
+원격 main `005a0c1`의 B/C 공개 타입과 기존 WebSocket 서버를 재사용합니다.
+Radar 모드의 `--signal-config PATH --websocket` 조합에서만 활성화하며 `--benchmark`에서는
+기존 측정 경로를 유지합니다. WebSocket 시작 실패 시 기존처럼 Radar/B 처리를 계속합니다.
+`--ws-mock`, `--ws-door-sim` 및 위험 Mock 정책은 이 경로와 별개입니다.
+
+매 프레임 `RadarFrame → toSignalFrame → SignalPipeline::process → toTrackingDetections →
+TrackingEngine::processDetections`로 처리합니다. `processPoints()`나 두 번째 DBSCAN은 호출하지 않습니다.
+Adapter의 `num_points >= 40`은 시연 전용입니다. 중심·bbox·z 범위·점 수·Doppler를 옮기고,
+B에 없는 `mean_power=0`은 미측정 기본값입니다. 현재 C의 매칭/필터는 이 필드를 사용하지 않습니다.
+빈 클러스터도 C에 전달합니다. C 객체는 TCP 세션 동안 유지하고 재연결 시 새로 생성합니다.
+
+Snapshot은 v7의 기존 5개 필드를 사용합니다. `timestamp`는 발행 시점 UTC ISO 문자열,
+`timestamp_us`는 B 결과 그대로, `door_state`는 B 추정값(UNKNOWN 포함), `door_command`는 null입니다.
+`passengers`는 CONFIRMED 공개 Tracking ID와 x/y(m)의 전체 목록입니다. B cluster_id나 센서
+Target ID를 사용하지 않습니다. `y < 0`은 OUTSIDE, 그 외 INSIDE인 시연용 분류이며
+`safety_state=null`입니다. C State Machine/SafetyJudge 및 물리 문 완료 피드백이 아닙니다.
+기본 C 설정은 3회 연속 매칭 후 CONFIRMED이며 미매칭 LOST는 화면 목록에서 제외됩니다.
+
+모든 유효 B 결과를 C에 입력한 뒤 steady clock 기준 100ms가 지났을 때 현재 결과를 발행합니다.
+입력 FPS와 발행 FPS는 다르며 저속 입력/스케줄링 지연에서는 10Hz보다 낮습니다.
+입력이 없으면 오래된 결과를 반복 발행하지 않습니다. 기존 최신 Snapshot 교체/느린 클라이언트
+정책을 유지합니다. 빈 목록도 발행하며 새 연결에 마지막 Snapshot을 자동 재전송하지 않습니다.
+AB Profile의 B/AB 구간은 C 호출 전까지이고 pipeline/callback 구간에는 추가 처리가 포함됩니다.
+수동 FIFO의 실행 정책은 변경하지 않으며 Radar 경로에서는 수신 명령을 문 제어로 실행하지 않습니다.
+
+### 빌드 및 시험
+
+C `tracking_core`의 Eigen3 CMake package가 필요합니다. `Eigen3_DIR`은 실제 `Eigen3Config.cmake`가
+있는 디렉터리로 지정합니다. 이번 격리 빌드는 공식 Eigen 3.4.0 소스를 CMake로 설치한
+`backend/build/abcd-demo-20261111/deps/eigen-install/share/eigen3/cmake`를 사용했습니다.
+Boost 1.86.0 및 JSON 3.11.3은 기존 캐시를 재사용했습니다. C 소스는 수정하지 않고 Backend
+CMake에서 MSVC `/utf-8`을 전달합니다. Backend 독립 구성에서도 tracking을 한 번만 추가합니다.
+
+```powershell
+cmake -S . -B backend/build/demo-root -A x64 -DEigen3_DIR=<Eigen3Config.cmake가-있는-경로>
+cmake --build backend/build/demo-root --config Release
+ctest --test-dir backend/build/demo-root -C Release --output-on-failure
+cmake -S backend -B backend/build/demo-backend -A x64 -DEigen3_DIR=<동일-Eigen3-경로>
+```
+
+`tracking_adapter_test`는 필드/39·40 경계/빈 프레임/Tracking ID/CONFIRMED/UTC/문 상태/
+100ms 제한/새 세션 초기화와 실제 B 호출을 검사합니다. Windows의 `tracking_radar_websocket_test`는
+기존 wire layout의 합성 20Hz TCP 입력 64프레임을 실제 Backend로 보내 두 클라이언트 수신,
+추적 ID·위치·빈 목록·입력 중단 시 발행 중단·EOF 종료를 검사합니다. 이는 FOV 실데이터 시험이 아닙니다.
+기존 C 테스트도 등록합니다. `tracking/S0-1_t01.csv`가 없으면 `detection_loader_test`는 실패하며,
+이를 제외한 결과를 전체 PASS로 표시하면 안 됩니다. 기존 Winsock 10014도 별도 실패로 보존합니다.
+
+### FOV_t03 재생과 D 화면
+
+Repository 루트에서, 배경맵과 빌드가 준비된 경우:
+
+```powershell
+.\backend\build\abcd-demo-20261111\root\backend\Release\elevsafe_backend.exe 127.0.0.1 29172 `
+  --signal-config .\signal_processing\config\elevator_2nd.cfg `
+  --websocket --ws-bind 127.0.0.1 --ws-port 8080
+# 별도 터미널: D팀이 승인한 UNKNOWN 지원 소스에서
+cd frontend
+npm start
+```
+
+`signal_processing/data/background/elevator_2nd_closed.csv`는 Git 제외 데이터입니다. 이번 작업에서는 사용자가 제공한 바탕 화면의 원본을 복사했고 SHA256 일치를 확인했습니다.
+시작 로그의 `background=enabled`를 확인합니다. 배경맵 로드 실패로 OFF가 된 결과를 정상적인
+2차 엘리베이터 검증으로 취급하지 않습니다. 현재 고정 Mock 시각은 이 Radar 경로에서 사용하지 않습니다.
+
+기존 Radar Emulator 실행 디렉터리에서 `radar-emulator.exe`를 실행하고 PCR 폴더를 열어
+Default record를 FOV_t03으로 선택합니다. Stream은 29172, HTTP는 8000이며 Backend는 TCP에 직접 연결합니다.
+Emulator는 최소화하지 않습니다. 첫 활성화는 임의 위치일 수 있으므로 `Restart from beginning`을
+선택하고 첫 EOF 이후 Global 프레임이 1부터 시작하는 것을 확인합니다. 원본 단일 Session의
+30~66초는 논리 인덱스 579~1281(0 기준), 703프레임입니다. UI의 1 기준 번호는 580~1282입니다.
+직접 구간 seek/단발 종료는 지원하지 않습니다. FPS 설정에 따라 재생 시간은 달라지며,
+Emulator의 stream frameCount와 Backend 수신 상대 시간은 PCR 원본 번호/delta 시간과 같지 않습니다.
+
+D 접속 주소는 `ws://127.0.0.1:8080/radar`입니다. PR #34에는 UNKNOWN 수신 및 '확인 중' 표시가
+있지만 이번 기준 main에는 없습니다. D 제품 소스는 수정하지 않습니다. UNKNOWN 화면 검증에는
+D팀의 해당 변경이 반영된 실행 환경이 필요합니다. Backend 수신 성공과 D GUI 성공은 구분합니다.
+실제 FALL/IMMOBILE, 위험 자동 OPEN/HOLD, HALL 상태 분류 및 엘리베이터 제어는 구현하지 않았습니다.
+
+### 이번 통합 검증 결과 (2026-11-11)
+
+| 검증 | 결과 |
+|---|---|
+| Windows MSVC x64 Release 루트 / Backend 독립 Build | 모두 PASS |
+| 루트 전체 CTest | 22/24 PASS, ExitCode 8 |
+| Backend 독립 전체 CTest | 23/24 PASS, ExitCode 8 |
+| 신규 Adapter / 합성 TCP-WebSocket 통합 시험 | 양쪽 PASS |
+
+루트의 `websocket_server_test`는 null-compatibility의 server.start/listen에서
+요청 포트 0, system:10014로 실패했습니다. 원인은 미확정이며 재시도로 대체하지 않았습니다.
+양쪽 `detection_loader_test`는 기존 C 입력 `tracking/S0-1_t01.csv` 부재로 실패했습니다.
+C의 id_manager/main 시험 및 기존 A–B·Background ON/OFF·Radar 재연결 시험은 통과했습니다.
+처음 루트 빌드에서 C 테스트의 MSVC 문자 인코딩 오류가 발생했고, Backend CMake의 `/utf-8`
+적용 후 빌드는 통과했습니다. 최초 실패 로그도 보존했습니다.
+
+합성 TCP 시험은 각 구성에서 입력 64프레임을 모두 처리하고 두 클라이언트가 동일한
+25개 Snapshot을 받았습니다. Snapshot의 평균 source timestamp 간격은 루트 124.082ms,
+독립 128.844ms였습니다. 고정 10Hz 또는 실제 센서 입력 성능을 검증한 수치가 아닙니다.
+Tracking ID/좌표, 빈 목록, 입력 공백에서 발행 중단 및 Backend EOF ExitCode 0을 확인했습니다.
+수신 공백 검사를 위한 클라이언트 취소 시 연결이 abort되므로 정상 close handshake 검증과는 구분합니다.
+
+FOV_t03 원본 및 배경맵 파일은 확인했지만, GUI 도구의 native pipe 연결 실패로 Emulator의
+파일 선택·재생은 완료하지 못했습니다. 실행 시도한 Emulator는 종료했습니다.
+따라서 실제 FOV Background ON 재생 및 D React 화면 표시는 미검증입니다.
+로그는 Git 제외 `backend/build/abcd-demo-20261111/`에 보존합니다.
