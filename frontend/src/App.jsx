@@ -2,21 +2,24 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 // 🛠️ [실제 도면 규격 설정 - 단위: cm]
+
+const WAITING_COMPRESSION = 0.5; // 승강장 화면 왜곡 비율 (0.5 = 50% 길이로 축소. 원하면 조절하세요)
+
 // 이제 px 단위로 머리 아프게 고민할 필요 없이 실제 줄자로 잰 cm 길이를 넣으세요!
 const CONFIG_CM = {
   ELEV_WIDTH: 162,      // 카 폭 (가로)
   ELEV_DEPTH: 137,      // 카 깊이 (세로)
   DOOR_WIDTH: 88,       // 출입구 폭
   DOOR_THICKNESS:24,    // 문틈 두께 (세로 폭)
-  WAITING_DEPTH: 250,   // 승강장(대기 구역) 길이
+  WAITING_DEPTH: 250 * WAITING_COMPRESSION,   // 승강장(대기 구역) 길이
   WAITING_WIDTH: 166,   // 승강장 최대 폭
-  TRAP_DEPTH: 52,       // 사다리꼴 깊이
+  TRAP_DEPTH: 52 * WAITING_COMPRESSION,       // 사다리꼴 깊이
   TRAP_BOTTOM_W: 101,   // 사다리꼴 하단 폭
 };
 
 // 🔍 화면 확대/축소 비율 (1cm = 몇 px로 그릴 것인가?)
 // 도면이 화면에 비해 너무 작으면 이 숫자를 2.5, 3.0으로 늘리고, 너무 크면 1.5 등으로 줄이세요.
-const SCALE = 1.1;
+const SCALE = 1.6;
 
 
 /* [실제 연동 시 바꿀 설정]
@@ -228,12 +231,12 @@ function App() {
       const sampleData = {
         timestamp: "2026-11-01T10:30:00Z",
         timestamp_us: 9382050,
-        door_state: 'UNKNOWN',
+        door_state: 'CLOSED',
         door_command: 'OPEN',
         passengers: [
           {
             id: 1,
-            x: 0.25,
+            x: 0.0,
             y: 1.0,
             state: 'INSIDE',
             safety_state: null,
@@ -245,6 +248,30 @@ function App() {
             y: 0.0,
             state: 'ENTERING',
             safety_state: 'FALL',
+            label: 'Passenger #2'
+          },
+          {
+            id: 3,
+            x: 0.0,
+            y: -1.0,
+            state: 'OUTSIDE',
+            safety_state: null,
+            label: 'Passenger #2'
+          },
+          {
+            id: 4,
+            x: 0.0,
+            y: -2.0,
+            state: 'OUTSIDE',
+            safety_state: null,
+            label: 'Passenger #2'
+          },
+          {
+            id: 5,
+            x: 0.0,
+            y: -3.0,
+            state: 'OUTSIDE',
+            safety_state: null,
             label: 'Passenger #2'
           }
         ]
@@ -259,7 +286,10 @@ function App() {
       clearTimeout(reconnectTimeout);
       if (wsRef.current) wsRef.current.close();
       // 종료 시 진행 중인 렌더링 프레임 취소 추가
-      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+      if (animationFrameId.current) {
+        cancelAnimationFrame(animationFrameId.current);
+        animationFrameId.current=null;
+      }
     };
   }, []);
 
@@ -376,18 +406,45 @@ function App() {
 
         <div className="left-panel" onClick={(e) => e.stopPropagation()}>
           <h2>승객 상세 정보</h2>
-          {selectedPassenger ? (
-            <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
-              <h3>ID: {selectedPassenger.id}</h3>
-              <strong>{selectedPassenger.label}</strong>
-              <p>수신 좌표:<br/>X {selectedPassenger.x}m / Y {selectedPassenger.y}m</p>
-              <p className="state-text">
-                상태: {getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state)}
-              </p>
-              <button onClick={() => setSelectedDot(null)}>선택 해제</button>
-            </div>
-          ) : (
+          {selectedPassenger ? (() => {
+            const statusText = getStatusLabel(selectedPassenger.state, selectedPassenger.safety_state);
+            const hasEmoji = statusText !== '알 수 없음';
+            const statusIcon = hasEmoji ? statusText.split(' ')[0] : '❓';
+            const statusLabel = hasEmoji ? statusText.slice(statusText.indexOf(' ') + 1) : statusText;
+
+            return (
+              <div className={`info-box ${getTheme(selectedPassenger.safety_state) === 'danger' ? 'alert' : ''}`}>
+                {/* 1. 상단: ID 및 이름 */}
+                <div className="info-header">
+                  <span className="id-badge">ID #{selectedPassenger.id}</span>
+                  <strong>{selectedPassenger.label}</strong>
+                </div>
+
+                {/* 2. 중단: 남은 세로 공간을 채우는 대형 상태 표시창 */}
+                <div className="status-hero">
+                  <span className="status-icon">{statusIcon}</span>
+                  <span className="status-label">{statusLabel}</span>
+                </div>
+
+                {/* 3. 하단: 큼직한 X / Y 좌표 2단 블록 */}
+                <div className="coord-stack">
+                  <div className="coord-row">
+                    <span className="coord-title">X 좌표 (좌우)</span>
+                    <span className="coord-value">{selectedPassenger.x.toFixed(2)} m</span>
+                  </div>
+                  <div className="coord-row">
+                    <span className="coord-title">Y 좌표 (거리)</span>
+                    <span className="coord-value">{selectedPassenger.y.toFixed(2)} m</span>
+                  </div>
+                </div>
+
+                {/* 4. 최하단: 대형 선택 해제 버튼 */}
+                <button onClick={() => setSelectedDot(null)}>선택 해제</button>
+              </div>
+            );
+          })() : (
             <div className="empty-info">
+              <span className="empty-icon">🔍</span>
               <p>도면에서 승객(점)을 클릭하면<br/>여기에 상세 정보가 표시됩니다.</p>
             </div>
           )}
@@ -410,7 +467,16 @@ function App() {
                 const theme = getTheme(p.safety_state);
                 // 수신 좌표 m를 cm로 바꾼 뒤 화면 배율을 적용합니다.
                 const x_cm = p.x * 100;
-                const y_cm = p.y * 100;
+                let y_cm = p.y * 100;
+
+                // 화면 왜곡 로직: 문 바깥쪽(승강장 영역)인 경우에만 Y좌표 압축
+                const doorOuterBoundary = -(CONFIG_CM.DOOR_THICKNESS / 2);
+                if (y_cm < doorOuterBoundary) {
+                  // 문 경계선을 넘어간 거리(음수)만큼만 압축 비율 적용
+                  const overDistance = y_cm - doorOuterBoundary;
+                  y_cm = doorOuterBoundary + (overDistance * WAITING_COMPRESSION);
+                }
+
                 const leftPos = (MAX_WIDTH / 2 + x_cm) * SCALE;
                 // y=0은 문 두께 중앙, y 양수는 화면 위쪽입니다.
                 const topPos = (CONFIG_CM.ELEV_DEPTH - y_cm + (CONFIG_CM.DOOR_THICKNESS / 2)) * SCALE;
