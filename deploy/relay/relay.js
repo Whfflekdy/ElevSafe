@@ -1,53 +1,118 @@
-// 노트북(입구 /ingest)에서 받은 JSON을 보는 화면들(출구 /radar)에 그대로 나눠 줌
-const http = require('http');
-const { WebSocketServer, WebSocket } = require('ws');
+'use strict';
+const http = require('node:http');
+const { timingSafeEqual } = require('node:crypto');
+const { WebSocketServer } = require('ws');
+const { integer, limits, snapshotText, sendBounded, installSignals, now } = require('./transport');
 
-const PORT = Number(process.env.PORT || 8090);
-const INGEST_KEY = process.env.INGEST_KEY;
-
-// INGEST_KEY가 비어 있으면 에러를 출력하고 종료하기
-if (!INGEST_KEY) { console.error('INGEST_KEY is not set'); process.exit(1); }
-
-// 상태 확인용: 브라우저로 열면 ok
-const server = http.createServer((req, res) => res.end('ok'));
-const viewers = new WebSocketServer({ noServer: true });
-const ingest = new WebSocketServer({ noServer: true });
-let lastSnapshot = null; // 새로 들어온 화면에 바로 보여 줄 마지막 데이터
-
-server.on('upgrade', (req, socket, head) => {
-    const url = new URL(req.url, 'http://localhost');
-    // 주소의 key 값이 INGEST_KEY와 같을 때만 true
-    const key = url.searchParams.get('key');
-    const keyOk = key === INGEST_KEY;
-
+function createRelay(options = {}) {
+  const key = options.key;
+  if (typeof key !== 'string' || !key.length) throw new Error('INGEST_KEY is required');
+  const port = integer(options.port, 8090, 'PORT', 0);
+  if (port > 65535) throw new Error('Invalid PORT');
+  const { maxMessageBytes, maxBufferedBytes } = limits(options);
+  const staleMs = integer(options.staleMs, 3000, 'STALE_MS');
+  const heartbeatMs = integer(options.heartbeatMs, 30000, 'HEARTBEAT_MS');
+  const log = options.log || (() => {});
+  const stats = { accepted: 0, invalid: 0, rejectedIngest: 0, slowViewers: 0, ignoredCommands: 0, errors: 0, expired: 0 };
+  const server = http.createServer((req, res) => res.end('ok'));
+  const viewers = new WebSocketServer({ noServer: true, maxPayload: maxMessageBytes, perMessageDeflate: false });
+  const ingest = new WebSocketServer({ noServer: true, maxPayload: maxMessageBytes, perMessageDeflate: false });
+  let producer = null, lastSnapshot = null, stopping = false, stopPromise;
+  const sockets = new Set();
+  server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  function expire() {
+    if (lastSnapshot && now() - lastSnapshot.receivedAt >= staleMs) { lastSnapshot = null; ++stats.expired; }
+  }
+  function attach(ws) {
+    ws.alive = true;
+    ws.on('pong', () => { ws.alive = true; });
+    ws.on('error', () => { ++stats.errors; ws.terminate(); });
+  }
+  function broadcast(ws, text) {
+    if (sendBounded(ws, text, maxBufferedBytes, () => ++stats.errors) === 'slow') ++stats.slowViewers;
+  }
+  function reject(socket, status) {
+    socket.on('error', () => {});
+    socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  }
+  server.on('upgrade', (req, socket, head) => {
+    if (stopping) return reject(socket, '503 Service Unavailable');
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); } catch { return reject(socket, '400 Bad Request'); }
     if (url.pathname === '/radar') {
-        viewers.handleUpgrade(req, socket, head, (ws) => viewers.emit('connection', ws));
-    } else if (url.pathname === '/ingest' && keyOk) {
-        ingest.handleUpgrade(req, socket, head, (ws) => ingest.emit('connection', ws));
-    } else {
-        if (url.pathname === '/ingest') console.log('[relay] 키가 틀린 노트북 연결 거부');
-        socket.destroy();
-    }
-});
-
-ingest.on('connection', (ws) => {
-    console.log('[relay] 노트북 연결됨');
-    // TODO 3 (나중에): 노트북 연결은 하나만 허용
-    ws.on('message', (data) => {
-        lastSnapshot = data.toString();
-        for (const viewer of viewers.clients) {
-            if (viewer.readyState !== WebSocket.OPEN) continue;
-            // TODO 4 (나중에): viewer.bufferedAmount가 크면 이번 프레임 건너뛰기
-            viewer.send(lastSnapshot);
-        }
+      viewers.handleUpgrade(req, socket, head, ws => viewers.emit('connection', ws));
+    } else if (url.pathname === '/ingest') {
+      const supplied = Buffer.from(url.searchParams.get('key') || '');
+      const expected = Buffer.from(key);
+      if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected))
+        return reject(socket, '403 Forbidden');
+      if (producer) { ++stats.rejectedIngest; return reject(socket, '409 Conflict'); }
+      ingest.handleUpgrade(req, socket, head, ws => {
+        producer = ws; // Reserve synchronously; keep it until the close event completes.
+        ingest.emit('connection', ws);
+      });
+    } else reject(socket, '404 Not Found');
+  });
+  ingest.on('connection', ws => {
+    attach(ws); lastSnapshot = null; log('[relay] ingest connected');
+    ws.on('message', (data, binary) => {
+      if (stopping || ws !== producer) return;
+      let text;
+      try { text = snapshotText(data, binary, maxMessageBytes); }
+      catch { ++stats.invalid; return; } // Invalid input does not refresh freshness.
+      lastSnapshot = { text, receivedAt: now() };
+      ++stats.accepted;
+      for (const viewer of viewers.clients) broadcast(viewer, text);
     });
-    ws.on('close', () => console.log('[relay] 노트북 연결 끊김'));
-});
-
-viewers.on('connection', (ws) => {
-    if (lastSnapshot) ws.send(lastSnapshot);
-    // 보기 전용: 화면이 보낸 문 제어 명령은 버림
-    ws.on('message', () => { });
-});
-
-server.listen(PORT, () => console.log(`[relay] listening :${PORT}`));
+    ws.on('close', () => {
+      if (producer === ws) { producer = null; lastSnapshot = null; }
+      log('[relay] ingest disconnected; cache invalidated');
+    });
+  });
+  viewers.on('connection', ws => {
+    attach(ws); expire();
+    if (lastSnapshot) broadcast(ws, lastSnapshot.text);
+    ws.on('message', () => { ++stats.ignoredCommands; }); // Never route commands upstream.
+  });
+  const expiry = setInterval(expire, Math.min(staleMs, 1000));
+  const heartbeat = setInterval(() => {
+    for (const ws of [...viewers.clients, ...ingest.clients]) {
+      if (!ws.alive) { ws.terminate(); continue; }
+      ws.alive = false;
+      try { ws.ping(); } catch { ws.terminate(); }
+    }
+  }, heartbeatMs);
+  const ready = new Promise((resolve, rejectReady) => {
+    server.once('listening', resolve);
+    server.once('error', rejectReady);
+  });
+  server.on('error', () => { ++stats.errors; log('[relay] server error'); });
+  server.listen(port, options.host || '0.0.0.0');
+  function stop() {
+    if (stopPromise) return stopPromise;
+    stopping = true; lastSnapshot = null;
+    clearInterval(expiry); clearInterval(heartbeat);
+    stopPromise = new Promise(resolve => {
+      const deadline = setTimeout(() => {
+        for (const ws of [...viewers.clients, ...ingest.clients]) ws.terminate();
+        for (const socket of sockets) socket.destroy();
+      }, 500);
+      const closed = [viewers, ingest, server].map(s => new Promise(done => s.close(() => done())));
+      for (const ws of [...viewers.clients, ...ingest.clients]) ws.close(1001, 'Server shutdown');
+      Promise.all(closed).then(() => { clearTimeout(deadline); resolve(); });
+    });
+    return stopPromise;
+  }
+  return { server, ready, stop, stats, cached: () => { expire(); return lastSnapshot !== null; } };
+}
+if (require.main === module) {
+  let relay;
+  try {
+    relay = createRelay({ key: process.env.INGEST_KEY, port: process.env.PORT,
+      staleMs: process.env.STALE_MS, maxMessageBytes: process.env.MAX_MESSAGE_BYTES,
+      maxBufferedBytes: process.env.MAX_BUFFERED_BYTES, heartbeatMs: process.env.HEARTBEAT_MS, log: console.log });
+    installSignals(relay.stop);
+    relay.ready.then(() => console.log('[relay] listening'), async () => { await relay.stop(); process.exitCode = 1; });
+  } catch { console.error('[relay] invalid configuration'); process.exitCode = 1; }
+}
+module.exports = { createRelay };
