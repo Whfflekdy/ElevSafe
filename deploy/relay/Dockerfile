@@ -2,6 +2,6 @@ FROM node:20-alpine
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-COPY relay.js ./
+COPY relay.js transport.js ./
 USER node
 CMD ["node", "relay.js"]
