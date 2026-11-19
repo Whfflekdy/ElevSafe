@@ -276,8 +276,8 @@ function App() {
           log(`[WebSocket] 연결 종료. ${delay / 1000}초 뒤 재접속 시도...`);
           
           reconnectTimeout = setTimeout(connectWebSocket, delay);
-          // 다음 번 실패 시 대기 시간 2배로 증가 (최대 30초까지만)
-          reconnectDelay.current = Math.min(delay * 2, 30000); 
+          // 다음 번 실패 시 대기 시간 2배로 증가 (최대 10초까지만)
+          reconnectDelay.current = Math.min(delay * 2, 10000); 
         }
       };
     };
