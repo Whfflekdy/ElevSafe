@@ -195,6 +195,9 @@ function App() {
   const latestDataRef = useRef(null);
   const reconnectDelay = useRef(1000); // 시작 딜레이 1초
 
+  const lastReceivedAtRef = useRef(null);
+  const isDataLostRef = useRef(false);
+
   // 10Hz 데이터 수신 시 로그 폭발 방지를 위해 최대 50개 유지
   const log = message => setSystemLogs(prev => {
     const newLogs = [...prev, message];
@@ -233,6 +236,12 @@ function App() {
   const receiveMessage = message => {
     try {
       const data = JSON.parse(message);
+
+      lastReceivedAtRef.current = Date.now();
+      if (isDataLostRef.current) {
+        isDataLostRef.current = false;
+        log(`[${new Date().toLocaleTimeString()}] ✅ 데이터 수신 재개`);
+      }
 
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
         throw new Error('JSON 객체가 필요합니다.');
@@ -355,6 +364,22 @@ function App() {
   useEffect(() => () => {
     clearTimeout(doorTimerRef.current);
     clearTimeout(autoRevertTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!USE_REAL_WEBSOCKET) return;
+
+    const interval = setInterval(() => {
+      if (lastReceivedAtRef.current === null) return;
+      const elapsed = Date.now() - lastReceivedAtRef.current;
+
+      if (elapsed >= 3000 && !isDataLostRef.current) {
+        isDataLostRef.current = true;
+        log(`[${new Date().toLocaleTimeString()}] ⚠️ 데이터 끊김 (3초간 수신 없음)`);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
   }, []);
 
   const getTheme = (safetyState) => {
