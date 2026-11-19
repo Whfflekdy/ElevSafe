@@ -46,7 +46,12 @@ struct Cluster {
     float mean_doppler = 0.0f; // 평균 속도(m/s, 센서 시선 방향: 다가오면 -, 멀어지면 +)
     int num_points = 0;        // 덩어리에 속한 점 수
     Zone zone = Zone::NONE;    // 덩어리 점 중 가장 많은 zone(DOOR/CABIN/HALL, 같으면 DOOR > CABIN > HALL)
-    bool maybe_merged = false; // 여러 사람이 합쳐졌을 수 있음(1차는 항상 false, 봉우리 분할은 이후)
+    bool maybe_merged = false; // 여러 사람이 합쳐졌을 수 있음
+    // --- 추가 칸 (C 요청, 11/18). 기존 칸 순서는 그대로 두고 뒤에 붙임 ---
+    float doppler_std = 0.0f;  // 점 속도의 표준편차 (m/s). 정지 상태(IMMOBILE) 판단용
+    float power_sum = 0.0f;    // 점 power의 합 (선형 값). 정지 상태 판단용
+    float z_p10 = 0.0f;        // 점 높이 하위 10% (m). 낙상 높이 분포용
+    float z_p50 = 0.0f;        // 점 높이 중앙값 (m). 낙상 높이 분포용
 };
 
 // B → A: 프레임 하나의 처리 결과

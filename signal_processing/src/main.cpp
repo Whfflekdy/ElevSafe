@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
     // 두 파일 모두 std::fixed << std::setprecision(3)
     door_file << "frame_id,timestamp_us,state,hall_enabled\n";
     cl_file << "frame_id,timestamp_us,cluster_id,cx,cy,cz,x_min,x_max,y_min,y_max,"
-               "z_min,z_max,z_top,mean_doppler,num_points,zone,maybe_merged\n";
+                "z_min,z_max,z_top,mean_doppler,num_points,zone,maybe_merged,doppler_std,power_sum,z_p10,z_p50\n";
     door_file << std::fixed << std::setprecision(3);
     cl_file   << std::fixed << std::setprecision(3);   // m 기준 mm 까지. 정수 칸에는 영향 없음
 
@@ -103,7 +103,8 @@ int main(int argc, char** argv) {
                     << c.y_min << ',' << c.y_max << ','
                     << c.z_min << ',' << c.z_max << ','
                     << c.z_top << ',' << c.mean_doppler << ',' << c.num_points << ','
-                    << zoneToString(c.zone) << ',' << (c.maybe_merged ? 1 : 0) << '\n';
+                    << zoneToString(c.zone) << ',' << (c.maybe_merged ? 1 : 0) << ','
+                    << c.doppler_std << ',' << c.power_sum << ',' << c.z_p10 << ',' << c.z_p50 << '\n';
         }
 
     }
