@@ -187,6 +187,38 @@ void testRoiHall() {
     EXPECT(on.classify(edge) == Zone::DOOR);
 }
 
+// 문짝 상자 안에 도플러 d인 점 n개
+Frame doorLeafPoints(int n, float d) {
+    Frame f;
+    for (int i = 0; i < n; ++i) {
+        RadarPoint p;
+        p.x = 0.3f; p.y = 0.0f; p.z = 2.0f; p.doppler = d;
+        f.push_back(p);
+    }
+    return f;
+}
+
+void testDoorMotion() {
+    DoorStateConfig c;
+    c.view_zone = {-0.44f, 0.44f, -2.88f, -0.18f, 0.1f, 2.1f};
+    c.motion_enabled = true;
+    c.motion_zone = {-0.6f, 0.6f, -0.18f, 0.27f, 1.8f, 2.4f};
+    DoorStateEstimator d(c);
+
+    for (int i = 0; i < 20; ++i) d.update(doorLeafPoints(5, 0.14f));   // 잡음 (0.5초 50점)
+    EXPECT(d.state() == DoorState::UNKNOWN);                            // 근거 없음
+
+    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));  // 열리는 중 (0.5초 300점)
+    EXPECT(d.state() == DoorState::OPEN);
+    for (int i = 0; i < 20; ++i) d.update(Frame{});                    // 열린 채 멈춤, 승강장 비어 있음
+    EXPECT(d.state() == DoorState::OPEN);                               // 예전 방식이면 CLOSED가 됐을 상황
+
+    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f)); // 닫히는 중
+    EXPECT(d.state() == DoorState::OPEN);                               // 아직 덜 닫힘
+    for (int i = 0; i < 20; ++i) d.update(Frame{});                    // 다 닫힘
+    EXPECT(d.state() == DoorState::CLOSED);
+}
+
 void run(const char* name, void (*fn)()) {
     const int before = g_failed;
     fn();
@@ -206,5 +238,6 @@ int main() {
     run("문 상태: 히스테리시스", testDoorHysteresis);
     run("ROI: DOOR 우선", testRoiDoorWins);
     run("ROI: HALL 켜짐/꺼짐", testRoiHall);
+    run("문 상태: 문짝 움직임", testDoorMotion);
     return g_failed == 0 ? 0 : 1;
 }
