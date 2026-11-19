@@ -10,8 +10,13 @@ x-logging: &logging
 services:
   relay:
     build: ./relay
+    init: true
     environment:
       INGEST_KEY: ${INGEST_KEY:?deploy/.env에 INGEST_KEY를 넣어 주세요}
+      STALE_MS: ${STALE_MS:-3000}
+      MAX_MESSAGE_BYTES: ${MAX_MESSAGE_BYTES:-65536}
+      MAX_BUFFERED_BYTES: ${MAX_BUFFERED_BYTES:-131072}
+      HEARTBEAT_MS: ${HEARTBEAT_MS:-30000}
     restart: unless-stopped
     mem_limit: 256m
     cpus: 0.5
