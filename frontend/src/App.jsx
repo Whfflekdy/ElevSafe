@@ -26,7 +26,7 @@ const SCALE = 1.6;
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
  */
-const USE_REAL_WEBSOCKET = true;
+const USE_REAL_WEBSOCKET = false;
 // 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
 const RADAR_WS_URL = process.env.REACT_APP_WS_URL
   || (process.env.NODE_ENV === 'production'
@@ -63,8 +63,67 @@ const PLAN = (() => {
 
 // 도면, 구역 이름, 문 애니메이션을 담당합니다. children에는 승객 점이 들어갑니다.
 function FloorPlan({ doorState, children }) {
-  const animationTime = (doorState === 'OPEN' || doorState === 'OPENING') ? 2.68 : 2.35;
-  const inlineTransition = `transform ${animationTime}s ease-in-out`;
+  // 한쪽 문짝 최대 이동 거리 (출입구 전체 폭 88cm의 절반 = 44cm)
+  const HALF_DOOR_CM = CONFIG_CM.DOOR_WIDTH / 2;
+  const OPEN_SPEED = HALF_DOOR_CM / 2.68;   // 약 16.42 cm/s
+  const CLOSE_SPEED = HALF_DOOR_CM / 2.35;  // 약 18.72 cm/s
+
+  // 문 위치가 0cm(완전 닫힘) ~ 44cm(완전 열림) 범위를 벗어나지 않도록 제한
+  const clampCm = (cm) => Math.min(HALF_DOOR_CM, Math.max(0, cm));
+
+  const doorAnimRef = useRef({
+    startCm: 0,       // 상태 변경 시점의 문 열림 거리 (0 ~ 44cm)
+    targetCm: 0,      // 목표 문 열림 거리 (0 또는 44cm)
+    startTime: 0,     // 상태 변경 시각 (ms)
+    duration: 0,      // 목표까지 걸리는 시간 (s)
+    speed: 0,         // 이동 속도 (cm/s, +열림 / -닫힘 / 0정지)
+    lastState: 'UNKNOWN',
+  });
+
+  if (doorAnimRef.current.lastState !== doorState) {
+    const now = performance.now();
+    const prev = doorAnimRef.current;
+
+    // 1. 경과 시간 × 속도로 현재 문 위치(cm) 계산 후 [0, 44cm] 범위로 고정
+    const elapsedSec = (now - prev.startTime) / 1000;
+    const currentCm = prev.speed !== 0
+      ? clampCm(prev.startCm + prev.speed * elapsedSec)
+      : prev.targetCm;
+
+    // 2. 새 상태에 따른 목표 위치, 속도, 남은 이동 시간 계산
+    let targetCm = currentCm;
+    let speed = 0;
+    let duration = 0;
+
+    if (doorState === 'OPENING') {
+      targetCm = HALF_DOOR_CM;
+      const remainingCm = Math.max(0, HALF_DOOR_CM - currentCm);
+      speed = remainingCm > 0 ? OPEN_SPEED : 0;
+      duration = remainingCm / OPEN_SPEED;
+    } else if (doorState === 'CLOSING') {
+      targetCm = 0;
+      const remainingCm = Math.max(0, currentCm);
+      speed = remainingCm > 0 ? -CLOSE_SPEED : 0;
+      duration = remainingCm / CLOSE_SPEED;
+    } else if (doorState === 'OPEN') {
+      targetCm = HALF_DOOR_CM; // 덜 열렸어도 백엔드 OPEN 확정 시 즉시 동기화
+    } else {
+      // CLOSED 또는 UNKNOWN
+      targetCm = 0;            // 덜 닫혔어도 백엔드 CLOSED 확정 시 즉시 동기화
+    }
+
+    doorAnimRef.current = {
+      startCm: currentCm,
+      targetCm,
+      startTime: now,
+      duration,
+      speed,
+      lastState: doorState,
+    };
+  }
+
+  const inlineTransition = `transform ${doorAnimRef.current.duration.toFixed(3)}s linear`;
+  const isDoorOpen = doorState === 'OPEN' || doorState === 'OPENING';
 
   return (
     <div
@@ -94,7 +153,7 @@ function FloorPlan({ doorState, children }) {
 
       {/* 실제 문 영역: 문 상태에 따라 양쪽 문짝을 수축/복원합니다. */}
       <div
-        className={`plan-door-frame ${doorState === 'OPEN' || doorState === 'OPENING' ? 'is-open' : ''}`}
+        className={`plan-door-frame ${isDoorOpen ? 'is-open' : ''}`}
         style={{
           left: (MAX_WIDTH - CONFIG_CM.DOOR_WIDTH) * SCALE / 2,
           top: CONFIG_CM.ELEV_DEPTH * SCALE,
