@@ -219,6 +219,21 @@ void testDoorMotion() {
     EXPECT(d.state() == DoorState::CLOSED);
 }
 
+void testDoorMotionReopen() {
+    DoorStateConfig c;
+    c.view_zone = {-0.44f, 0.44f, -2.88f, -0.18f, 0.1f, 2.1f};
+    c.motion_enabled = true;
+    c.motion_zone = {-0.6f, 0.6f, -0.18f, 0.27f, 1.8f, 2.4f};
+    DoorStateEstimator d(c);
+
+    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));   // 열림
+    for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
+    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f));  // 닫히는 중
+    for (int i = 0; i < 6; ++i)  d.update(doorLeafPoints(30, 0.15f));   // 멈추지 않고 바로 다시 열림
+    for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
+    EXPECT(d.state() == DoorState::OPEN);   // 누적 합이었다면 −45+27 = −18 → CLOSED로 틀림
+}
+
 void run(const char* name, void (*fn)()) {
     const int before = g_failed;
     fn();
@@ -239,5 +254,6 @@ int main() {
     run("ROI: DOOR 우선", testRoiDoorWins);
     run("ROI: HALL 켜짐/꺼짐", testRoiHall);
     run("문 상태: 문짝 움직임", testDoorMotion);
+    run("문 상태: 닫히다가 다시 열림", testDoorMotionReopen);
     return g_failed == 0 ? 0 : 1;
 }

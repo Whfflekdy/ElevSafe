@@ -32,6 +32,8 @@ struct DoorStateConfig {
     float motion_min_doppler = 0.05f; // 이보다 느린 점은 안 셈 [m/s]
     float motion_on = 100.0f;         // window 합이 이 이상이면 문 움직임 시작 (4차: 문 250~480, 사람 75 이하)
     float motion_off = 30.0f;         // window 합이 이 이하로 떨어지면 움직임 끝
+    float motion_reverse_speed = 0.10f; // 움직이는 도중 평균 속도가 이 이상으로 반대 방향이면 방향이 바뀐 것으로 봄 [m/s]
+                                        // 닫힘 끝의 약한 튕김(평균 0.07 이하)은 무시 (1차 S0-3)
 
     static DoorStateConfig fromConfig(const Config& cfg);
     bool isValid() const {
@@ -71,7 +73,8 @@ private:
     std::size_t motion_sum_ = 0;
     bool moving_ = false;        // 지금 문이 움직이는 중
     bool motion_seen_ = false;   // 한 번이라도 움직임을 봤는지 (본 뒤로는 (1)을 안 씀)
-    double event_dsum_ = 0.0;    // 이번 움직임 동안 쌓인 도플러 합 (부호로 열림/닫힘)
+    double event_dsum_ = 0.0;    // 이번 움직임 동안 쌓인 도플러 합 (부호로 열림/닫힘).
+                                 // 도중에 반대 방향 강한 움직임이 오면 그때부터 새로 쌓음 (닫히다가 다시 열림) // A 리뷰 반영
 };
 
 }  // namespace elevsafe::sp

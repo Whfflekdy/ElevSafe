@@ -40,6 +40,7 @@ DoorStateConfig DoorStateConfig::fromConfig(const Config& cfg) {
     c.motion_min_doppler = cfg.getFloat("door_state.motion.min_doppler", 0.05f);
     c.motion_on  = cfg.getFloat("door_state.motion.on",  100.0f);
     c.motion_off = cfg.getFloat("door_state.motion.off",  30.0f);
+    c.motion_reverse_speed = cfg.getFloat("door_state.motion.reverse_speed", 0.10f);
     return c;
 }
 
@@ -84,7 +85,8 @@ void DoorStateEstimator::updateMotion(const Frame& points) {
     for (const auto& [c, d] : motion_) { msum += c; wdsum += d; }
     motion_sum_ = msum;
 
-    // 3. 움직임 시작: 합이 on 이상. 열리는 중(+)이면 바로 OPEN
+    // 3. 움직임 시작: 합이 on 이상.
+    //    움직이는 동안은 OPEN, 움직임이 끝나면 쌓인 도플러 합이 −면 CLOSED.
     if (!moving_) {
         if (static_cast<float>(msum) >= config_.motion_on) {
             moving_ = true;
@@ -97,9 +99,18 @@ void DoorStateEstimator::updateMotion(const Frame& points) {
 
     // 4. 움직이는 중: 도플러를 계속 쌓다가, 합이 off 이하로 떨어지면 끝
     event_dsum_ += dsum;
+
+    //    방향 바뀜: 강한 움직임이 평균 reverse_speed 이상으로 지금까지와 반대 방향이면 그때부터 새로 쌓음.
+    //    닫히다가 장애물로 다시 열리는 경우 OPEN으로 끝나게 함 (A 리뷰, PR #45).
+    //    닫힘 끝의 약한 + 꼬리(평균 0.07 이하)는 여기에 안 걸림 (1차 S0-3)
+    if (static_cast<float>(msum) >= config_.motion_on) {
+        const double mean = wdsum / static_cast<double>(msum);
+        if (std::fabs(mean) >= config_.motion_reverse_speed && (mean > 0.0) != (event_dsum_ > 0.0))
+            event_dsum_ = wdsum;
+    }
+
     if (static_cast<float>(msum) <= config_.motion_off) {
         moving_ = false;
-        // 닫히는 동안(−)은 문이 아직 열려 있으니, 다 닫힌 뒤에야 CLOSED
         state_ = (event_dsum_ < 0.0) ? DoorState::CLOSED : DoorState::OPEN;
     }
 }
