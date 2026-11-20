@@ -198,6 +198,10 @@ function App() {
   const isDataLostRef = useRef(false);
   const [isDataLost, setIsDataLost] = useState(false);
   const monitorStartRef = useRef(Date.now());
+  const lastTimestampUsRef = useRef(null);
+  const lastTimestampUsChangedAtRef = useRef(null);
+  const isRadarStaleRef = useRef(false);
+  const [isRadarStale, setIsRadarStale] = useState(false);
 
   // 10Hz 데이터 수신 시 로그 폭발 방지를 위해 최대 50개 유지
   const log = message => setSystemLogs(prev => {
@@ -215,6 +219,20 @@ function App() {
 
     if (typeof data.timestamp_us === 'number') {
       setTimestampUs(data.timestamp_us);
+
+      const now = Date.now();
+      if (lastTimestampUsRef.current === null || data.timestamp_us > lastTimestampUsRef.current) {
+        lastTimestampUsRef.current = data.timestamp_us;
+        lastTimestampUsChangedAtRef.current = now;
+
+        if (isRadarStaleRef.current) {
+          isRadarStaleRef.current = false;
+          setIsRadarStale(false);
+          log(`[${new Date().toLocaleTimeString()}] ✅ 레이더(timestamp_us) 갱신 재개`);
+        }
+      } else if (lastTimestampUsChangedAtRef.current === null) {
+        lastTimestampUsChangedAtRef.current = now;
+      }
     }
 
     if (['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
@@ -240,6 +258,19 @@ function App() {
 
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
         throw new Error('JSON 객체가 필요합니다.');
+      }
+
+      // 필수 Snapshot 필드 검증: passengers(배열), door_state(유효 상태), door_command(유효 명령 또는 null)
+      const validDoorStates = ['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'];
+      const validDoorCommands = [null, 'OPEN', 'HOLD', 'CLOSE'];
+
+      if (
+        !Array.isArray(data.passengers) ||
+        !validDoorStates.includes(data.door_state) ||
+        !('door_command' in data) ||
+        !validDoorCommands.includes(data.door_command)
+      ) {
+        throw new Error('필수 Snapshot 필드가 누락되었거나 형식이 올바르지 않습니다.');
       }
 
       lastReceivedAtRef.current = Date.now();
@@ -276,6 +307,10 @@ function App() {
         reconnectDelay.current = 1000; // 성공 시 딜레이 초기화 추가
         lastReceivedAtRef.current = null;
         monitorStartRef.current = Date.now();
+        lastTimestampUsRef.current = null;
+        lastTimestampUsChangedAtRef.current = null;
+        isRadarStaleRef.current = false;
+        setIsRadarStale(false);
       };
       ws.onmessage = event => receiveMessage(event.data);
       
@@ -390,6 +425,23 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (!USE_REAL_WEBSOCKET) return;
+
+    const interval = setInterval(() => {
+      if (isDataLostRef.current) return;
+
+      const refTime = lastTimestampUsChangedAtRef.current ?? monitorStartRef.current;
+      if (Date.now() - refTime >= 3000 && !isRadarStaleRef.current) {
+        isRadarStaleRef.current = true;
+        setIsRadarStale(true);
+        log(`[${new Date().toLocaleTimeString()}] ⚠️ 레이더 데이터 오래됨 (3초간 timestamp_us 미증가)`);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, []);
+
   const getTheme = (safetyState) => {
     if (safetyState === 'FALL' || safetyState === 'IMMOBILE') return 'danger';
     return 'normal';
@@ -470,6 +522,7 @@ function App() {
           <span>Range: 12m(Person) / 7m×7m</span> | <span>FoV: 90°(±45°)</span> | <span>Rate: 50ms</span>
           {/* 개발자 데이터 갱신 확인용 필요없음 지움*/}
           {timestampUs !== null && <span> | Time: {timestampUs}µs</span>}
+          {isRadarStale && <span> | ⚠️ 레이더 데이터 오래됨</span>}
         </div>
       </header>
 
