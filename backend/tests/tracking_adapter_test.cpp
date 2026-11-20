@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace
@@ -25,6 +26,7 @@ int main(int argc, char** argv)
         c.cluster_id = 37; c.cx = .25f; c.cy = -.5f; c.cz = 1.25f;
         c.x_min = 0; c.x_max = .5f; c.y_min = -1; c.y_max = 0;
         c.z_min = .25f; c.z_max = 2.25f; c.num_points = 40; c.mean_doppler = .5f;
+        c.power_sum = 100.0f;
         auto small = c; small.num_points = 39;
         b.clusters = {small, c};
         const auto fd = elevsafe::toTrackingDetections(b);
@@ -35,7 +37,52 @@ int main(int argc, char** argv)
             "centroid or cluster mapping");
         expect(d.sx == .5 && d.sy == 1 && d.sz == 2 && d.zmin == .25 && d.zmax == 2.25,
             "extent mapping");
-        expect(d.n_points == 40 && d.mean_doppler == .5 && d.mean_power == 0, "metadata mapping");
+        expect(d.n_points == 40 && d.mean_doppler == .5 && d.mean_power == 2.5, "metadata mapping");
+
+        struct PowerCase
+        {
+            int clusterId;
+            int pointCount;
+            float sum;
+            double mean;
+        };
+        const auto nan = std::numeric_limits<float>::quiet_NaN();
+        const auto inf = std::numeric_limits<float>::infinity();
+        const PowerCase powerCases[] = {
+            {80, 40, nan, 0.0},
+            {17, 40, 101.0f, 2.525},
+            {41, 40, 0.0f, 0.0},
+            {12, 50, -125.0f, -2.5},
+            { 7, 40, inf, 0.0},
+            {63, 40, -inf, 0.0},
+        };
+        b.clusters.clear();
+        for (const auto& sample : powerCases)
+        {
+            auto cluster = c;
+            cluster.cluster_id = sample.clusterId;
+            cluster.num_points = sample.pointCount;
+            cluster.power_sum = sample.sum;
+            b.clusters.push_back(cluster);
+        }
+        const auto mixed = elevsafe::toTrackingDetections(b);
+        expect(mixed.detections.size() == b.clusters.size(), "invalid power dropped a detection");
+        for (std::size_t i = 0; i < mixed.detections.size(); ++i)
+        {
+            const auto& actual = mixed.detections[i];
+            const auto& expected = powerCases[i];
+            expect(actual.cluster == expected.clusterId && actual.n_points == expected.pointCount,
+                "power mapping changed detection order or point count");
+            expect(std::abs(actual.mean_power - expected.mean) < 1e-12, "incorrect or non-finite mean power");
+            expect(actual.cx == d.cx && actual.cy == d.cy && actual.cz == d.cz
+                && actual.sx == d.sx && actual.sy == d.sy && actual.sz == d.sz
+                && actual.zmin == d.zmin && actual.zmax == d.zmax && actual.mean_doppler == d.mean_doppler,
+                "power mapping changed geometry or Doppler");
+        }
+        b.clusters.clear();
+        const auto emptyDetections = elevsafe::toTrackingDetections(b);
+        expect(emptyDetections.detections.empty() && emptyDetections.frame == b.frame_id
+            && emptyDetections.timestamp_us == b.timestamp_us, "empty frame or metadata changed");
         b.clusters = {c};
         Demo demo;
         auto first = demo.process(b, zero, utc);
@@ -87,6 +134,10 @@ int main(int argc, char** argv)
             }
             auto result = signal.process(elevsafe::toSignalFrame(frame), {});
             expect(result.clusters.size() == 1 && result.clusters[0].num_points == 40, "B fixture cluster");
+            expect(result.clusters[0].power_sum == 400.0f, "B fixture power sum");
+            const auto fromB = elevsafe::toTrackingDetections(result);
+            expect(fromB.detections.size() == 1 && fromB.detections.front().mean_power == 10.0,
+                "B power sum did not reach C detection as a mean");
             auto snapshot = realB.process(result, zero + i * 100ms, utc);
             if (i == 2) expect(Json::parse(*snapshot)["passengers"].size() == 1, "A-B-C path failed");
         }

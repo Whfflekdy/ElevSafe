@@ -2,6 +2,7 @@
 #include "elevsafe/websocket_message.h"
 
 #include <nlohmann/json.hpp>
+#include <cmath>
 #include <ctime>
 #include <stdexcept>
 
@@ -26,7 +27,10 @@ namespace elevsafe
             detection.zmin = cluster.z_min; detection.zmax = cluster.z_max;
             detection.n_points = cluster.num_points;
             detection.mean_doppler = cluster.mean_doppler;
-            detection.mean_power = 0; // Unavailable in B, NOT a measured zero. C currently ignores it.
+            // Preserve the detection when its power measurement is unavailable.
+            detection.mean_power = std::isfinite(cluster.power_sum)
+                ? static_cast<double>(cluster.power_sum) / cluster.num_points
+                : 0.0;
             frame.detections.push_back(detection);
         }
         return frame;
