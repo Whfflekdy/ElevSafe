@@ -35,6 +35,14 @@ namespace elevsafe
     std::string trackingSnapshot(const sp::PipelineResult& result,
         const std::vector<TrackOutput>& tracks, std::chrono::system_clock::time_point publishedAt)
     {
+        return trackingSnapshot(result.timestamp_us, tracks, publishedAt,
+            sp::doorStateToString(result.estimated_door_state), std::nullopt);
+    }
+
+    std::string trackingSnapshot(std::int64_t timestampUs, const std::vector<TrackOutput>& tracks,
+        std::chrono::system_clock::time_point publishedAt, std::string_view doorState,
+        std::optional<std::string_view> doorCommand)
+    {
         const auto seconds = std::chrono::system_clock::to_time_t(publishedAt);
         std::tm utc{};
 #ifdef _WIN32
@@ -53,8 +61,8 @@ namespace elevsafe
                 {"state", track.y < 0 ? "OUTSIDE" : "INSIDE"}, {"safety_state", nullptr}});
         }
         const auto text = nlohmann::json({{"timestamp", timestamp},
-            {"timestamp_us", result.timestamp_us}, {"door_state", sp::doorStateToString(result.estimated_door_state)},
-            {"door_command", nullptr}, {"passengers", passengers}}).dump();
+            {"timestamp_us", timestampUs}, {"door_state", doorState},
+            {"door_command", doorCommand ? nlohmann::json(*doorCommand) : nlohmann::json(nullptr)}, {"passengers", passengers}}).dump();
         if (!isSnapshot(text)) throw std::runtime_error("invalid tracking snapshot");
         return text;
     }
@@ -62,11 +70,17 @@ namespace elevsafe
     std::optional<std::string> TrackingDemo::process(const sp::PipelineResult& result,
         Clock::time_point now, std::chrono::system_clock::time_point publishedAt)
     {
-        const auto tracks = engine_.processDetections(toTrackingDetections(result), true);
-        ++processedFrames_;
+        const auto tracks = observe(result);
         if (lastPublish_ && now - *lastPublish_ < publishPeriod) return std::nullopt;
         const auto snapshot = trackingSnapshot(result, tracks, publishedAt);
         lastPublish_ = now;
         return snapshot; // No timer emits old data when Radar input stops.
+    }
+
+    std::vector<TrackOutput> TrackingDemo::observe(const sp::PipelineResult& result)
+    {
+        auto tracks = engine_.processDetections(toTrackingDetections(result), true);
+        ++processedFrames_;
+        return tracks;
     }
 }

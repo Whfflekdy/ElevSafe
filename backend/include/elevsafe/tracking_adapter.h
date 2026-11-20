@@ -6,6 +6,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace elevsafe
 {
@@ -13,6 +14,10 @@ namespace elevsafe
     FrameDetections toTrackingDetections(const sp::PipelineResult& result);
     std::string trackingSnapshot(const sp::PipelineResult& result,
         const std::vector<TrackOutput>& tracks, std::chrono::system_clock::time_point publishedAt);
+
+    std::string trackingSnapshot(std::int64_t timestampUs, const std::vector<TrackOutput>& tracks,
+        std::chrono::system_clock::time_point publishedAt, std::string_view doorState,
+        std::optional<std::string_view> doorCommand);
 
     // One instance per Radar TCP session. Feed EVERY B result, including empty frames.
     class TrackingDemo
@@ -22,6 +27,7 @@ namespace elevsafe
         static constexpr auto publishPeriod = std::chrono::milliseconds(100);
         std::optional<std::string> process(const sp::PipelineResult& result,
             Clock::time_point now, std::chrono::system_clock::time_point publishedAt);
+        std::vector<TrackOutput> observe(const sp::PipelineResult& result);
         std::size_t processedFrames() const { return processedFrames_; }
     private:
         TrackingEngine engine_;
