@@ -63,8 +63,67 @@ const PLAN = (() => {
 
 // 도면, 구역 이름, 문 애니메이션을 담당합니다. children에는 승객 점이 들어갑니다.
 function FloorPlan({ doorState, children }) {
-  const animationTime = (doorState === 'OPEN' || doorState === 'OPENING') ? 2.68 : 2.35;
-  const inlineTransition = `transform ${animationTime}s ease-in-out`;
+  // 한쪽 문짝 최대 이동 거리 (출입구 전체 폭 88cm의 절반 = 44cm)
+  const HALF_DOOR_CM = CONFIG_CM.DOOR_WIDTH / 2;
+  const OPEN_SPEED = HALF_DOOR_CM / 2.68;   // 약 16.42 cm/s
+  const CLOSE_SPEED = HALF_DOOR_CM / 2.35;  // 약 18.72 cm/s
+
+  // 문 위치가 0cm(완전 닫힘) ~ 44cm(완전 열림) 범위를 벗어나지 않도록 제한
+  const clampCm = (cm) => Math.min(HALF_DOOR_CM, Math.max(0, cm));
+
+  const doorAnimRef = useRef({
+    startCm: 0,       // 상태 변경 시점의 문 열림 거리 (0 ~ 44cm)
+    targetCm: 0,      // 목표 문 열림 거리 (0 또는 44cm)
+    startTime: 0,     // 상태 변경 시각 (ms)
+    duration: 0,      // 목표까지 걸리는 시간 (s)
+    speed: 0,         // 이동 속도 (cm/s, +열림 / -닫힘 / 0정지)
+    lastState: 'UNKNOWN',
+  });
+
+  if (doorAnimRef.current.lastState !== doorState) {
+    const now = performance.now();
+    const prev = doorAnimRef.current;
+
+    // 1. 경과 시간 × 속도로 현재 문 위치(cm) 계산 후 [0, 44cm] 범위로 고정
+    const elapsedSec = (now - prev.startTime) / 1000;
+    const currentCm = prev.speed !== 0
+      ? clampCm(prev.startCm + prev.speed * elapsedSec)
+      : prev.targetCm;
+
+    // 2. 새 상태에 따른 목표 위치, 속도, 남은 이동 시간 계산
+    let targetCm = currentCm;
+    let speed = 0;
+    let duration = 0;
+
+    if (doorState === 'OPENING') {
+      targetCm = HALF_DOOR_CM;
+      const remainingCm = Math.max(0, HALF_DOOR_CM - currentCm);
+      speed = remainingCm > 0 ? OPEN_SPEED : 0;
+      duration = remainingCm / OPEN_SPEED;
+    } else if (doorState === 'CLOSING') {
+      targetCm = 0;
+      const remainingCm = Math.max(0, currentCm);
+      speed = remainingCm > 0 ? -CLOSE_SPEED : 0;
+      duration = remainingCm / CLOSE_SPEED;
+    } else if (doorState === 'OPEN') {
+      targetCm = HALF_DOOR_CM; // 덜 열렸어도 백엔드 OPEN 확정 시 즉시 동기화
+    } else {
+      // CLOSED 또는 UNKNOWN
+      targetCm = 0;            // 덜 닫혔어도 백엔드 CLOSED 확정 시 즉시 동기화
+    }
+
+    doorAnimRef.current = {
+      startCm: currentCm,
+      targetCm,
+      startTime: now,
+      duration,
+      speed,
+      lastState: doorState,
+    };
+  }
+
+  const inlineTransition = `transform ${doorAnimRef.current.duration.toFixed(3)}s linear`;
+  const isDoorOpen = doorState === 'OPEN' || doorState === 'OPENING';
 
   return (
     <div
@@ -94,7 +153,7 @@ function FloorPlan({ doorState, children }) {
 
       {/* 실제 문 영역: 문 상태에 따라 양쪽 문짝을 수축/복원합니다. */}
       <div
-        className={`plan-door-frame ${doorState === 'OPEN' || doorState === 'OPENING' ? 'is-open' : ''}`}
+        className={`plan-door-frame ${isDoorOpen ? 'is-open' : ''}`}
         style={{
           left: (MAX_WIDTH - CONFIG_CM.DOOR_WIDTH) * SCALE / 2,
           top: CONFIG_CM.ELEV_DEPTH * SCALE,
@@ -129,12 +188,20 @@ function App() {
   ]);
   const wsRef = useRef(null);
   const doorTimerRef = useRef(null);
-  const autoRevertTimerRef = useRef(null); // 수동명령 후 자동 복귀용
-
+  
   // 10Hz 수신 렌더링 최적화 및 재접속 딜레이용 (새로 추가)
   const animationFrameId = useRef(null);
   const latestDataRef = useRef(null);
   const reconnectDelay = useRef(1000); // 시작 딜레이 1초
+
+  const lastReceivedAtRef = useRef(null);
+  const isDataLostRef = useRef(false);
+  const [isDataLost, setIsDataLost] = useState(false);
+  const monitorStartRef = useRef(Date.now());
+  const lastTimestampUsRef = useRef(null);
+  const lastTimestampUsChangedAtRef = useRef(null);
+  const isRadarStaleRef = useRef(false);
+  const [isRadarStale, setIsRadarStale] = useState(false);
 
   // 10Hz 데이터 수신 시 로그 폭발 방지를 위해 최대 50개 유지
   const log = message => setSystemLogs(prev => {
@@ -152,6 +219,20 @@ function App() {
 
     if (typeof data.timestamp_us === 'number') {
       setTimestampUs(data.timestamp_us);
+
+      const now = Date.now();
+      if (lastTimestampUsRef.current === null || data.timestamp_us > lastTimestampUsRef.current) {
+        lastTimestampUsRef.current = data.timestamp_us;
+        lastTimestampUsChangedAtRef.current = now;
+
+        if (isRadarStaleRef.current) {
+          isRadarStaleRef.current = false;
+          setIsRadarStale(false);
+          log(`[${new Date().toLocaleTimeString()}] ✅ 레이더(timestamp_us) 갱신 재개`);
+        }
+      } else if (lastTimestampUsChangedAtRef.current === null) {
+        lastTimestampUsChangedAtRef.current = now;
+      }
     }
 
     if (['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'].includes(data.door_state)) {
@@ -179,6 +260,26 @@ function App() {
         throw new Error('JSON 객체가 필요합니다.');
       }
 
+      // 필수 Snapshot 필드 검증: passengers(배열), door_state(유효 상태), door_command(유효 명령 또는 null)
+      const validDoorStates = ['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'];
+      const validDoorCommands = [null, 'OPEN', 'HOLD', 'CLOSE'];
+
+      if (
+        !Array.isArray(data.passengers) ||
+        !validDoorStates.includes(data.door_state) ||
+        !('door_command' in data) ||
+        !validDoorCommands.includes(data.door_command)
+      ) {
+        throw new Error('필수 Snapshot 필드가 누락되었거나 형식이 올바르지 않습니다.');
+      }
+
+      lastReceivedAtRef.current = Date.now();
+      if (isDataLostRef.current) {
+        isDataLostRef.current = false;
+        setIsDataLost(false);
+        log(`[${new Date().toLocaleTimeString()}] ✅ 유효 데이터 수신 재개`);
+      }
+
       latestDataRef.current = data;
 
       // 만약 다음 프레임 예약이 안 되어 있다면 예약
@@ -187,6 +288,7 @@ function App() {
       }
     } catch (error) {
       console.error('수신 데이터 처리 오류:', error);
+      log(`[${new Date().toLocaleTimeString()}] ⚠️ 잘못된 데이터 수신 (무시됨)`);
     }
   };
 
@@ -203,6 +305,12 @@ function App() {
       ws.onopen = () => {
         log('[WebSocket] 서버 연결 완료 (10Hz 데이터 수신 준비)');
         reconnectDelay.current = 1000; // 성공 시 딜레이 초기화 추가
+        lastReceivedAtRef.current = null;
+        monitorStartRef.current = Date.now();
+        lastTimestampUsRef.current = null;
+        lastTimestampUsChangedAtRef.current = null;
+        isRadarStaleRef.current = false;
+        setIsRadarStale(false);
       };
       ws.onmessage = event => receiveMessage(event.data);
       
@@ -217,8 +325,8 @@ function App() {
           log(`[WebSocket] 연결 종료. ${delay / 1000}초 뒤 재접속 시도...`);
           
           reconnectTimeout = setTimeout(connectWebSocket, delay);
-          // 다음 번 실패 시 대기 시간 2배로 증가 (최대 30초까지만)
-          reconnectDelay.current = Math.min(delay * 2, 30000); 
+          // 다음 번 실패 시 대기 시간 2배로 증가 (최대 10초까지만)
+          reconnectDelay.current = Math.min(delay * 2, 10000); 
         }
       };
     };
@@ -295,7 +403,43 @@ function App() {
 
   useEffect(() => () => {
     clearTimeout(doorTimerRef.current);
-    clearTimeout(autoRevertTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!USE_REAL_WEBSOCKET) return;
+
+    const interval = setInterval(() => {
+      const referenceTime = lastReceivedAtRef.current ?? monitorStartRef.current;
+      const elapsed = Date.now() - referenceTime;
+
+      if (elapsed >= 3000 && !isDataLostRef.current) {
+        isDataLostRef.current = true;
+        setIsDataLost(true);
+        const reason = lastReceivedAtRef.current === null
+          ? '초기 데이터 미수신 (3초 경과)'
+          : '3초간 수신 없음';
+        log(`[${new Date().toLocaleTimeString()}] ⚠️ 데이터 끊김 (${reason})`);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!USE_REAL_WEBSOCKET) return;
+
+    const interval = setInterval(() => {
+      if (isDataLostRef.current) return;
+
+      const refTime = lastTimestampUsChangedAtRef.current ?? monitorStartRef.current;
+      if (Date.now() - refTime >= 3000 && !isRadarStaleRef.current) {
+        isRadarStaleRef.current = true;
+        setIsRadarStale(true);
+        log(`[${new Date().toLocaleTimeString()}] ⚠️ 레이더 데이터 오래됨 (3초간 timestamp_us 미증가)`);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
   }, []);
 
   const getTheme = (safetyState) => {
@@ -329,18 +473,6 @@ function App() {
   const handleDoorCommand = command => {
     const timeStr = new Date().toLocaleTimeString();
 
-    // 수동 명령 후 도어 완료 시간에 맞춰 자동 복귀 (OPEN: 2680ms, CLOSE: 2350ms)
-    const autoRevertTime = command === 'OPEN' ? 2680 : (command === 'CLOSE' ? 2350 : null);
-    
-    const sendRevertCommand = () => {
-      if (USE_REAL_WEBSOCKET && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ door_command: null }));
-      } else {
-        setDoorCommand(null); // 테스트용
-      }
-      log(`[${new Date().toLocaleTimeString()}] 수동 동작 완료 ➔ 자동 제어(null) 복귀`);
-    };
-
     if (USE_REAL_WEBSOCKET) {
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -350,13 +482,7 @@ function App() {
       try {
         ws.send(JSON.stringify({ door_command: command }));
         setDoorCommand(command);
-        log(`[${timeStr}] 📤명령 송신: ${command}`);
-
-      // 자동 복귀 타이머 설정
-        clearTimeout(autoRevertTimerRef.current);
-        if (autoRevertTime) {
-          autoRevertTimerRef.current = setTimeout(sendRevertCommand, autoRevertTime);
-        }
+        log(`[${timeStr}] 📤 명령 송신: ${command}`);
       } catch (error) {
         console.error('명령 전송 오류:', error);
         log(`[${timeStr}] 명령 전송 실패`);
@@ -366,11 +492,9 @@ function App() {
 
     // [테스트 전용]
     clearTimeout(doorTimerRef.current);
-    clearTimeout(autoRevertTimerRef.current);
-    
     setDoorCommand(command);
     log(`[${timeStr}] 테스트 명령: ${command}`);
-    
+
     if (command === 'HOLD') {
       setDoorState('OPEN');
     } else {
@@ -380,7 +504,6 @@ function App() {
       const testDuration = opening ? 2680 : 2350;
       doorTimerRef.current = setTimeout(() => {
         setDoorState(opening ? 'OPEN' : 'CLOSED');
-        sendRevertCommand(); // 테스트 환경에서도 자동 복귀
       }, testDuration);
     }
   };
@@ -399,6 +522,7 @@ function App() {
           <span>Range: 12m(Person) / 7m×7m</span> | <span>FoV: 90°(±45°)</span> | <span>Rate: 50ms</span>
           {/* 개발자 데이터 갱신 확인용 필요없음 지움*/}
           {timestampUs !== null && <span> | Time: {timestampUs}µs</span>}
+          {isRadarStale && <span> | ⚠️ 레이더 데이터 오래됨</span>}
         </div>
       </header>
 
@@ -454,10 +578,12 @@ function App() {
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
-            {/* doorState가 UNKNOWN일 때만 표시되는 오버레이 추가 */}
-            {doorState === 'UNKNOWN' && (
+            {/* 데이터 끊김이거나 doorState가 UNKNOWN일 때 오버레이 표시 */}
+            {(isDataLost || doorState === 'UNKNOWN') && (
               <div className="unknown-overlay">
-                <span className="unknown-text">확인 중...</span>
+                <span className="unknown-text">
+                  {isDataLost ? '데이터 끊김' : '확인 중...'}
+                </span>
               </div>
             )}
 
