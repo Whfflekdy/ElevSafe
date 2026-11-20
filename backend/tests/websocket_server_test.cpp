@@ -12,6 +12,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -46,7 +47,13 @@ namespace
             {
                 std::lock_guard lock(mutex);
                 text.append(data, static_cast<std::size_t>(size));
-                if (diagnostics) std::osyncstream(std::cerr).write(data, size);
+                if (diagnostics)
+                {
+                    // The caller may already be emitting a syncstream. libstdc++
+                    // can assign the same mutex to two different stream buffers.
+                    std::fwrite(data, 1, static_cast<std::size_t>(size), stderr);
+                    std::fflush(stderr);
+                }
                 return size;
             }
             int_type overflow(int_type character) override
