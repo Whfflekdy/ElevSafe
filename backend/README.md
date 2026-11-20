@@ -1473,7 +1473,9 @@ Radar 모드의 `--signal-config PATH --websocket` 조합에서만 활성화하�
 매 프레임 `RadarFrame → toSignalFrame → SignalPipeline::process → toTrackingDetections →
 TrackingEngine::processDetections`로 처리합니다. `processPoints()`나 두 번째 DBSCAN은 호출하지 않습니다.
 Adapter의 `num_points >= 40`은 시연 전용입니다. 중심·bbox·z 범위·점 수·Doppler를 옮기고,
-B에 없는 `mean_power=0`은 미측정 기본값입니다. 현재 C의 매칭/필터는 이 필드를 사용하지 않습니다.
+평균 power는 B의 `power_sum / num_points`를 `mean_power`로 전달합니다. 비유한 합계는
+Detection을 유지하고 평균만 0으로 대체하므로, 이 값으로 실제 평균 0과 미측정을 구분할 수 없습니다.
+현재 C의 매칭/필터는 이 필드를 사용하지 않습니다.
 빈 클러스터도 C에 전달합니다. C 객체는 TCP 세션 동안 유지하고 재연결 시 새로 생성합니다.
 
 Snapshot은 v7의 기존 5개 필드를 사용합니다. `timestamp`는 발행 시점 UTC ISO 문자열,
