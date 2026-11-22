@@ -45,6 +45,7 @@ namespace elevsafe
         bool notificationPending = false;
         std::mutex commandMutex;
         std::deque<ManualDoorRequest> commands;
+        bool manualCommandsEnabled = true; // Protected by commandMutex.
         std::atomic<std::size_t> connected{0}, accepted{0}, sent{0}, ingressDrops{0}, sessionDrops{0};
         std::atomic<std::size_t> received{0}, rejected{0}, queueFull{0};
         std::atomic<std::size_t> disconnected{0}, writeTimeouts{0}, discarded{0};
@@ -187,10 +188,12 @@ namespace elevsafe
                 else
                 {
                     bool full = false;
+                    bool enabled;
                     {
                         std::lock_guard lock(self->owner.commandMutex);
-                        full = self->owner.commands.size() >= self->owner.config.maxCommands;
-                        if (!full) self->owner.commands.push_back({self->id, *command});
+                        enabled = self->owner.manualCommandsEnabled;
+                        full = enabled && self->owner.commands.size() >= self->owner.config.maxCommands;
+                        if (enabled && !full) self->owner.commands.push_back({self->id, *command});
                     }
                     if (full)
                     {
@@ -198,9 +201,17 @@ namespace elevsafe
                         self->owner.writeLog("command queue full; disconnecting client=" + std::to_string(self->id));
                         return self->finish("command queue full");
                     }
-                    ++self->owner.received;
-                    self->owner.writeLog("manual request received client=" + std::to_string(self->id)
-                        + " command=" + *command + " (not executed; no ACK)");
+                    if (enabled)
+                    {
+                        ++self->owner.received;
+                        self->owner.writeLog("manual request received client=" + std::to_string(self->id)
+                            + " command=" + *command + " (not executed; no ACK)");
+                    }
+                    else
+                    {
+                        ++self->owner.rejected;
+                        self->owner.writeLog("manual request ignored: no active command window");
+                    }
                 }
                 self->read();
             });
@@ -501,6 +512,13 @@ namespace elevsafe
             net::post(state.io, [&state] { state.deliver(); });
         }
         return true;
+    }
+
+    void WebSocketServer::setManualCommandsEnabled(bool enabled)
+    {
+        std::lock_guard lock(m_impl->commandMutex);
+        m_impl->manualCommandsEnabled = enabled;
+        if (!enabled) m_impl->commands.clear();
     }
 
     std::optional<ManualDoorRequest> WebSocketServer::popCommand()

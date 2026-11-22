@@ -1514,6 +1514,32 @@ cmake -S backend -B backend/build/demo-backend -A x64 -DEigen3_DIR=<동일-Eigen
 기존 C 테스트도 등록합니다. `tracking/S0-1_t01.csv`가 없으면 `detection_loader_test`는 실패하며,
 이를 제외한 결과를 전체 PASS로 표시하면 안 됩니다. 기존 Winsock 10014도 별도 실패로 보존합니다.
 
+### Emulator 재생에서 로컬 가상 문 제어
+
+Emulator를 시작한 뒤, 저장소 루트에서 Windows Release Backend를 실행합니다.
+
+```powershell
+& .\backend\build\emulator-door-release\backend\Release\elevsafe_backend.exe 127.0.0.1 29172 --signal-config .\signal_processing\config\elevator_2nd.cfg --websocket --emulator-door-sim
+```
+
+위 EXE 경로는 해당 출력 폴더에 빌드했을 때의 예시입니다. 옵션은 숫자 Radar IP와
+`--signal-config`, `--websocket`을 요구하며 WebSocket은 `127.0.0.1` 또는 `::1`에만
+바인딩할 수 있습니다. Mock 및 benchmark와 함께 사용할 수 없습니다.
+
+- 가상 문은 TCP 세션마다 CLOSED에서 시작합니다. B의 문 추정은 계속 계산하지만,
+  이 모드의 `door_state`는 A의 소프트웨어 시뮬레이션에서 옵니다.
+- 첫 유효 Radar 관측 이후 로컬 `/radar`의 OPEN/HOLD/CLOSE 요청을 처리합니다.
+  OPEN/CLOSE는 Backend에서 완료되고 HOLD는 다음 수동 OPEN/CLOSE까지 유지됩니다.
+  이번 모드에는 자동 닫힘, C 안전 명령, 물리 제어, 완료 ACK가 없습니다.
+- 프레임 일시정지 중에도 TCP가 살아 있으면 문은 진행합니다. 문 갱신에는 마지막
+  Radar 관측의 `timestamp_us`와 승객 목록을 사용합니다. 새 승객 관측은 아닙니다.
+  D의 Radar 최신성 표시는 `timestamp_us`가 3초간 전진하지 않는 조건을 별도로
+  확인해야 합니다. 재연결 때 상대 시각이 0부터 시작할 수 있습니다.
+- TCP가 종료되면 세션과 대기 명령을 폐기합니다. 첫 유효 관측 전과 재연결 대기 중
+  명령은 접수하지 않습니다. Viewer 연결 종료로 적용된 HOLD가 해제되지는 않습니다.
+- Snapshot의 `door_command`는 발행 슬롯의 최근 적용 명령입니다. 최신 Snapshot이
+  대기 중인 이전 것을 대체할 수 있어 모든 명령의 전달을 보장하지 않습니다.
+
 ### FOV_t03 재생과 D 화면
 
 Repository 루트에서, 배경맵과 빌드가 준비된 경우:

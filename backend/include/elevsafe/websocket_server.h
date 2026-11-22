@@ -59,6 +59,8 @@ namespace elevsafe
         void start();
         void stop() noexcept;
         bool publishSnapshot(std::string message);
+        // A disabled command window rejects new requests and discards queued ones atomically.
+        void setManualCommandsEnabled(bool enabled);
         std::optional<ManualDoorRequest> popCommand();
         // Individual atomic counters, not a transactional multi-field snapshot.
         WebSocketStatistics statistics() const noexcept;
