@@ -70,7 +70,11 @@ void TrackManager::confirm(Track& t) {
 }
 
 bool TrackManager::gateCost(const Track& t, const Detection& d, double& cost) const {
-    const double dx = d.cx - t.x(), dy = d.cy - t.y(), dz = d.cz - t.z();
+    // LOST 중에는 낙상 직후의 하강 속도가 남아 예측 z 가 바닥 아래로 내려갈 수 있다.
+    // 그러면 바닥에 쓰러진 사람이 z 게이트에 걸려 재매칭되지 않으므로, 바닥(0) 아래 예측은 0 으로 본다.
+    double tz = t.z();
+    if (t.state == TrackState::LOST && tz < 0) tz = 0;
+    const double dx = d.cx - t.x(), dy = d.cy - t.y(), dz = d.cz - tz;
     const double dxy = std::hypot(dx, dy);
     if (dxy > cfg_.gate_xy || std::fabs(dz) > cfg_.gate_z) return false;  // 게이팅
     const double wz = cfg_.z_weight * dz;
@@ -144,7 +148,7 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         t.syncState();
         t.last_update_us = ts;
         t.time_since_update_s = 0;
-        t.n_points = d.n_points;
+        t.setFromDetection(d);
         t.z_history.push_back({ts, d.cz});
         while (t.z_history.size() > cfg_.z_history_len) t.z_history.pop_front();
         if (t.state == TrackState::LOST) {
@@ -177,7 +181,7 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         t.state = TrackState::TENTATIVE;
         t.hits = 1;
         t.created_us = t.last_update_us = ts;
-        t.n_points = d.n_points;
+        t.setFromDetection(d);
         t.kf = makeFilter(cfg_, ts * 1e-6, d.cx, d.cy, d.cz);
         t.syncState();
         t.z_history.push_back({ts, d.cz});
