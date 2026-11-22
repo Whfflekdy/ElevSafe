@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "elevsafe_types.hpp"   // elevsafe::DetZone
 
 struct Detection {
     int     cluster = -1;
@@ -29,6 +30,9 @@ struct Detection {
     int     n_points = 0;
     double  mean_doppler = 0;
     double  mean_power = 0;
+       double      z_top = 0;       // 클러스터 최상단 높이 [m]
+   int         maybe_merged = 0; // 1이면 두 사람이 합쳐졌을 가능성
+   elevsafe::DetZone zone = elevsafe::DetZone::UNKNOWN;  // B가 붙인 zone (A가 static_cast로 변환). 점 단위 경로는 UNKNOWN
 };
 
 struct FrameDetections {
@@ -110,6 +114,7 @@ inline Detection makeDetection(int cluster_id, const std::vector<PointIn>& pts) 
     d.mean_doppler /= d.n_points; d.mean_power /= d.n_points;
     d.sx = xmax - xmin; d.sy = ymax - ymin; d.sz = zmax - zmin;
     d.zmin = zmin; d.zmax = zmax;
+    d.z_top = zmax;   // 점 단위 경로: 상위 95%를 구할 수 없어 최댓값으로 대체 (클러스터 CSV 경로는 B의 z_top 사용)
     return d;
 }
 
