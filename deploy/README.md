@@ -103,6 +103,41 @@ docker run --rm --init -it --network host \
 Linux host 네트워크 기준이며 Docker Desktop 및 운영 서버 설정은 별도 확인한다.
 Ctrl+C로 종료한다. 운영 서버 실행은 서버 담당자 승인 후 수행한다.
 
+## Windows에서 Backend와 Bridge 함께 실행
+
+Windows PowerShell 5.1, Node.js 20 이상, 사용할 Release Backend EXE가 필요하다.
+저장소 루트에서 `npm install --prefix deploy/bridge --ignore-scripts`로 Bridge 의존성을 준비한다.
+스크립트는 EXE를 빌드하거나 의존성을 설치하지 않는다. 시작 시 EXE의 SHA256을 출력한다.
+사용할 빌드의 해시를 알고 있다면 `-ExpectedBackendSha256`으로 일치 여부를 검사할 수 있다.
+
+`REMOTE_URL`은 승인된 비밀 전달 방식으로 현재 PowerShell 환경에 미리 공급한다.
+형식은 `wss://<relay-host>/ingest?key=<비밀값>`이다. 실제 키를 명령 이력이나 로그에 남기지 않는다.
+로컬 검증에만 `ws://` loopback 주소를 사용한다. 원격 화면은 조회 전용이다.
+
+아래 `$BackendExe`는 저장소 루트에서 `build`에 구성한 Windows x64 Release 빌드의 예시다.
+별도 출력 폴더를 사용했다면 실제 EXE 경로를 지정한다.
+
+```powershell
+$BackendExe = '.\build\backend\Release\elevsafe_backend.exe'
+.\deploy\start-backend-bridge.ps1 -Mode Mock -BackendExe $BackendExe -MockDuration 600
+```
+
+Mock에서 소프트웨어 문 시뮬레이션이 필요하면 `-DoorSim`을 추가한다.
+Radar 모드는 Emulator를 먼저 시작한 후 실행한다. 실센서에서는 `-RadarHost`와 `-RadarPort`를 실제 주소와 포트로 바꾼다.
+
+```powershell
+.\deploy\start-backend-bridge.ps1 -Mode Radar -BackendExe $BackendExe -RadarHost 127.0.0.1 -RadarPort 29172 -SignalConfig .\signal_processing\config\elevator_2nd.cfg
+```
+
+상대 EXE·설정 경로는 스크립트가 속한 저장소 루트 기준이다. 공백이 있는 절대 경로는 따옴표로 감싼다.
+WebSocket은 loopback에 바인딩하며 `-WsPort` 기본값은 8080, `-ReadyTimeoutSeconds` 기본값은 15초다.
+
+- `Local WebSocket ready` 후 Bridge가 시작된다. Bridge의 `local connected`와 `remote connected`는 각각의 핸드셰이크 결과다. 실제 Snapshot은 Viewer에서 확인한다.
+- 원격 Relay가 연결되지 않으면 Bridge가 기존 정책으로 재접속하며 Backend는 계속 동작한다.
+- Ctrl+C 또는 자식 종료 시 이 스크립트가 시작한 프로세스만 정리한다. 종료가 지연되면 해당 프로세스만 제한 시간 후 종료한다. Mock 시간이 정상적으로 끝나면 Bridge도 정리한다.
+- 시작 오류가 나면 출력에 표시된 EXE·설정·Node 모듈·`REMOTE_URL`을 확인한다. 포트가 이미 사용 중이면 다른 `-WsPort`를 지정하거나 해당 포트의 소유자에게 확인한다.
+
+
 ## 제한값과 실패 처리
 
 | 설정 | 기본값 | 적용 및 근거 |
