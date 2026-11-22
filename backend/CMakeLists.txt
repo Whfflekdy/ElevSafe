@@ -175,4 +175,8 @@ if(WIN32)
         -NoProfile -NonInteractive -Command
         "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg'")
     set_tests_properties(tracking_radar_websocket_test PROPERTIES TIMEOUT 25 RUN_SERIAL TRUE)
+    add_test(NAME emulator_door_websocket_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim")
+    set_tests_properties(emulator_door_websocket_test PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 endif()
