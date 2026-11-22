@@ -67,7 +67,7 @@ target_link_libraries(elevsafe_backend PRIVATE elevsafe_tracking_adapter)
 
 enable_testing()
 add_executable(tracking_adapter_test tests/tracking_adapter_test.cpp)
-target_link_libraries(tracking_adapter_test PRIVATE elevsafe_tracking_adapter elevsafe_websocket nlohmann_json::nlohmann_json)
+target_link_libraries(tracking_adapter_test PRIVATE elevsafe_tracking_adapter elevsafe_websocket elevsafe_door_simulation nlohmann_json::nlohmann_json)
 add_test(NAME tracking_adapter_test COMMAND tracking_adapter_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
 add_executable(door_simulation_test tests/door_simulation_test.cpp)
 target_link_libraries(door_simulation_test PRIVATE elevsafe_door_simulation elevsafe_websocket nlohmann_json::nlohmann_json)
@@ -179,4 +179,8 @@ if(WIN32)
         -NoProfile -NonInteractive -Command
         "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim")
     set_tests_properties(emulator_door_websocket_test PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME emulator_door_arbitration_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -DoorArbitration")
+    set_tests_properties(emulator_door_arbitration_test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 endif()
