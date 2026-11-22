@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration)
+param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle)
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
@@ -62,6 +62,7 @@ try {
     $stage='backend.start'
     $arguments=@('127.0.0.1',"$radarPort",'--signal-config',('"'+$SignalConfig+'"'),'--websocket','--ws-port',"$wsPort")
     if ($EmulatorDoorSim) { $arguments+=@('--emulator-door-sim','--radar-reconnect','--radar-reconnect-eof') }
+    if ($AutoCycle) { $arguments+='--emulator-auto-cycle' }
     $child=Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $null=$child.Handle
     Write-Host "START PID=$($child.Id) radar=$radarPort ws=$wsPort UTC=$([DateTime]::UtcNow.ToString('o')) logs=$logs"
@@ -143,7 +144,7 @@ try {
         }
     }
 
-    if ($DoorArbitration) {
+    if ($DoorArbitration -or $AutoCycle) {
         $script:arbFrame=100
         $script:arbTime=-1
         function Next-Radar([single]$y) {
@@ -211,6 +212,49 @@ try {
                 }
             }
             throw 'Automatic CLOSE did not run after stable input'
+        }
+
+        if ($AutoCycle) {
+            $stage='auto-cycle.arrival'
+            $s=Next-Radar 0.4
+            if ($s.door_state -ne 'OPENING' -or $s.door_command -ne 'OPEN' -or $s.timestamp_us -ne 0) {
+                throw 'First fresh observation did not apply AUTO OPEN'
+            }
+            $null=Expect-SimState 'OPENING' ''
+            $s=Expect-SimState 'OPEN' ''
+            if ($s.timestamp_us -ne 0) { throw 'OPEN completion changed the paused source timestamp' }
+            $stage='auto-cycle.close'
+            if ($DoorArbitration) {
+                $id=Occupy-Threshold
+                Clear-Threshold $id
+                # Keep the socket open while making the last C observation stale.
+                Start-Sleep -Milliseconds 2300
+                Expect-ResumeClose $id
+            } else {
+                $dwell=[Diagnostics.Stopwatch]::StartNew()
+                do {
+                    $s=Next-Radar 0.4
+                    if ($s.door_state -eq 'OPEN' -and $null -eq $s.door_command) { continue }
+                    if ($s.door_state -ne 'CLOSING' -or $s.door_command -ne 'CLOSE' -or
+                        $dwell.ElapsedMilliseconds -lt 3800) {
+                        throw "Unexpected normal cycle at $($dwell.ElapsedMilliseconds)ms: $($s.door_state) / $($s.door_command)"
+                    }
+                    break
+                } while ($dwell.ElapsedMilliseconds -lt 6500)
+                if ($s.door_state -ne 'CLOSING') { throw 'Normal CLOSE missing after the dwell' }
+                Write-Host "PASS normal CLOSE: viewer elapsedMs=$($dwell.ElapsedMilliseconds) from OPEN"
+            }
+            $null=Expect-SimState 'CLOSING' ''
+            $null=Expect-SimState 'CLOSED' ''
+            $stage='auto-cycle.reconnect'
+            $peer=Restart-SimRadar $peer 1
+            Expect-Reset $peer
+            $peer=Restart-SimRadar $peer 2
+            $peer=Restart-SimRadar $peer 3
+            $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+            if (-not $child.WaitForExit(6000) -or $child.ExitCode -ne 1) { throw 'Expected bounded retry exhaustion' }
+            Write-Host "PASS auto cycle: occupied=$DoorArbitration, OPEN -> CLOSE -> CLOSED, v7, no second arrival after reconnect"
+            return
         }
 
         $stage='arbitration.closed'

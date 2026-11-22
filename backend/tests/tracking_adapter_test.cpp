@@ -12,6 +12,96 @@ namespace
 {
     void expect(bool ok, const char* text) { if (!ok) throw std::runtime_error(text); }
 
+    void testEmulatorAutoCycle()
+    {
+        using namespace std::chrono_literals;
+        using Door = elevsafe::DoorSimulation;
+        using Arb = elevsafe::EmulatorDoorArbitration;
+        using Cmd = elevsafe::DoorCommand;
+        using State = elevsafe::DoorState;
+        const Door::Time zero{};
+        Door door;
+        expect(!Arb(door).applyFrame(Cmd::NONE, 0, zero, zero, false, State::CLOSED)
+            && door.state() == Door::State::Closed, "disabled cycle opened the door");
+
+        bool arrival = true;
+        Arb arb(door, &arrival);
+        const auto frame = [&](std::chrono::milliseconds at, Cmd command = Cmd::NONE,
+            State evaluated = State::OPEN)
+        {
+            return arb.applyFrame(command, at.count() * 1000, zero + at, zero + at, false, evaluated);
+        };
+        arb.advanceMotion(zero);
+        expect(arrival && !door.takeAppliedCommand(), "idle consumed the arrival");
+        expect(!arb.applyFrame(Cmd::NONE, 0, zero, zero + 1001ms, false, State::CLOSED)
+            && arrival, "stale frame consumed the arrival");
+        expect(frame(0ms, Cmd::NONE, State::CLOSED) && !arrival
+            && door.state() == Door::State::Opening && door.takeAppliedCommand() == Door::Command::Open,
+            "first fresh frame did not apply AUTO OPEN");
+        arb.advanceMotion(zero + 2679ms);
+        expect(door.state() == Door::State::Opening, "AUTO OPEN completed early");
+        arb.advanceMotion(zero + 2700ms);
+        expect(door.state() == Door::State::Open, "AUTO OPEN did not complete");
+        for (auto at = 3000ms; at <= 6500ms; at += 500ms)
+            expect(!frame(at), "normal CLOSE occurred before the dwell elapsed");
+        expect(!frame(6699ms) && !frame(6700ms, Cmd::NONE, State::UNKNOWN),
+            "normal CLOSE ignored the dwell or C's UNKNOWN observation");
+        expect(!arb.applyFrame(Cmd::NONE, 6750000, zero + 6750ms, zero + 7751ms, false, State::OPEN),
+            "stale C result triggered normal CLOSE");
+        expect(!frame(7800ms) && !frame(8300ms) && !frame(8799ms),
+            "normal CLOSE bypassed the pause recovery gate");
+        expect(frame(8800ms) && door.state() == Door::State::Closing
+            && door.takeAppliedCommand() == Door::Command::Close, "fresh OPEN/NONE did not close normally");
+        expect(!frame(8900ms) && !door.takeAppliedCommand(), "normal CLOSE produced a duplicate event");
+        arb.advanceMotion(zero + 11150ms);
+        expect(door.state() == Door::State::Closed && !frame(11200ms, Cmd::NONE, State::CLOSED),
+            "the same session replayed its arrival");
+        Door reconnected;
+        expect(!Arb(reconnected, &arrival).applyFrame(Cmd::NONE, 0, zero, zero, false, State::CLOSED),
+            "reconnecting replayed the consumed arrival");
+
+        Door occupied;
+        bool occupiedArrival = true;
+        Arb occupiedArb(occupied, &occupiedArrival);
+        const auto occupiedFrame = [&](std::chrono::milliseconds at, Cmd command)
+        {
+            return occupiedArb.applyFrame(command, at.count() * 1000, zero + at, zero + at, false,
+                occupiedArb.trackingDoorState());
+        };
+        expect(occupiedFrame(0ms, Cmd::NONE) && occupied.takeAppliedCommand() == Door::Command::Open,
+            "occupied scenario did not open");
+        occupiedArb.advanceMotion(zero + 2680ms);
+        for (auto at = 3000ms; at <= 6500ms; at += 500ms)
+            expect(!occupiedFrame(at, Cmd::NONE), "occupied scenario closed too early");
+        expect(occupiedFrame(6680ms, Cmd::HOLD) && occupied.takeAppliedCommand() == Door::Command::Hold
+            && occupied.state() == Door::State::Open, "C HOLD did not preempt the normal CLOSE deadline");
+        expect(!occupiedFrame(7000ms, Cmd::HOLD) && !occupiedFrame(7500ms, Cmd::NONE)
+            && !occupied.takeAppliedCommand(), "C HOLD let the normal timer resume or emitted a duplicate");
+        expect(occupiedFrame(8000ms, Cmd::CLOSE) && occupied.takeAppliedCommand() == Door::Command::Close
+            && occupied.state() == Door::State::Closing, "fresh C CLOSE did not close the held door");
+        expect(occupiedFrame(8100ms, Cmd::HOLD) && occupied.takeAppliedCommand() == Door::Command::Hold
+            && occupied.state() == Door::State::Opening, "C HOLD did not reverse AUTO CLOSING");
+
+        Door manual;
+        bool manualArrival = true;
+        Arb manualArb(manual, &manualArrival);
+        expect(manualArb.applyManual(Door::Command::Hold, zero) && !manualArrival
+            && manual.takeAppliedCommand() == Door::Command::Hold, "manual HOLD did not cancel pending arrival");
+        manualArb.advanceMotion(zero + 2680ms);
+        expect(!manualArb.applyFrame(Cmd::CLOSE, 10000000, zero + 10s, zero + 10s, false, State::OPEN)
+            && manual.mode() == Door::Mode::Manual && manual.state() == Door::State::Open,
+            "manual HOLD expired or was overridden");
+        expect(manualArb.applyManual(Door::Command::Close, zero + 10s)
+            && manual.takeAppliedCommand() == Door::Command::Close, "manual CLOSE did not release manual HOLD");
+        expect(!manualArb.applyFrame(Cmd::HOLD, 10100000, zero + 10100ms, zero + 10100ms, false, State::UNKNOWN)
+            && manual.state() == Door::State::Closing, "C HOLD reversed manual CLOSING");
+        manualArb.advanceMotion(zero + 12350ms);
+        expect(manual.mode() == Door::Mode::Auto
+            && !manualArb.applyFrame(Cmd::NONE, 12400000, zero + 12400ms, zero + 12400ms, false, State::CLOSED)
+            && !Arb(reconnected, &manualArrival).applyFrame(Cmd::NONE, 0, zero, zero, false, State::CLOSED),
+            "manual completion or reconnect reactivated a canceled arrival");
+    }
+
     void testEmulatorDoorArbitration()
     {
         using namespace std::chrono_literals;
@@ -108,6 +198,7 @@ int main(int argc, char** argv)
     try
     {
         testEmulatorDoorArbitration();
+        testEmulatorAutoCycle();
         using namespace std::chrono_literals;
         using Json = nlohmann::json;
         using Demo = elevsafe::TrackingDemo;
