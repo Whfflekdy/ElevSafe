@@ -11,6 +11,7 @@
 #include <future>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <syncstream>
 #include <thread>
 #include <unordered_map>
@@ -60,6 +61,7 @@ namespace elevsafe
         void deliver();
         void shutdown(bool force = false);
         void run(bool finalDrain = false);
+        void failWorker(const char* message);
         std::string pendingWork() const;
         void writeLog(const std::string& text)
         {
@@ -152,13 +154,18 @@ namespace elevsafe
             {
                 --owner.connected;
                 ++owner.disconnected;
-                owner.writeLog("disconnected client=" + std::to_string(id) + " reason=" + where);
             }
-            if (error && error != net::error::operation_aborted && error != ws::error::closed)
-                owner.writeLog(std::string(where) + " client=" + std::to_string(id)
-                    + " code=" + std::to_string(error.value()) + " category=" + error.category().name()
-                    + " message=" + error.message());
             owner.sessions.erase(id);
+            // Diagnostics must not interrupt cancellation, including the forced drain.
+            try
+            {
+                if (ready) owner.writeLog("disconnected client=" + std::to_string(id) + " reason=" + where);
+                if (error && error != net::error::operation_aborted && error != ws::error::closed)
+                    owner.writeLog(std::string(where) + " client=" + std::to_string(id)
+                        + " code=" + std::to_string(error.value()) + " category=" + error.category().name()
+                        + " message=" + error.message());
+            }
+            catch (...) {}
         }
 
         void read()
@@ -351,6 +358,11 @@ namespace elevsafe
             ingressPending = 0;
             notificationPending = false;
         }
+        {
+            std::lock_guard lock(commandMutex);
+            manualCommandsEnabled = false;
+            commands.clear();
+        }
         Error ignored;
         acceptor.cancel(ignored);
         acceptor.close(ignored);
@@ -372,6 +384,14 @@ namespace elevsafe
             + " activeWrites=" + std::to_string(activeWrites.load());
     }
 
+    void WebSocketServer::Impl::failWorker(const char* message)
+    {
+        running = false;
+        shutdown(true);
+        try { writeLog(std::string("I/O handler failed; canceled pending work: ") + message); }
+        catch (...) {} // Preserve teardown even if the diagnostic stream fails.
+    }
+
     void WebSocketServer::Impl::run(bool finalDrain)
     {
         auto nextReport = std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -391,18 +411,8 @@ namespace elevsafe
                 }
                 return;
             }
-            catch (const std::exception& error)
-            {
-                running = false;
-                writeLog(std::string("I/O handler failed; canceling pending work: ") + error.what());
-                shutdown(true);
-            }
-            catch (...)
-            {
-                running = false;
-                writeLog("Unknown I/O handler exception; canceling pending work");
-                shutdown(true);
-            }
+            catch (const std::exception& error) { failWorker(error.what()); }
+            catch (...) { failWorker("unknown exception"); }
             // Asio permits re-entering run() after a handler throws. Only drain
             // canceled work here: running is false, so no connections restart.
         }
@@ -425,6 +435,7 @@ namespace elevsafe
                 throw std::invalid_argument("WebSocket limits must be positive");
             const Tcp::endpoint endpoint(net::ip::make_address(state.config.address), state.config.port);
             Error error;
+            const int backlog = static_cast<int>(std::min<std::size_t>(state.config.maxClients, 128));
             const char* stage = "open";
             state.acceptor.open(endpoint.protocol(), error);
             if (!error)
@@ -436,16 +447,26 @@ namespace elevsafe
             {
                 stage = "listen";
                 // A finite backlog matches our client bound and avoids provider-specific SOMAXCONN handling.
-                state.acceptor.listen(static_cast<int>(std::min<std::size_t>(state.config.maxClients, 128)), error);
+                state.acceptor.listen(backlog, error);
             }
             if (error)
             {
+                // Preserve the original failure even if querying the bound endpoint fails.
+                Error endpointError;
+                const auto bound = state.acceptor.local_endpoint(endpointError);
                 Error ignored;
                 state.acceptor.close(ignored);
                 throw boost::system::system_error(error, std::string("WebSocket ") + stage + " failed: "
-                    + state.config.address + ':' + std::to_string(state.config.port));
+                    + state.config.address + ':' + std::to_string(state.config.port)
+                    + " family=" + (endpoint.address().is_v4() ? "IPv4" : "IPv6")
+                    + " address_length=" + std::to_string(endpoint.size())
+                    + " bound_port=" + (endpointError ? std::string("unavailable") : std::to_string(bound.port()))
+                    + (std::string_view(stage) == "listen" ? " backlog=" + std::to_string(backlog) : ""));
             }
-            state.boundPort = state.acceptor.local_endpoint().port();
+            state.boundPort = state.acceptor.local_endpoint(error).port();
+            if (error)
+                throw boost::system::system_error(error, "WebSocket local_endpoint failed: "
+                    + state.config.address + ':' + std::to_string(state.config.port));
             state.running = true;
             state.accept();
             state.thread = std::thread([&state]
@@ -467,7 +488,18 @@ namespace elevsafe
         auto& state = *m_impl;
         if (!state.started) return;
         if (!state.thread.joinable() && state.shutdownStarted && state.io.stopped()) return;
-        state.writeLog("stop.request" + state.pendingWork());
+        const auto reportStop = [&state](const char* phase, bool includeWork, long long elapsedMs = -1) noexcept
+        {
+            try
+            {
+                std::string message(phase);
+                if (elapsedMs >= 0) message += " elapsedMs=" + std::to_string(elapsedMs);
+                if (includeWork) message += state.pendingWork();
+                state.writeLog(message);
+            }
+            catch (...) {} // Logging must not prevent join or cleanup.
+        };
+        reportStop("stop.request", true);
         {
             std::lock_guard lock(state.ingressMutex);
             state.running = false;
@@ -483,42 +515,62 @@ namespace elevsafe
             {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - start).count();
-                state.writeLog("stop.thread.wait elapsedMs=" + std::to_string(elapsed) + state.pendingWork());
+                reportStop("stop.thread.wait", true, elapsed);
             }
             state.thread.join();
-            state.writeLog("stop.thread.joined");
+            reportStop("stop.thread.joined", false);
         }
         // Also covers failed startup and an I/O thread that already exited.
         state.io.restart();
         state.shutdown(true);
         state.run(true);
-        state.writeLog("stop.complete" + state.pendingWork());
+        reportStop("stop.complete", true);
     }
 
     bool WebSocketServer::publishSnapshot(std::string message)
     {
         auto& state = *m_impl;
-        if (message.size() > state.config.maxSnapshotBytes || !isSnapshot(message)) return false;
+        if (!state.running || message.size() > state.config.maxSnapshotBytes || !isSnapshot(message)) return false;
         auto owned = std::make_shared<const std::string>(std::move(message));
         std::lock_guard lock(state.ingressMutex);
         if (!state.running) return false;
+        // Post before committing the slot. The handler must acquire ingressMutex,
+        // so a failed post leaves no undeliverable snapshot or stuck notification.
+        if (!state.notificationPending)
+        {
+            net::post(state.io, [&state] { state.deliver(); });
+            state.notificationPending = true;
+        }
         if (state.latest) ++state.ingressDrops;
         state.latest = std::move(owned);
         state.ingressPending = 1;
         state.peakIngress = 1;
-        if (!state.notificationPending)
-        {
-            state.notificationPending = true;
-            net::post(state.io, [&state] { state.deliver(); });
-        }
         return true;
     }
 
     void WebSocketServer::setManualCommandsEnabled(bool enabled)
     {
-        std::lock_guard lock(m_impl->commandMutex);
-        m_impl->manualCommandsEnabled = enabled;
-        if (!enabled) m_impl->commands.clear();
+        std::size_t discarded = 0;
+        bool changed;
+        {
+            std::lock_guard lock(m_impl->commandMutex);
+            changed = m_impl->manualCommandsEnabled != enabled;
+            m_impl->manualCommandsEnabled = enabled;
+            if (!enabled)
+            {
+                discarded = m_impl->commands.size();
+                m_impl->commands.clear();
+            }
+        }
+        if (changed || discarded)
+        {
+            try
+            {
+                m_impl->writeLog(std::string("manual command window=") + (enabled ? "open" : "closed")
+                    + " discarded=" + std::to_string(discarded));
+            }
+            catch (...) {} // Queue state is already committed.
+        }
     }
 
     std::optional<ManualDoorRequest> WebSocketServer::popCommand()
