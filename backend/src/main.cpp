@@ -2,6 +2,7 @@
 #include "elevsafe/door_simulation.h"
 #include "elevsafe/emulator_door_arbitration.h"
 #include "elevsafe/mock_door_policy.h"
+#include "elevsafe/periodic_radar_publisher.h"
 #include <nlohmann/json.hpp>
 #include "elevsafe/ab_profile.h"
 #include "elevsafe/radar_reconnect.h"
@@ -71,6 +72,7 @@ namespace
                      "       [--emulator-door-sim] (Radar TCP, numeric IP, --signal-config --websocket, loopback WS)\n"
                      "       [--emulator-auto-cycle] (requires --emulator-door-sim; one virtual arrival per process)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
+                     "       [--ws-periodic-snapshot] (Radar TCP, --signal-config --websocket)\n"
                      "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim [--ws-door-scenario NAME]]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
     }
@@ -228,6 +230,7 @@ int main(int argc, char** argv)
     bool abProfileEnabled = false, profileLimitSpecified = false, profileWarmupSpecified = false;
     std::size_t profileLimit = 10000, profileWarmup = 5;
     bool websocketEnabled = false;
+    bool periodicSnapshot = false;
     bool mockMode = false;
     bool doorSim = false;
     std::optional<std::string> doorScenario;
@@ -244,6 +247,13 @@ int main(int argc, char** argv)
             if (doorScenario || argument + 1 >= argc || !elevsafe::isMockDoorScenario(argv[argument + 1]))
             { std::cerr << "Missing, duplicate or invalid --ws-door-scenario\n"; return 2; }
             doorScenario = argv[argument + 1]; argument += 2; continue;
+        }
+        if (option == "--ws-periodic-snapshot")
+        {
+            if (periodicSnapshot) { std::cerr << "Duplicate --ws-periodic-snapshot\n"; return 2; }
+            periodicSnapshot = true;
+            ++argument;
+            continue;
         }
         if (option == "--emulator-auto-cycle")
         {
@@ -392,6 +402,11 @@ int main(int argc, char** argv)
         ++argument;
     }
 
+    if (periodicSnapshot && (mockMode || benchmarkMode || !signalConfigPath || !websocketEnabled))
+    {
+        std::cerr << "--ws-periodic-snapshot requires Radar TCP, --signal-config and --websocket; incompatible with Mock and benchmark.\n";
+        return 2;
+    }
     if (emulatorAutoCycle && !emulatorDoorSim)
     {
         std::cerr << "--emulator-auto-cycle requires --emulator-door-sim\n";
@@ -506,7 +521,7 @@ int main(int argc, char** argv)
         {
             std::cerr << (mockMode ? "[ws] startup/runtime failed: " : "[ws] startup failed: ")
                       << error.what() << '\n';
-            if (mockMode || emulatorDoorSim) return 1;
+            if (mockMode || emulatorDoorSim || periodicSnapshot) return 1;
             std::cerr << "[ws] disabled for this run; continuing radar processing\n";
         }
         if (mockMode)
@@ -566,6 +581,8 @@ int main(int argc, char** argv)
             std::unique_ptr<elevsafe::TrackingDemo> tracking;
             if (websocket && signal && !benchmarkMode)
                 tracking = std::make_unique<elevsafe::TrackingDemo>();
+            std::unique_ptr<elevsafe::PeriodicRadarPublisher> periodic;
+            if (periodicSnapshot) periodic = std::make_unique<elevsafe::PeriodicRadarPublisher>(*websocket);
             std::size_t snapshotsPublished = 0;
             // All simulation and Radar observation state belongs to the receive thread.
             elevsafe::DoorSimulation virtualDoor;
@@ -601,7 +618,18 @@ int main(int argc, char** argv)
                 if (!radarTimestamp) return;
                 const auto now = Door::Clock::now();
                 serviceDoor(now); // With no fresh frame, only manual requests and ongoing motion are serviced.
-                if (const auto applied = virtualDoor.takeAppliedCommand()) pendingDoorCommand = applied;
+                const auto applied = virtualDoor.takeAppliedCommand();
+                if (periodic)
+                {
+                    if (applied || lastPublishedState != virtualDoor.state())
+                    {
+                        periodic->updateDoor(Door::name(virtualDoor.state()),
+                            applied ? std::optional{Door::name(*applied)} : std::nullopt);
+                        lastPublishedState = virtualDoor.state();
+                    }
+                    return;
+                }
+                if (applied) pendingDoorCommand = applied;
                 if (lastPublish && now - *lastPublish < elevsafe::TrackingDemo::publishPeriod) return;
                 if (lastPublish && !newRadarObservation && !pendingDoorCommand && !lastSnapshotHadCommand
                     && lastPublishedState == virtualDoor.state()) return;
@@ -620,8 +648,8 @@ int main(int argc, char** argv)
             std::optional<std::uint64_t> firstTimestamp;
             auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
             client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
-                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished,
-                emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration](const elevsafe::RadarFrame& frame)
+                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
+                emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor](const elevsafe::RadarFrame& frame)
             {
                 if (reconnectEnabled && !firstTimestamp) firstTimestamp = frame.timestampUs;
                 using Profile = elevsafe::AbProfile;
@@ -631,8 +659,8 @@ int main(int argc, char** argv)
                 const auto receivedAt = emulatorDoorSim ? Door::Clock::now() : Door::Time{};
                 const auto pipelineStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
                 pipeline.onFrame(frame);
-                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState, &tracking, &websocket, &snapshotsPublished,
-                emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration,
+                pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
+                emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor,
                 receivedAt](const elevsafe::RadarFrame& pendingFrame)
                 {
                     if (signal)
@@ -661,11 +689,24 @@ int main(int argc, char** argv)
                                 auto observation = tracking->observe(result, cDoorState);
                                 doorArbitration.applyFrame(observation.door_command, result.timestamp_us,
                                     receivedAt, Door::Clock::now(), manualConsumed, cDoorState);
-                                radarTracks = std::move(observation.tracks);
+                                if (periodic)
+                                {
+                                    const auto applied = virtualDoor.takeAppliedCommand();
+                                    periodic->observe(result.timestamp_us, std::move(observation.tracks),
+                                        Door::name(virtualDoor.state()),
+                                        applied ? std::optional{Door::name(*applied)} : std::nullopt);
+                                }
+                                else radarTracks = std::move(observation.tracks);
                                 const bool firstObservation = !radarTimestamp;
                                 radarTimestamp = result.timestamp_us;
                                 newRadarObservation = true;
                                 if (firstObservation) websocket->setManualCommandsEnabled(true);
+                            }
+                            else if (periodic)
+                            {
+                                auto observation = tracking->observe(result);
+                                periodic->observe(result.timestamp_us, std::move(observation.tracks),
+                                    elevsafe::sp::doorStateToString(result.estimated_door_state));
                             }
                             else if (tracking)
                             {
@@ -754,6 +795,22 @@ int main(int argc, char** argv)
                 std::cerr << "Backend stopped: " << exception.what() << '\n';
             }
 
+            if (periodic)
+            {
+                try
+                {
+                    const auto stats = periodic->finish();
+                    snapshotsPublished = stats.published;
+                    std::cerr << "[ws-periodic] session=" << session << " published=" << stats.published
+                              << " mean_interval_us=" << stats.meanIntervalUs << '\n';
+                }
+                catch (const std::exception& exception)
+                {
+                    result = 1;
+                    runReturned = false;
+                    std::cerr << "[ws-periodic] stopped: " << exception.what() << '\n';
+                }
+            }
             if (emulatorDoorSim) websocket->setManualCommandsEnabled(false);
 
             if (tracking)
