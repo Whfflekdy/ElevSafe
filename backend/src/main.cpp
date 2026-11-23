@@ -69,6 +69,7 @@ namespace
                      "       [--ab-profile [--ab-profile-max-frames N] [--ab-profile-warmup N]]\n"
                      "       [--radar-reconnect [--radar-reconnect-eof]] (numeric radar IP only)\n"
                      "       [--emulator-door-sim] (Radar TCP, numeric IP, --signal-config --websocket, loopback WS)\n"
+                     "       [--emulator-auto-cycle] (requires --emulator-door-sim; one virtual arrival per process)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
                      "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim [--ws-door-scenario NAME]]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
@@ -222,6 +223,7 @@ int main(int argc, char** argv)
     bool benchmarkMode = false;
     bool reconnectEnabled = false, reconnectEof = false;
     bool emulatorDoorSim = false;
+    bool emulatorAutoCycle = false;
     std::optional<std::size_t> benchmarkFrameLimit;
     bool abProfileEnabled = false, profileLimitSpecified = false, profileWarmupSpecified = false;
     std::size_t profileLimit = 10000, profileWarmup = 5;
@@ -242,6 +244,13 @@ int main(int argc, char** argv)
             if (doorScenario || argument + 1 >= argc || !elevsafe::isMockDoorScenario(argv[argument + 1]))
             { std::cerr << "Missing, duplicate or invalid --ws-door-scenario\n"; return 2; }
             doorScenario = argv[argument + 1]; argument += 2; continue;
+        }
+        if (option == "--emulator-auto-cycle")
+        {
+            if (emulatorAutoCycle) { std::cerr << "Duplicate --emulator-auto-cycle\n"; return 2; }
+            emulatorAutoCycle = true;
+            ++argument;
+            continue;
         }
         if (option == "--emulator-door-sim")
         {
@@ -383,6 +392,11 @@ int main(int argc, char** argv)
         ++argument;
     }
 
+    if (emulatorAutoCycle && !emulatorDoorSim)
+    {
+        std::cerr << "--emulator-auto-cycle requires --emulator-door-sim\n";
+        return 2;
+    }
     if (emulatorDoorSim && (mockMode || benchmarkMode || !signalConfigPath || !websocketEnabled
         || (wsConfig.address != "127.0.0.1" && wsConfig.address != "::1")))
     {
@@ -520,6 +534,8 @@ int main(int argc, char** argv)
     {
         RadarSignals signals(reconnectEnabled || emulatorDoorSim);
         elevsafe::RadarReconnectBudget retryBudget;
+        // Accessed only by the Radar owner thread, including its synchronous callbacks.
+        bool arrivalPending = emulatorAutoCycle;
         for (std::size_t session = 1;; ++session)
         {
             if (reconnectEnabled && radarStop.load(std::memory_order_relaxed)) return 0;
@@ -553,7 +569,8 @@ int main(int argc, char** argv)
             std::size_t snapshotsPublished = 0;
             // All simulation and Radar observation state belongs to the receive thread.
             elevsafe::DoorSimulation virtualDoor;
-            elevsafe::EmulatorDoorArbitration doorArbitration(virtualDoor);
+            elevsafe::EmulatorDoorArbitration doorArbitration(virtualDoor,
+                emulatorAutoCycle ? &arrivalPending : nullptr);
             using Door = elevsafe::DoorSimulation;
             std::optional<std::int64_t> radarTimestamp;
             std::vector<TrackOutput> radarTracks;
@@ -574,9 +591,9 @@ int main(int argc, char** argv)
                     const auto command = request->command == "OPEN" ? Door::Command::Open
                         : request->command == "HOLD" ? Door::Command::Hold : Door::Command::Close;
                     manualConsumed = true;
-                    virtualDoor.apply(command, now);
+                    doorArbitration.applyManual(command, now);
                 }
-                virtualDoor.advanceMotion(now);
+                doorArbitration.advanceMotion(now);
                 return manualConsumed;
             };
             const auto tickDoor = [&]
@@ -643,7 +660,7 @@ int main(int argc, char** argv)
                             {
                                 auto observation = tracking->observe(result, cDoorState);
                                 doorArbitration.applyFrame(observation.door_command, result.timestamp_us,
-                                    receivedAt, Door::Clock::now(), manualConsumed);
+                                    receivedAt, Door::Clock::now(), manualConsumed, cDoorState);
                                 radarTracks = std::move(observation.tracks);
                                 const bool firstObservation = !radarTimestamp;
                                 radarTimestamp = result.timestamp_us;

@@ -14,7 +14,22 @@ namespace elevsafe
     public:
         using Door = DoorSimulation;
 
-        explicit EmulatorDoorArbitration(Door& door) : door_(door) {}
+        // The optional arrival flag lives in the Radar owner loop, across TCP sessions.
+        explicit EmulatorDoorArbitration(Door& door, bool* arrivalPending = nullptr)
+            : door_(door), arrivalPending_(arrivalPending) {}
+
+        bool applyManual(Door::Command command, Door::Time now)
+        {
+            if (arrivalPending_) *arrivalPending_ = false;
+            normalCycle_ = false;
+            return door_.apply(command, now);
+        }
+
+        void advanceMotion(Door::Time now)
+        {
+            if (door_.advanceMotion(now) && normalCycle_ && door_.state() == Door::State::Open)
+                normalCloseAt_ = now + normalOpenHold;
+        }
 
         DoorState trackingDoorState() const
         {
@@ -32,24 +47,42 @@ namespace elevsafe
         }
 
         bool applyFrame(DoorCommand command, std::int64_t timestampUs, Door::Time receivedAt,
-            Door::Time now, bool manualConsumed)
+            Door::Time now, bool manualConsumed, DoorState evaluatedDoor = DoorState::UNKNOWN)
         {
             if (!recordFrame(timestampUs, receivedAt, now)) return false;
             if (manualConsumed || door_.mode() != Door::Mode::Auto) return false;
 
             // A motion may have completed while B/C was processing the frame.
-            door_.advanceMotion(now);
+            advanceMotion(now);
             const auto state = door_.state();
             if (command == DoorCommand::HOLD &&
                 (state == Door::State::Open || state == Door::State::Closing))
-                return door_.applyAuto(Door::Command::Hold, now);
+            {
+                if (!door_.applyAuto(Door::Command::Hold, now)) return false;
+                normalCycle_ = false; // C takes over this cycle's close decision.
+                return true;
+            }
 
-            if (command == DoorCommand::CLOSE && state == Door::State::Open &&
+            if (command == DoorCommand::NONE && arrivalPending_ && *arrivalPending_ &&
+                state == Door::State::Closed && door_.applyAuto(Door::Command::Open, now))
+            {
+                *arrivalPending_ = false;
+                normalCycle_ = true;
+                return true;
+            }
+
+            // NONE only distinguishes a normal timer candidate from a C command.
+            const bool normalClose = command == DoorCommand::NONE && normalCycle_ &&
+                normalCloseAt_ && now >= *normalCloseAt_ && evaluatedDoor == DoorState::OPEN;
+            if ((command == DoorCommand::CLOSE || normalClose) && state == Door::State::Open &&
                 continuousFrames_ >= minimumFreshFrames &&
                 receivedAt - continuousSince_ >= minimumFreshSpan &&
-                timestampUs - continuousSinceUs_ >= minimumFreshSpan.count())
-                return door_.applyAuto(Door::Command::Close, now);
-
+                timestampUs - continuousSinceUs_ >= minimumFreshSpan.count() &&
+                door_.applyAuto(Door::Command::Close, now))
+            {
+                normalCycle_ = false;
+                return true;
+            }
             return false;
         }
 
@@ -58,6 +91,8 @@ namespace elevsafe
         static constexpr auto maximumGap = std::chrono::microseconds{1000000};
         static constexpr auto minimumFreshSpan = std::chrono::microseconds{1000000};
         static constexpr unsigned minimumFreshFrames = 3;
+        // Provisional simulation dwell, based on the existing Mock hold time.
+        static constexpr auto normalOpenHold = std::chrono::seconds{4};
 
         struct Observation
         {
@@ -90,6 +125,9 @@ namespace elevsafe
         }
 
         Door& door_;
+        bool* arrivalPending_;
+        bool normalCycle_ = false;
+        std::optional<Door::Time> normalCloseAt_;
         std::optional<Observation> last_;
         Door::Time continuousSince_{};
         std::int64_t continuousSinceUs_ = 0;

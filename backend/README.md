@@ -1550,6 +1550,21 @@ Emulator를 시작한 뒤, 저장소 루트에서 Windows Release Backend를 실
 - Snapshot의 `door_command`는 발행 슬롯의 최근 적용 명령입니다. 최신 Snapshot이
   대기 중인 이전 것을 대체할 수 있어 모든 명령의 전달을 보장하지 않습니다.
 
+### Emulator 단일 자동 운행
+
+기존 Emulator 실행 명령에 `--emulator-door-sim --emulator-auto-cycle`을 함께 지정합니다.
+첫 유효 Radar 관측에서 가상 도착을 한 번 처리하고 AUTO OPEN을 적용합니다.
+OPEN 완료부터 4초를 유지합니다. 4초는 기존 Mock을 참고한 임시 시뮬레이션 값입니다.
+
+- A 정상 CLOSE는 C가 실제 OPEN 상태를 관측한 새 프레임에서 NONE을 반환하고 기존 CLOSE
+  신선도 조건을 충족할 때만 적용합니다. NONE은 C의 안전 승인을 뜻하지 않습니다.
+- C HOLD가 적용되면 A의 기본 닫힘 예약을 취소합니다. 이후에는 C의 CLOSE 요청과 기존
+  신선도 조건으로 닫습니다. Radar 입력이 멈추면 새 자동 CLOSE를 시작하지 않습니다.
+- 수동 명령을 처리하면 대기 중인 가상 도착과 A 닫힘 예약을 취소합니다. TCP 재연결로는
+  사용하거나 취소한 도착을 다시 실행할 수 없습니다. 새 Backend 프로세스에서 다시 시작할 수 있습니다.
+- 자동 OPEN은 가상 도착에 의한 소프트웨어 동작입니다. C의 안전 판단에 의한 OPEN과
+  STM32 및 실제 엘리베이터 제어는 지원하지 않습니다.
+
 ### FOV_t03 재생과 D 화면
 
 Repository 루트에서, 배경맵과 빌드가 준비된 경우:

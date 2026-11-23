@@ -183,4 +183,11 @@ if(WIN32)
         -NoProfile -NonInteractive -Command
         "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -DoorArbitration")
     set_tests_properties(emulator_door_arbitration_test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_test(NAME emulator_auto_cycle_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -AutoCycle")
+    add_test(NAME emulator_auto_cycle_occupied_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -DoorArbitration -AutoCycle")
+    set_tests_properties(emulator_auto_cycle_test emulator_auto_cycle_occupied_test PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 endif()
