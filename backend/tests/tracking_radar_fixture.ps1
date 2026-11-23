@@ -1,12 +1,22 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim)
+param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect)
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
 $logs = Join-Path (Split-Path $BackendExe) ('tracking-fixture/' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $logs
+if ($DoorArbitration) {
+    if (-not $EmulatorDoorSim) { throw 'DoorArbitration requires EmulatorDoorSim' }
+    # Add a threshold strip to the existing identity-transform TCP fixture.
+    $config=[IO.File]::ReadAllText($SignalConfig)
+    $config=$config.Replace('door.x_min = 100','door.x_min = 0').Replace('door.x_max = 101','door.x_max = 1')
+    $config=$config.Replace('door.y_min = 100','door.y_min = -0.2').Replace('door.y_max = 101','door.y_max = 0.2')
+    $config=$config.Replace('door.z_min = 100','door.z_min = 0').Replace('door.z_max = 101','door.z_max = 2')
+    $SignalConfig=Join-Path $logs 'door-arbitration.cfg'
+    [IO.File]::WriteAllText($SignalConfig,$config)
+}
 
-function Packet([uint32]$frameId, [uint32]$count) {
+function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8) {
     # Existing retina_protocol_test / websocket_radar_fixture wire layout, no new protocol.
     $memory = [IO.MemoryStream]::new(); $writer = [IO.BinaryWriter]::new($memory)
     try {
@@ -14,7 +24,7 @@ function Packet([uint32]$frameId, [uint32]$count) {
             [uint32](16 + 24 * $count),[uint32]0,[uint32]0,[uint32]0,[uint32]0)) { $writer.Write($word) }
         $writer.Write([uint64]578437695752307201); $writer.Write($frameId); $writer.Write($count)
         for ($j=0; $j -lt $count; $j++) {
-            foreach ($v in @([single]0.25,[single]0.8,[single]1,[single]0,[single]10)) { $writer.Write($v) }
+            foreach ($v in @([single]0.25,$y,[single]1,[single]0,[single]10)) { $writer.Write($v) }
         }
         for ($j=0; $j -lt $count; $j++) { $writer.Write([int32]255) }
         $writer.Flush(); return ,$memory.ToArray()
@@ -50,8 +60,12 @@ try {
     finally { $reservation.Dispose() }
     $accept=$listener.AcceptTcpClientAsync()
     $stage='backend.start'
-    $arguments=@('127.0.0.1',"$radarPort",'--signal-config',('"'+$SignalConfig+'"'),'--websocket','--ws-port',"$wsPort")
+    $radarHost=if($PeriodicSnapshot -and -not $EmulatorDoorSim -and -not $PeriodicReconnect){'localhost'}else{'127.0.0.1'}
+    $arguments=@($radarHost,"$radarPort",'--signal-config',('"'+$SignalConfig+'"'),'--websocket','--ws-port',"$wsPort")
     if ($EmulatorDoorSim) { $arguments+=@('--emulator-door-sim','--radar-reconnect','--radar-reconnect-eof') }
+    if ($AutoCycle) { $arguments+='--emulator-auto-cycle' }
+    if ($PeriodicSnapshot) { $arguments+='--ws-periodic-snapshot' }
+    if ($PeriodicReconnect) { $arguments+=@('--radar-reconnect','--radar-reconnect-eof') }
     $child=Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $null=$child.Handle
     Write-Host "START PID=$($child.Id) radar=$radarPort ws=$wsPort UTC=$([DateTime]::UtcNow.ToString('o')) logs=$logs"
@@ -131,6 +145,286 @@ try {
         if ($reset.timestamp_us -ne 0 -or $reset.door_state -ne 'CLOSED' -or $null -ne $reset.door_command -or $reset.passengers.Count -ne 0) {
             throw 'Radar/Tracking or virtual door state leaked across sessions'
         }
+    }
+
+    if ($PeriodicSnapshot) {
+        function Send-AfterQuiet($radarPeer, [switch]$AllowInFlight) {
+            $buffer=[byte[]]::new(65536)
+            $cancel=[Threading.CancellationTokenSource]::new(5000)
+            try {
+                while ($true) {
+                    $pending=$first.ReceiveAsync([ArraySegment[byte]]::new($buffer),$cancel.Token)
+                    if (-not $pending.Wait(380)) { break }
+                    if (-not $AllowInFlight) { throw 'Periodic Snapshot before the first observation of a session' }
+                    $null=Read-SimSnapshot $pending $buffer
+                    $AllowInFlight=$false  # One old write may already have been queued before EOF.
+                }
+                $bytes=Packet 100 40
+                $radarPeer.GetStream().Write($bytes,0,$bytes.Length)
+                return Read-SimSnapshot $pending $buffer
+            } finally { $cancel.Dispose() }
+        }
+
+        $stage='periodic.first-observation'
+        $initial=Send-AfterQuiet $peer
+        $initialState=if($AutoCycle){'OPENING'}else{$initial.door_state}
+        $initialCommand=if($AutoCycle){'OPEN'}else{$null}
+        if ($initial.timestamp_us -ne 0 -or $initial.door_state -ne $initialState -or
+            $initial.door_command -ne $initialCommand -or $initial.passengers.Count -ne 0) {
+            throw 'Incorrect first Snapshot'
+        }
+        $cancel=[Threading.CancellationTokenSource]::new(2500)
+        try {
+            $other=ConvertFrom-Json -InputObject (Receive-Text $second $cancel)
+            if ((ConvertTo-Json -InputObject $initial -Depth 5 -Compress) -cne
+                (ConvertTo-Json -InputObject $other -Depth 5 -Compress)) { throw 'Viewer first Snapshots differ' }
+        } finally { $cancel.Dispose() }
+
+        $stage='periodic.active-input'
+        $feed=[Diagnostics.Stopwatch]::StartNew()
+        for ($i=0; $i -lt 12; ++$i) {
+            $wait=50*$i-$feed.Elapsed.TotalMilliseconds
+            if ($wait -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($wait)) }
+            $bytes=Packet ([uint32](101+$i)) 40
+            $peer.GetStream().Write($bytes,0,$bytes.Length)
+        }
+        $lastTime=-1
+        $fixed=$null
+        for ($i=0; $i -lt 23; ++$i) {
+            $s=Read-SimSnapshot
+            if ($null -ne $s.door_command) { throw 'Initial command was repeated or an unexpected command was applied' }
+            if ($s.timestamp_us -lt $lastTime) { throw 'Timestamp regressed inside one TCP session' }
+            if ($s.timestamp_us -eq $lastTime -and $s.passengers.Count -eq 1) { $fixed=$s; break }
+            $lastTime=$s.timestamp_us
+        }
+        if ($null -eq $fixed -or $fixed.timestamp_us -le 0 -or $fixed.passengers[0].id -ne 1 -or
+            $fixed.passengers[0].state -ne 'INSIDE' -or $null -ne $fixed.passengers[0].safety_state) {
+            throw 'Missing tracked passenger on the latest observation'
+        }
+
+        $stage='periodic.paused-input'
+        # The second Viewer deliberately stops reading; the first must continue unaffected.
+        $duration=if($EmulatorDoorSim){7100}elseif($PeriodicReconnect){3100}else{10100}
+        $paused=[Diagnostics.Stopwatch]::StartNew()
+        $count=0
+        $sawOpen=$false
+        $wallChanged=$false
+        $track=ConvertTo-Json -InputObject @($fixed.passengers) -Depth 5 -Compress
+        do {
+            $s=Read-SimSnapshot
+            $count++
+            $wallChanged=$wallChanged -or $s.timestamp -ne $fixed.timestamp
+            if ($s.timestamp_us -ne $fixed.timestamp_us -or $null -ne $s.door_command -or
+                (ConvertTo-Json -InputObject @($s.passengers) -Depth 5 -Compress) -cne $track) {
+                throw "Paused observation changed at $($paused.ElapsedMilliseconds)ms: $($s.timestamp_us) expected $($fixed.timestamp_us)"
+            }
+            if ($s.timestamp -notmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$') { throw 'Invalid UTC publication time' }
+            if ($EmulatorDoorSim) {
+                if ($s.door_state -notin @('OPENING','OPEN')) { throw 'Periodic tick drove automatic CLOSE without input' }
+                if ($s.door_state -eq 'OPEN') { $sawOpen=$true }
+            }
+        } while ($paused.ElapsedMilliseconds -lt $duration)
+        $viewerMean=$paused.Elapsed.TotalMilliseconds/$count
+        if (-not $wallChanged -or $viewerMean -lt 75 -or $viewerMean -gt 180 -or ($EmulatorDoorSim -and -not $sawOpen)) {
+            throw "Incorrect idle publication: received=$count meanMs=$viewerMean wallChanged=$wallChanged sawOpen=$sawOpen"
+        }
+        Write-Host "PASS periodic idle: mode=$radarHost emulator=$EmulatorDoorSim pauseMs=$($paused.ElapsedMilliseconds) viewer=$count viewerMeanMs=$viewerMean timestamp_us=$($fixed.timestamp_us)"
+
+        if ($EmulatorDoorSim) {
+            $stage='periodic.manual-close'
+            Send-Door $first 'CLOSE'
+            $closeEventCount=0
+            $closed=$false
+            $motion=[Diagnostics.Stopwatch]::StartNew()
+            do {
+                $s=Read-SimSnapshot
+                if ($s.timestamp_us -ne $fixed.timestamp_us) { throw 'Manual motion changed Radar time' }
+                if ($null -ne $s.door_command) {
+                    if ($s.door_command -ne 'CLOSE' -or $s.door_state -ne 'CLOSING') { throw 'Invalid applied CLOSE' }
+                    $closeEventCount++
+                }
+                $closed=$s.door_state -eq 'CLOSED'
+            } while (-not $closed -and $motion.ElapsedMilliseconds -lt 5000)
+            if (-not $closed -or $closeEventCount -ne 1 -or $null -ne $s.door_command) { throw 'Manual motion/event did not complete once' }
+            Write-Host 'PASS periodic paused manual CLOSE: one applied event and CLOSED/null'
+        }
+
+        $stage='periodic.eof'
+        if ($PeriodicReconnect -or $EmulatorDoorSim) {
+            $peer=Restart-SimRadar $peer 1
+            $reset=Send-AfterQuiet $peer -AllowInFlight
+            if ($reset.timestamp_us -ne 0 -or $null -ne $reset.door_command -or $reset.passengers.Count -ne 0 -or
+                ($EmulatorDoorSim -and $reset.door_state -ne 'CLOSED')) { throw 'Prior session leaked into reconnect' }
+            $peer=Restart-SimRadar $peer 2
+            $peer=Restart-SimRadar $peer 3
+        }
+        $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        if (-not $child.WaitForExit(6500)) { throw 'Backend did not finish after EOF' }
+        $expectedExit=if($PeriodicReconnect -or $EmulatorDoorSim){1}else{0}
+        if ($child.ExitCode -ne $expectedExit) { throw "Unexpected Backend exit $($child.ExitCode)" }
+        $text=Read-LiveLog $stderr
+        if ($text -notmatch '\[ws-periodic\] session=1 published=(\d+) mean_interval_us=(\d+)') { throw 'Backend publication metrics missing' }
+        $published=[int]$Matches[1]
+        $meanUs=[int]$Matches[2]
+        if ($published -lt $count -or $meanUs -lt 95000 -or $meanUs -gt 180000 -or
+            $text -notmatch '\[tracking-demo\] session=1 frames=13 snapshots=\d+ exit=0' -or
+            $text -match '10014|Signal frame failed|\[ws-periodic\] stopped') { throw 'Backend cadence/processing metrics invalid' }
+        if ($expectedExit -eq 1 -and $text -notmatch '\[ws-periodic\] session=3 published=0 mean_interval_us=0') {
+            throw 'Periodic publication during a reconnect with no observation'
+        }
+        Write-Host "PASS periodic EOF: backendPublished=$published backendMeanUs=$meanUs viewerMeanMs=$viewerMean ExitCode=$($child.ExitCode)"
+        return
+    }
+
+    if ($DoorArbitration -or $AutoCycle) {
+        $script:arbFrame=100
+        $script:arbTime=-1
+        function Next-Radar([single]$y) {
+            # Pace observations beyond the Snapshot limiter so the fixture can observe each one.
+            Start-Sleep -Milliseconds 125
+            $bytes=Packet ([uint32]$script:arbFrame) 40 $y
+            $script:arbFrame++
+            $peer.GetStream().Write($bytes,0,$bytes.Length)
+            do { $s=Read-SimSnapshot } while ($s.timestamp_us -le $script:arbTime)
+            $script:arbTime=$s.timestamp_us
+            return $s
+        }
+        function Expect-SimState([string]$state, [string]$command) {
+            $s=Read-SimSnapshot
+            if ($s.door_state -cne $state -or [string]$s.door_command -cne $command) {
+                throw "Wanted $state / '$command'; got $($s.door_state) / '$($s.door_command)'"
+            }
+            return $s
+        }
+        function Send-ManualAndComplete([string]$command, [string]$moving, [string]$done) {
+            Send-Door $first $command
+            $null=Expect-SimState $moving $command
+            $null=Expect-SimState $moving ''
+            $null=Expect-SimState $done ''
+        }
+        function Occupy-Threshold {
+            # Move a matched track into the threshold gradually.
+            foreach ($y in @(0.4,0.32,0.24,0.16,0.08,0.0,0.0,0.0)) {
+                $s=Next-Radar $y
+                if ($s.door_state -ne 'OPEN') { throw 'Door closed on threshold approach' }
+                if ($s.door_command -eq 'HOLD') {
+                    if ($s.passengers.Count -ne 1 -or $s.passengers[0].state -notin @('ENTERING','EXITING') -or
+                    $null -ne $s.passengers[0].safety_state) { throw 'HOLD did not carry the C threshold phase' }
+                    return $s.passengers[0].id
+                }
+            }
+            throw 'No automatic HOLD from threshold occupancy'
+        }
+        function Clear-Threshold($id) {
+            foreach ($y in @(0.08,0.16,0.24,0.32,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4)) {
+                $s=Next-Radar $y
+                if ($s.door_state -ne 'OPEN' -or $null -ne $s.door_command) { throw 'Premature or duplicate command before the pause' }
+            }
+            if ($s.passengers.Count -ne 1 -or $s.passengers[0].id -ne $id -or
+                    $s.passengers[0].state -ne 'INSIDE') { throw 'Expected the same track to clear the threshold' }
+        }
+        function Expect-ResumeClose($id) {
+            $firstFresh=$null
+            $fresh=0
+            for ($i=0; $i -lt 18; ++$i) {
+                $s=Next-Radar 0.4
+                if ($null -eq $firstFresh) { $firstFresh=$s.timestamp_us }
+                $fresh++
+                if ($s.passengers.Count -ne 1 -or $s.passengers[0].id -ne $id -or
+                    $s.passengers[0].state -ne 'INSIDE') { throw 'C track ID or phase lost on resume' }
+                if ($s.door_command -eq 'CLOSE') {
+                    if ($s.door_state -ne 'CLOSING' -or $fresh -lt 3 -or $s.timestamp_us-$firstFresh -lt 1000000) {
+                        throw 'CLOSE escaped the fresh-input guard'
+                    }
+                    Write-Host "PASS gated auto CLOSE: snapshots=$fresh spanUs=$($s.timestamp_us-$firstFresh) id=$id"
+                    return
+                }
+                if ($s.door_state -ne 'OPEN' -or $null -ne $s.door_command) {
+                    throw 'Rejected or duplicate C request leaked into v7'
+                }
+            }
+            throw 'Automatic CLOSE did not run after stable input'
+        }
+
+        if ($AutoCycle) {
+            $stage='auto-cycle.arrival'
+            $s=Next-Radar 0.4
+            if ($s.door_state -ne 'OPENING' -or $s.door_command -ne 'OPEN' -or $s.timestamp_us -ne 0) {
+                throw 'First fresh observation did not apply AUTO OPEN'
+            }
+            $null=Expect-SimState 'OPENING' ''
+            $s=Expect-SimState 'OPEN' ''
+            if ($s.timestamp_us -ne 0) { throw 'OPEN completion changed the paused source timestamp' }
+            $stage='auto-cycle.close'
+            if ($DoorArbitration) {
+                $id=Occupy-Threshold
+                Clear-Threshold $id
+                # Keep the socket open while making the last C observation stale.
+                Start-Sleep -Milliseconds 2300
+                Expect-ResumeClose $id
+            } else {
+                $dwell=[Diagnostics.Stopwatch]::StartNew()
+                do {
+                    $s=Next-Radar 0.4
+                    if ($s.door_state -eq 'OPEN' -and $null -eq $s.door_command) { continue }
+                    if ($s.door_state -ne 'CLOSING' -or $s.door_command -ne 'CLOSE' -or
+                        $dwell.ElapsedMilliseconds -lt 3800) {
+                        throw "Unexpected normal cycle at $($dwell.ElapsedMilliseconds)ms: $($s.door_state) / $($s.door_command)"
+                    }
+                    break
+                } while ($dwell.ElapsedMilliseconds -lt 6500)
+                if ($s.door_state -ne 'CLOSING') { throw 'Normal CLOSE missing after the dwell' }
+                Write-Host "PASS normal CLOSE: viewer elapsedMs=$($dwell.ElapsedMilliseconds) from OPEN"
+            }
+            $null=Expect-SimState 'CLOSING' ''
+            $null=Expect-SimState 'CLOSED' ''
+            $stage='auto-cycle.reconnect'
+            $peer=Restart-SimRadar $peer 1
+            Expect-Reset $peer
+            $peer=Restart-SimRadar $peer 2
+            $peer=Restart-SimRadar $peer 3
+            $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+            if (-not $child.WaitForExit(6000) -or $child.ExitCode -ne 1) { throw 'Expected bounded retry exhaustion' }
+            Write-Host "PASS auto cycle: occupied=$DoorArbitration, OPEN -> CLOSE -> CLOSED, v7, no second arrival after reconnect"
+            return
+        }
+
+        $stage='arbitration.closed'
+        $s=Next-Radar 0.4
+        if ($s.door_state -ne 'CLOSED' -or $null -ne $s.door_command) { throw 'Door opened without a manual request' }
+        $stage='arbitration.manual-open'
+        Send-ManualAndComplete 'OPEN' 'OPENING' 'OPEN'
+        $stage='arbitration.auto-hold'
+        $id=Occupy-Threshold
+        Clear-Threshold $id
+        $stage='arbitration.pause-and-resume'
+        Start-Sleep -Milliseconds 2300
+        Expect-ResumeClose $id
+        $stage='arbitration.close-while-paused'
+        $null=Expect-SimState 'CLOSING' ''
+        $null=Expect-SimState 'CLOSED' ''
+        $s=Next-Radar 0.4
+        if ($s.door_state -ne 'CLOSED' -or $null -ne $s.door_command) { throw 'Completed auto CLOSE replayed' }
+
+        $stage='arbitration.stale-c-after-manual'
+        Send-ManualAndComplete 'OPEN' 'OPENING' 'OPEN'
+        $id=Occupy-Threshold
+        Clear-Threshold $id
+        # No Radar observes either CLOSED or OPENING in this manual cycle.
+        Send-ManualAndComplete 'CLOSE' 'CLOSING' 'CLOSED'
+        Send-ManualAndComplete 'OPEN' 'OPENING' 'OPEN'
+        Expect-ResumeClose $id
+
+        $null=Expect-SimState 'CLOSING' ''
+        $stage='arbitration.reconnect'
+        $peer=Restart-SimRadar $peer 1
+        Expect-Reset $peer
+        $peer=Restart-SimRadar $peer 2
+        $peer=Restart-SimRadar $peer 3
+        $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        if (-not $child.WaitForExit(6000) -or $child.ExitCode -ne 1) { throw 'Expected bounded retry exhaustion' }
+        Write-Host 'PASS arbitration: auto HOLD/CLOSE, manual CLOSED not observed, resume guard, track identity, v7, reconnect'
+        return
     }
 
     if ($EmulatorDoorSim) {

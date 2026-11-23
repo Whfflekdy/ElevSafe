@@ -59,15 +59,15 @@ add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 if(NOT TARGET tracking_core)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../tracking tracking)
 endif()
-add_library(elevsafe_tracking_adapter src/tracking_adapter.cpp)
+add_library(elevsafe_tracking_adapter src/tracking_adapter.cpp src/periodic_radar_publisher.cpp)
 target_link_libraries(elevsafe_tracking_adapter PUBLIC elevsafe_signal_adapter tracking_core
-    PRIVATE elevsafe_websocket nlohmann_json::nlohmann_json)
+    PRIVATE elevsafe_websocket nlohmann_json::nlohmann_json Threads::Threads)
 target_compile_options(elevsafe_tracking_adapter PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 target_link_libraries(elevsafe_backend PRIVATE elevsafe_tracking_adapter)
 
 enable_testing()
 add_executable(tracking_adapter_test tests/tracking_adapter_test.cpp)
-target_link_libraries(tracking_adapter_test PRIVATE elevsafe_tracking_adapter elevsafe_websocket nlohmann_json::nlohmann_json)
+target_link_libraries(tracking_adapter_test PRIVATE elevsafe_tracking_adapter elevsafe_websocket elevsafe_door_simulation nlohmann_json::nlohmann_json)
 add_test(NAME tracking_adapter_test COMMAND tracking_adapter_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg)
 add_executable(door_simulation_test tests/door_simulation_test.cpp)
 target_link_libraries(door_simulation_test PRIVATE elevsafe_door_simulation elevsafe_websocket nlohmann_json::nlohmann_json)
@@ -179,4 +179,28 @@ if(WIN32)
         -NoProfile -NonInteractive -Command
         "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim")
     set_tests_properties(emulator_door_websocket_test PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    add_test(NAME emulator_door_arbitration_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -DoorArbitration")
+    set_tests_properties(emulator_door_arbitration_test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    add_test(NAME emulator_auto_cycle_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -AutoCycle")
+    add_test(NAME emulator_auto_cycle_occupied_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+        -NoProfile -NonInteractive -Command
+        "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -EmulatorDoorSim -DoorArbitration -AutoCycle")
+    set_tests_properties(emulator_auto_cycle_test emulator_auto_cycle_occupied_test PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    foreach(mode IN ITEMS blocking reconnect emulator)
+        set(periodic_args -PeriodicSnapshot)
+        if(mode STREQUAL "reconnect")
+            list(APPEND periodic_args -PeriodicReconnect)
+        elseif(mode STREQUAL "emulator")
+            list(APPEND periodic_args -EmulatorDoorSim -AutoCycle)
+        endif()
+        list(JOIN periodic_args " " periodic_args)
+        add_test(NAME radar_periodic_snapshot_${mode}_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+            -NoProfile -NonInteractive -Command
+            "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' ${periodic_args}")
+        set_tests_properties(radar_periodic_snapshot_${mode}_test PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+    endforeach()
 endif()

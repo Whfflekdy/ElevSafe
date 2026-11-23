@@ -10,7 +10,7 @@
 
 namespace elevsafe
 {
-    // Presentation-only mapping. No second clustering or C state/safety judgment.
+    // Maps B clusters to the detections consumed by C without reclustering.
     FrameDetections toTrackingDetections(const sp::PipelineResult& result);
     std::string trackingSnapshot(const sp::PipelineResult& result,
         const std::vector<TrackOutput>& tracks, std::chrono::system_clock::time_point publishedAt);
@@ -27,7 +27,8 @@ namespace elevsafe
         static constexpr auto publishPeriod = std::chrono::milliseconds(100);
         std::optional<std::string> process(const sp::PipelineResult& result,
             Clock::time_point now, std::chrono::system_clock::time_point publishedAt);
-        std::vector<TrackOutput> observe(const sp::PipelineResult& result);
+        FrameResult observe(const sp::PipelineResult& result);
+        FrameResult observe(const sp::PipelineResult& result, DoorState doorState);
         std::size_t processedFrames() const { return processedFrames_; }
     private:
         TrackingEngine engine_;
