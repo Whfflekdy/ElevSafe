@@ -1,5 +1,6 @@
 #include "elevsafe/tracking_adapter.h"
 #include "elevsafe/emulator_door_arbitration.h"
+#include "elevsafe/periodic_radar_publisher.h"
 #include "elevsafe/signal_adapter.h"
 #include "elevsafe/websocket_message.h"
 #include <nlohmann/json.hpp>
@@ -11,6 +12,53 @@
 namespace
 {
     void expect(bool ok, const char* text) { if (!ok) throw std::runtime_error(text); }
+
+    void testPeriodicSnapshotSchedule()
+    {
+        using namespace std::chrono_literals;
+        using Json = nlohmann::json;
+        using Schedule = elevsafe::RadarSnapshotSchedule;
+        const Schedule::Time now{};
+        const std::chrono::system_clock::time_point utc{};
+        Schedule schedule;
+        expect(!schedule.due() && !schedule.poll(now, utc), "published before the first observation");
+
+        TrackOutput track{};
+        track.id = 42;
+        track.x = 0.25;
+        track.y = 0.5;
+        track.state = TrackState::CONFIRMED;
+        track.phase = elevsafe::Phase::INSIDE;
+        track.safety = elevsafe::Safety::FALL;
+        schedule.observe(17, {track}, "OPENING", "OPEN", now);
+        const auto first = Json::parse(schedule.poll(now, utc).value());
+        expect(first["timestamp_us"] == 17 && first["door_command"] == "OPEN"
+            && first["passengers"].size() == 1 && first["passengers"][0]["id"] == 42
+            && first["passengers"][0]["safety_state"] == "FALL", "first periodic observation was altered");
+        expect(!schedule.poll(now + 99ms, utc), "periodic slot emitted before 100ms");
+        schedule.updateDoor("OPEN", std::nullopt);
+        const auto second = Json::parse(schedule.poll(now + 100ms, utc + 1s).value());
+        expect(second["timestamp"] != first["timestamp"] && second["timestamp_us"] == 17
+            && second["door_state"] == "OPEN" && second["door_command"].is_null()
+            && second["passengers"] == first["passengers"], "idle tick changed cached Radar fields or repeated a command");
+
+        schedule.observe(30, {}, "OPEN", std::nullopt, now + 120ms);
+        expect(schedule.due() == now + 200ms, "observation rescheduled the periodic slot");
+        const auto late = Json::parse(schedule.poll(now + 450ms, utc + 2s).value());
+        expect(late["timestamp_us"] == 30 && late["passengers"].empty()
+            && !schedule.poll(now + 450ms, utc) && !schedule.poll(now + 549ms, utc)
+            && schedule.due() == now + 550ms, "late poll caught up missed slots or changed an empty observation");
+
+        schedule.observe(31, {track}, "CLOSING", "CLOSE", now + 460ms);
+        schedule.end();
+        expect(!schedule.due() && !schedule.poll(now + 10s, utc), "ended session emitted another snapshot");
+        Schedule replacement;
+        expect(!replacement.poll(now + 10s, utc), "new session emitted before its first observation");
+        replacement.observe(0, {}, "CLOSED", std::nullopt, now + 11s);
+        const auto fresh = Json::parse(replacement.poll(now + 11s, utc).value());
+        expect(fresh["timestamp_us"] == 0 && fresh["passengers"].empty()
+            && fresh["door_command"].is_null(), "previous session data leaked into the new session");
+    }
 
     void testEmulatorAutoCycle()
     {
@@ -199,6 +247,7 @@ int main(int argc, char** argv)
     {
         testEmulatorDoorArbitration();
         testEmulatorAutoCycle();
+        testPeriodicSnapshotSchedule();
         using namespace std::chrono_literals;
         using Json = nlohmann::json;
         using Demo = elevsafe::TrackingDemo;
