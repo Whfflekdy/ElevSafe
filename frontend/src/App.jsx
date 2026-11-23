@@ -221,14 +221,17 @@ function App() {
       setTimestampUs(data.timestamp_us);
 
       const now = Date.now();
-      if (lastTimestampUsRef.current === null || data.timestamp_us > lastTimestampUsRef.current) {
+      if (lastTimestampUsRef.current === null || data.timestamp_us !== lastTimestampUsRef.current) {
+        const isReset = lastTimestampUsRef.current !== null && data.timestamp_us < lastTimestampUsRef.current;
         lastTimestampUsRef.current = data.timestamp_us;
         lastTimestampUsChangedAtRef.current = now;
 
         if (isRadarStaleRef.current) {
           isRadarStaleRef.current = false;
           setIsRadarStale(false);
-          log(`[${new Date().toLocaleTimeString()}] ✅ 레이더(timestamp_us) 갱신 재개`);
+          log(`[${new Date().toLocaleTimeString()}] ✅ 레이더(timestamp_us) 갱신 재개${isReset ? ' (초기화 감지)' : ''}`);
+        } else if (isReset) {
+          log(`[${new Date().toLocaleTimeString()}] 🔄 레이더 timestamp_us 초기화 감지 (${data.timestamp_us}µs)`);
         }
       } else if (lastTimestampUsChangedAtRef.current === null) {
         lastTimestampUsChangedAtRef.current = now;
@@ -260,17 +263,76 @@ function App() {
         throw new Error('JSON 객체가 필요합니다.');
       }
 
-      // 필수 Snapshot 필드 검증: passengers(배열), door_state(유효 상태), door_command(유효 명령 또는 null)
       const validDoorStates = ['UNKNOWN', 'OPEN', 'CLOSED', 'OPENING', 'CLOSING'];
       const validDoorCommands = [null, 'OPEN', 'HOLD', 'CLOSE'];
+      const validPassengerStates = ['OUTSIDE', 'ENTERING', 'INSIDE', 'EXITING'];
+      const validSafetyStates = [null, 'FALL', 'IMMOBILE'];
 
-      if (
-        !Array.isArray(data.passengers) ||
-        !validDoorStates.includes(data.door_state) ||
-        !('door_command' in data) ||
-        !validDoorCommands.includes(data.door_command)
-      ) {
-        throw new Error('필수 Snapshot 필드가 누락되었거나 형식이 올바르지 않습니다.');
+      const isNonEmptyString = (val) => typeof val === 'string' && val.trim().length > 0;
+
+      const hasValidTimestamp =
+        'timestamp' in data &&
+        isNonEmptyString(data.timestamp) &&
+        'timestamp_us' in data &&
+        typeof data.timestamp_us === 'number' &&
+        Number.isInteger(data.timestamp_us);
+
+      const hasValidDoorCommand =
+        'door_command' in data &&
+        (data.door_command === null ||
+          (isNonEmptyString(data.door_command) && validDoorCommands.includes(data.door_command)));
+
+      const hasValidTopFields =
+        hasValidTimestamp &&
+        Array.isArray(data.passengers) &&
+        isNonEmptyString(data.door_state) &&
+        validDoorStates.includes(data.door_state) &&
+        hasValidDoorCommand;
+
+      if (!hasValidTopFields) {
+        throw new Error('필수 최상위 Snapshot 필드가 누락되었거나 형식이 올바르지 않습니다.');
+      }
+
+      const hasValidPassengers = data.passengers.every(p => {
+        if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+
+        const hasValidId =
+          'id' in p &&
+          ((typeof p.id === 'number' && Number.isFinite(p.id)) || isNonEmptyString(p.id));
+
+        const hasValidCoords =
+          'x' in p &&
+          typeof p.x === 'number' &&
+          Number.isFinite(p.x) &&
+          'y' in p &&
+          typeof p.y === 'number' &&
+          Number.isFinite(p.y);
+
+        const hasValidState =
+          'state' in p &&
+          isNonEmptyString(p.state) &&
+          validPassengerStates.includes(p.state);
+
+        const hasValidSafetyState =
+          'safety_state' in p &&
+          (p.safety_state === null ||
+            (isNonEmptyString(p.safety_state) && validSafetyStates.includes(p.safety_state)));
+
+        // 선택적 label: 없거나 undefined면 통과, 있으면 string이어야 함
+        const hasValidLabel =
+          !('label' in p) || p.label === undefined || typeof p.label === 'string';
+
+        return (
+          hasValidId &&
+          hasValidCoords &&
+          hasValidState &&
+          hasValidSafetyState &&
+          hasValidLabel
+        );
+      });
+
+      if (!hasValidPassengers) {
+        throw new Error('passengers 항목의 필수 필드가 누락되었거나 형식이 올바르지 않습니다.');
       }
 
       lastReceivedAtRef.current = Date.now();
@@ -311,6 +373,8 @@ function App() {
         lastTimestampUsChangedAtRef.current = null;
         isRadarStaleRef.current = false;
         setIsRadarStale(false);
+        isDataLostRef.current = false;
+        setIsDataLost(false);
       };
       ws.onmessage = event => receiveMessage(event.data);
       
@@ -541,7 +605,7 @@ function App() {
                 {/* 1. 상단: ID 및 이름 */}
                 <div className="info-header">
                   <span className="id-badge">ID #{selectedPassenger.id}</span>
-                  <strong>{selectedPassenger.label}</strong>
+                  <strong>{selectedPassenger.label || `Passenger #${selectedPassenger.id}`}</strong>
                 </div>
 
                 {/* 2. 중단: 남은 세로 공간을 채우는 대형 상태 표시창 */}
