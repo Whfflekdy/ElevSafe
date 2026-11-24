@@ -1,0 +1,18 @@
+services:
+  relay:
+    environment:
+      CONTROL_ORIGIN: ${CONTROL_ORIGIN:?Supply the public HTTPS origin}
+  web:
+    secrets: [dashboard_users, tls_chain, tls_key]
+    ports:
+      - "${HTTPS_BIND:-127.0.0.1}:${HTTPS_PORT:-18443}:443"
+    volumes:
+      - ./web/https.conf:/etc/nginx/conf.d/https.conf:ro
+
+secrets:
+  dashboard_users:
+    file: ${DASHBOARD_USERS_FILE:?Supply a hashed password file}
+  tls_chain:
+    file: ${TLS_CHAIN_FILE:?Supply a TLS certificate chain}
+  tls_key:
+    file: ${TLS_KEY_FILE:?Supply the TLS private key}

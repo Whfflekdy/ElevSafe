@@ -6,6 +6,8 @@ param(
     [ValidateRange(1, 65535)][int]$WsPort = 8080,
     [ValidateRange(1, 86400)][int]$MockDuration = 600,
     [switch]$DoorSim,
+    [switch]$EmulatorDoorSim,
+    [switch]$RemoteControl,
     [ValidateNotNullOrEmpty()][string]$RadarHost = '127.0.0.1',
     [ValidateRange(1, 65535)][int]$RadarPort = 29172,
     [string]$SignalConfig,
@@ -38,8 +40,22 @@ function Start-Child([string]$Executable, [string[]]$Arguments, [switch]$Bridge)
     $info.WorkingDirectory = $root
     $info.UseShellExecute = $false
     # Share the console so console Ctrl+C can also reach the children.
-    if ($Bridge) { $info.EnvironmentVariables['LOCAL_URL'] = $localUrl }
-    else { $info.EnvironmentVariables.Remove('REMOTE_URL') }
+    if ($Bridge) {
+        $info.EnvironmentVariables['LOCAL_URL'] = $localUrl
+        $info.EnvironmentVariables['CONTROL_ENABLED'] = if ($RemoteControl) {'1'} else {'0'}
+        if ($RemoteControl) { $info.EnvironmentVariables['CONTROL_LOCAL_URL'] = "ws://127.0.0.1:$WsPort/control-local" }
+        else {
+            $info.EnvironmentVariables.Remove('CONTROL_BRIDGE_TOKEN')
+            $info.EnvironmentVariables.Remove('CONTROL_LOCAL_TOKEN')
+            $info.EnvironmentVariables.Remove('CONTROL_REMOTE_URL')
+        }
+    }
+    else {
+        $info.EnvironmentVariables.Remove('REMOTE_URL')
+        $info.EnvironmentVariables.Remove('CONTROL_BRIDGE_TOKEN')
+        $info.EnvironmentVariables.Remove('CONTROL_REMOTE_URL')
+        if (!$RemoteControl) { $info.EnvironmentVariables.Remove('CONTROL_LOCAL_TOKEN') }
+    }
     [Diagnostics.Process]::Start($info)
 }
 
@@ -127,7 +143,7 @@ if (-not [Uri]::TryCreate($env:REMOTE_URL, [UriKind]::Absolute, [ref]$remote) -o
 
 $wsArgs = @('--ws-bind', '127.0.0.1', '--ws-port', "$WsPort")
 if ($Mode -eq 'Mock') {
-    if ($PSBoundParameters.ContainsKey('SignalConfig') -or $PSBoundParameters.ContainsKey('RadarHost') -or
+    if ($EmulatorDoorSim -or $PSBoundParameters.ContainsKey('SignalConfig') -or $PSBoundParameters.ContainsKey('RadarHost') -or
         $PSBoundParameters.ContainsKey('RadarPort')) { throw 'Radar options require -Mode Radar.' }
     $backendArgs = @('--ws-mock', '--ws-duration', "$MockDuration") + $wsArgs
     if ($DoorSim) { $backendArgs += '--ws-door-sim' }
@@ -137,6 +153,23 @@ else {
     if (-not $SignalConfig) { throw '-SignalConfig is required in Radar mode.' }
     $cfg = Resolve-RequiredFile $SignalConfig 'Signal configuration'
     $backendArgs = @($RadarHost, "$RadarPort", '--signal-config', $cfg, '--websocket') + $wsArgs
+    if ($EmulatorDoorSim) { $backendArgs += '--emulator-door-sim' }
+}
+if ($RemoteControl) {
+    if (!($DoorSim -or $EmulatorDoorSim)) { throw '-RemoteControl requires -DoorSim or -EmulatorDoorSim.' }
+    $controlUrl = $null
+    $controlSchemes = if ($env:CONTROL_ALLOW_INSECURE_DEMO -ceq '1') { @('wss', 'ws') } else { @('wss') }
+    if (-not [Uri]::TryCreate($env:CONTROL_REMOTE_URL, [UriKind]::Absolute, [ref]$controlUrl) -or
+        $controlUrl.Scheme -notin $controlSchemes -or !$controlUrl.Host -or $controlUrl.AbsolutePath -cne '/control-link' -or
+        $controlUrl.UserInfo -or $controlUrl.Query -or $controlUrl.Fragment) {
+        throw 'Set CONTROL_REMOTE_URL to a Relay control-link endpoint (wss, or ws with explicit demo opt-in).'
+    }
+    if ($env:CONTROL_BRIDGE_TOKEN -cnotmatch '^[a-zA-Z0-9_-]{32,256}$' -or
+        $env:CONTROL_LOCAL_TOKEN -cnotmatch '^[a-zA-Z0-9_-]{32,256}$' -or
+        $env:CONTROL_BRIDGE_TOKEN -ceq $env:CONTROL_LOCAL_TOKEN) {
+        throw 'Set independent Bridge and loopback control credentials.'
+    }
+    $backendArgs += '--ws-remote-control'
 }
 
 $listeners = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()

@@ -21,6 +21,8 @@
 #include <exception>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -73,6 +75,7 @@ namespace
                      "       [--emulator-door-sim] (Radar TCP, numeric IP, --signal-config --websocket, loopback WS)\n"
                      "       [--emulator-auto-cycle] (requires --emulator-door-sim; one virtual arrival per process)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
+                     "       [--ws-remote-control] (loopback, software door mode, CONTROL_LOCAL_TOKEN)\n"
                      "       [--ws-periodic-snapshot] (Radar TCP, --signal-config --websocket)\n"
                      "       elevsafe_backend --ws-mock [--ws-bind IP] [--ws-port PORT] [--ws-duration SECONDS] [--ws-door-sim [--ws-door-scenario NAME]]\n"
                      "       --mock-websocket is an alias for --ws-mock\n";
@@ -130,10 +133,65 @@ namespace
             << " client=" << request.clientId << " command=" << request.command
             << " decision=" << (applied ? "applied" : "unchanged")
             << " state=" << Door::name(door.state())
-            << " mode=" << (door.mode() == Door::Mode::Auto ? "AUTO" : "MANUAL") << '\n';
+            << " mode=" << (door.mode() == Door::Mode::Auto ? "AUTO" : "MANUAL")
+            << " source=" << (request.requestId.empty() ? "local" : "remote")
+            << " request=" << (request.requestId.empty() ? "-" : request.requestId) << '\n';
     }
 
-    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim, const std::optional<std::string>& scenario)
+    elevsafe::DoorSimulation::Command manualCommand(std::string_view text)
+    {
+        using Command = elevsafe::DoorSimulation::Command;
+        return text == "OPEN" ? Command::Open : text == "HOLD" ? Command::Hold : Command::Close;
+    }
+
+    // The applied motion/HOLD belongs to the door. The authenticated socket owns
+    // permission to submit more requests. Only the door owner calls this function.
+    template <typename Apply>
+    bool serviceManualDoor(elevsafe::WebSocketServer& server, elevsafe::DoorSimulation& door,
+        std::size_t limit, std::size_t session, const Apply& apply)
+    {
+        using Door = elevsafe::DoorSimulation;
+        std::optional<elevsafe::ManualDoorRequest> remote;
+        const bool applied = server.applyRemoteDoor([&](const auto& request, bool sameOwner)
+        {
+            remote = request;
+            const auto command = manualCommand(request.command);
+            if (door.mode() == Door::Mode::Manual && door.activeCommand() == command)
+            {
+                if (sameOwner) return false;
+                door.recordManualTakeover();
+                return true;
+            }
+            return apply(command);
+        }, door.mode() == Door::Mode::Auto);
+        if (remote) logManualDoor(*remote, door, applied, session);
+        bool consumed = remote.has_value();
+        for (std::size_t i = 0; i < limit; ++i)
+        {
+            const auto request = server.popCommand();
+            if (!request) break;
+            consumed = true;
+            logManualDoor(*request, door, apply(manualCommand(request->command)), session);
+        }
+        return consumed;
+    }
+
+    std::string commandEnvironment(const char* name)
+    {
+#ifdef _WIN32
+        char* value = nullptr;
+        std::size_t length = 0;
+        if (_dupenv_s(&value, &length, name) != 0) throw std::runtime_error("Could not read control configuration");
+        std::unique_ptr<char, decltype(&std::free)> owned(value, &std::free);
+        return value ? value : "";
+#else
+        const auto* value = std::getenv(name);
+        return value ? value : "";
+#endif
+    }
+
+    int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim,
+        const std::optional<std::string>& scenario, bool remoteControl)
     {
         mockStop.store(false, std::memory_order_relaxed);
         const auto previous = std::signal(SIGINT, stopMock);
@@ -164,13 +222,14 @@ namespace
             const auto now = std::chrono::steady_clock::now();
             if (doorSim)
             {
-                while (const auto request = server.popCommand())
+                if (remoteControl)
                 {
-                    using Command = elevsafe::DoorSimulation::Command;
-                    const auto command = request->command == "OPEN" ? Command::Open
-                        : request->command == "HOLD" ? Command::Hold : Command::Close;
-                    logManualDoor(*request, simulation, simulation.apply(command, now), 0);
+                    simulation.advanceMotion(now);
+                    server.updateRemoteDoor(true, simulation.state() == elevsafe::DoorSimulation::State::Unknown
+                        ? "DOOR_UNKNOWN" : "");
                 }
+                serviceManualDoor(server, simulation, std::numeric_limits<std::size_t>::max(), 0,
+                    [&](auto command) { return simulation.apply(command, now); });
                 if (scenario)
                 {
                     policy.accept(elevsafe::mockDoorScenarioInput(*scenario,
@@ -241,6 +300,7 @@ int main(int argc, char** argv)
     std::size_t profileLimit = 10000, profileWarmup = 5;
     bool websocketEnabled = false;
     bool periodicSnapshot = false;
+    bool remoteControl = false;
     bool mockMode = false;
     bool doorSim = false;
     std::optional<std::string> doorScenario;
@@ -257,6 +317,11 @@ int main(int argc, char** argv)
             if (doorScenario || argument + 1 >= argc || !elevsafe::isMockDoorScenario(argv[argument + 1]))
             { std::cerr << "Missing, duplicate or invalid --ws-door-scenario\n"; return 2; }
             doorScenario = argv[argument + 1]; argument += 2; continue;
+        }
+        if (option == "--ws-remote-control")
+        {
+            if (remoteControl) { std::cerr << "Duplicate --ws-remote-control\n"; return 2; }
+            remoteControl = true; ++argument; continue;
         }
         if (option == "--ws-periodic-snapshot")
         {
@@ -427,6 +492,36 @@ int main(int argc, char** argv)
         ++argument;
     }
 
+    if (remoteControl)
+    {
+        if ((!emulatorDoorSim && !(mockMode && doorSim)) || benchmarkMode ||
+            (wsConfig.address != "127.0.0.1" && wsConfig.address != "::1"))
+        {
+            std::cerr << "--ws-remote-control requires a loopback software door simulation.\n";
+            return 2;
+        }
+        wsConfig.remoteControlToken = commandEnvironment("CONTROL_LOCAL_TOKEN");
+        if (wsConfig.remoteControlToken.size() < 32)
+        {
+            std::cerr << "Missing or invalid loopback control credential.\n";
+            return 2;
+        }
+        const auto ttl = commandEnvironment("CONTROL_TTL_MS");
+        const auto bytes = commandEnvironment("CONTROL_MAX_BYTES");
+        std::size_t value{};
+        if (!ttl.empty())
+        {
+            if (!parsePositiveSize(ttl.c_str(), value) || value <= 250 || value > 10000)
+            { std::cerr << "Invalid CONTROL_TTL_MS\n"; return 2; }
+            wsConfig.remoteControlTtlMs = static_cast<unsigned>(value);
+        }
+        if (!bytes.empty())
+        {
+            if (!parsePositiveSize(bytes.c_str(), value) || value < 512 || value > 4096)
+            { std::cerr << "Invalid CONTROL_MAX_BYTES\n"; return 2; }
+            wsConfig.maxControlBytes = value;
+        }
+    }
     if (periodicSnapshot && (mockMode || benchmarkMode || !signalConfigPath || !websocketEnabled))
     {
         std::cerr << "--ws-periodic-snapshot requires Radar TCP, --signal-config and --websocket; incompatible with Mock and benchmark.\n";
@@ -532,7 +627,11 @@ int main(int argc, char** argv)
         {
             wsConfig.allowNullDoorRequest = mockMode && doorSim;
             auto candidate = std::make_unique<elevsafe::WebSocketServer>(wsConfig, std::cerr);
-            if (emulatorDoorSim) candidate->setManualCommandsEnabled(false);
+            if (emulatorDoorSim)
+            {
+                candidate->setManualCommandsEnabled(false);
+                if (remoteControl) candidate->updateRemoteDoor(false, "RADAR_NO_OBSERVATION");
+            }
             candidate->start();
             websocket = std::move(candidate);
         }
@@ -556,7 +655,7 @@ int main(int argc, char** argv)
         }
         if (mockMode)
         {
-            try { return runMock(*websocket, mockSeconds, doorSim, doorScenario); }
+            try { return runMock(*websocket, mockSeconds, doorSim, doorScenario, remoteControl); }
             catch (const std::exception& error)
             {
                 std::cerr << "[ws] startup/runtime failed: " << error.what() << '\n';
@@ -626,6 +725,7 @@ int main(int argc, char** argv)
             std::optional<std::int64_t> radarTimestamp;
             std::vector<TrackOutput> radarTracks;
             bool newRadarObservation = false;
+            std::optional<Door::Time> lastRadarObservationAt;
             std::optional<Door::Command> pendingDoorCommand;
             bool lastSnapshotHadCommand = false;
             std::optional<Door::Clock::time_point> lastPublish;
@@ -636,16 +736,16 @@ int main(int argc, char** argv)
             {
                 // The command window is closed until the first valid observation.
                 if (!radarTimestamp) return false;
-                bool manualConsumed = false;
-                for (std::size_t n = 0; n < wsConfig.maxCommands; ++n)
+                if (remoteControl)
                 {
-                    const auto request = websocket->popCommand();
-                    if (!request) break;
-                    const auto command = request->command == "OPEN" ? Door::Command::Open
-                        : request->command == "HOLD" ? Door::Command::Hold : Door::Command::Close;
-                    manualConsumed = true;
-                    logManualDoor(*request, virtualDoor, doorArbitration.applyManual(command, now), session);
+                    doorArbitration.advanceMotion(now);
+                    constexpr auto maximumObservationAge = std::chrono::seconds(1);
+                    const bool fresh = lastRadarObservationAt && now - *lastRadarObservationAt <= maximumObservationAge;
+                    websocket->updateRemoteDoor(true, !fresh ? "RADAR_STALE" :
+                        virtualDoor.state() == Door::State::Unknown ? "DOOR_UNKNOWN" : "");
                 }
+                const bool manualConsumed = serviceManualDoor(*websocket, virtualDoor,
+                    wsConfig.maxCommands, session, [&](auto command) { return doorArbitration.applyManual(command, now); });
                 const auto before = virtualDoor.state();
                 doorArbitration.advanceMotion(now);
                 if (virtualDoor.state() != before)
@@ -689,7 +789,7 @@ int main(int argc, char** argv)
             std::optional<std::uint64_t> firstTimestamp;
             auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
             client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
-                &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
+                &summaryPrinted, &lastRadarObservationAt, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
                 emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor, session, &lastCRequest](const elevsafe::RadarFrame& frame)
             {
                 if (!benchmarkMode && !firstTimestamp) firstTimestamp = frame.timestampUs;
@@ -702,7 +802,7 @@ int main(int argc, char** argv)
                 pipeline.onFrame(frame);
                 pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
                 emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor,
-                receivedAt, session, &lastCRequest](const elevsafe::RadarFrame& pendingFrame)
+                receivedAt, session, &lastCRequest, &lastRadarObservationAt](const elevsafe::RadarFrame& pendingFrame)
                 {
                     if (signal)
                     {
@@ -751,6 +851,7 @@ int main(int argc, char** argv)
                                 else radarTracks = std::move(observation.tracks);
                                 const bool firstObservation = !radarTimestamp;
                                 radarTimestamp = result.timestamp_us;
+                                lastRadarObservationAt = receivedAt;
                                 newRadarObservation = true;
                                 if (firstObservation) websocket->setManualCommandsEnabled(true);
                             }
@@ -848,7 +949,11 @@ int main(int argc, char** argv)
                     if (reconnectEnabled) control.connectNotAfter = retryBudget.deadline();
                     control.receiveIdleTimeout = radarIdleTimeout;
                     if (periodic || emulatorDoorSim) control.onReceiveTick = tick;
-                    if (periodic) control.onReceiveEnd = sealPublisher;
+                    if (periodic || remoteControl) control.onReceiveEnd = [&]
+                    {
+                        if (remoteControl) websocket->updateRemoteDoor(false, "BACKEND_UNAVAILABLE");
+                        if (periodic) sealPublisher();
+                    };
                     control.cancelRequested = [] { return radarStop.load(std::memory_order_relaxed); };
                     result = client.runSession(std::cerr, control, profileDiagnostics);
                 }
@@ -885,7 +990,11 @@ int main(int argc, char** argv)
                     profileDiagnostics.stage = "publisher_failure";
                 }
             }
-            if (emulatorDoorSim) websocket->setManualCommandsEnabled(false);
+            if (emulatorDoorSim)
+            {
+                if (remoteControl) websocket->updateRemoteDoor(false, "BACKEND_UNAVAILABLE");
+                websocket->setManualCommandsEnabled(false);
+            }
             if (publisherFailure) reportFailure("[ws-periodic] publish failed: ", publisherFailure);
             if (receiveFailure && receiveFailure != publisherFailure)
             {

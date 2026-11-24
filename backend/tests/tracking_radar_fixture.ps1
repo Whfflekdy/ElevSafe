@@ -49,7 +49,7 @@ function Receive-Text($socket, $cancel) {
     $task = $socket.ReceiveAsync([ArraySegment[byte]]::new($bytes), $cancel.Token)
     Read-TextResult $task $bytes
 }
-$listener=$null; $peer=$null; $child=$null; $first=$null; $second=$null
+$listener=$null; $peer=$null; $child=$null; $first=$null; $second=$null; $console=$null
 $stdout=Join-Path $logs 'stdout.log'; $stderr=Join-Path $logs 'stderr.log'; $stage='setup'
 try {
     $listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
@@ -67,7 +67,37 @@ try {
     if ($PeriodicSnapshot) { $arguments+='--ws-periodic-snapshot' }
     if ($PeriodicReconnect) { $arguments+=@('--radar-reconnect','--radar-reconnect-eof') }
     if ($PeriodicIdle) { $arguments+=@('--radar-reconnect','--radar-idle-timeout-ms','1800') }
-    $child=Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    if ($PeriodicSnapshot) {
+        # MSVC buffers redirected stdout. Give the Backend a console so its existing
+        # frame log is visible before EOF; keep stderr and the actual Backend exit code.
+        $launch=Join-Path $logs 'launch.clixml'
+        $pidFile=Join-Path $logs 'backend.pid'
+        @{Exe=$BackendExe; Args=$arguments; Err=$stderr; PidFile=$pidFile} | Export-Clixml -LiteralPath $launch
+        $script='$s=Import-Clixml -LiteralPath '''+$launch.Replace("'","''")+'''; '+
+            '$p=Start-Process -FilePath $s.Exe -ArgumentList $s.Args -NoNewWindow -RedirectStandardError $s.Err -PassThru; '+
+            '[IO.File]::WriteAllText($s.PidFile,[string]$p.Id); $p.WaitForExit()'
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+        $info=[Diagnostics.ProcessStartInfo]::new("$env:SystemRoot/System32/conhost.exe",
+            "--headless --width 400 -- powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded")
+        $info.UseShellExecute=$false
+        $info.CreateNoWindow=$true
+        $info.RedirectStandardInput=$true # An immediate stdin EOF closes the pseudoconsole.
+        $info.RedirectStandardOutput=$true
+        $outputFile=[IO.FileStream]::new($stdout,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite,1)
+        $console=[Diagnostics.Process]::Start($info)
+        $copy=$console.StandardOutput.BaseStream.CopyToAsync($outputFile)
+        $start=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            if (Test-Path -LiteralPath $pidFile) {
+                $backendPid=[IO.File]::ReadAllText($pidFile)
+                if ($backendPid -match '^\d+$') { $child=Get-Process -Id ([int]$backendPid); break }
+            }
+            if ($console.HasExited -or $start.ElapsedMilliseconds -ge 6000) { throw 'Backend console startup failed' }
+            Start-Sleep -Milliseconds 10
+        } while ($true)
+    } else {
+        $child=Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    }
     $null=$child.Handle
     Write-Host "START PID=$($child.Id) radar=$radarPort ws=$wsPort UTC=$([DateTime]::UtcNow.ToString('o')) logs=$logs"
     $stage='radar.accept'
@@ -81,11 +111,11 @@ try {
         finally { $cancel.Dispose() }
     }
 
-    function Read-SimSnapshot($pending = $null, [byte[]]$buffer = $null) {
+    function Read-SimSnapshot($pending = $null, [byte[]]$buffer = $null, [int]$timeoutMs = 6500) {
         if ($null -ne $pending) {
             $text=Read-TextResult $pending $buffer
         } else {
-            $cancel=[Threading.CancellationTokenSource]::new(6500)
+            $cancel=[Threading.CancellationTokenSource]::new($timeoutMs)
             try { $text=Receive-Text $first $cancel }
             finally { $cancel.Dispose() }
         }
@@ -183,22 +213,39 @@ try {
 
         $stage='periodic.active-input'
         $feed=[Diagnostics.Stopwatch]::StartNew()
-        for ($i=0; $i -lt 12; ++$i) {
-            $wait=50*$i-$feed.Elapsed.TotalMilliseconds
+        $finalFrameId=112
+        for ($frameId=101; $frameId -le $finalFrameId; ++$frameId) {
+            $wait=50*($frameId-101)-$feed.Elapsed.TotalMilliseconds
             if ($wait -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($wait)) }
-            $bytes=Packet ([uint32](101+$i)) 40
+            $bytes=Packet $frameId 40
             $peer.GetStream().Write($bytes,0,$bytes.Length)
         }
-        $lastTime=-1
-        $fixed=$null
-        for ($i=0; $i -lt 23; ++$i) {
-            $s=Read-SimSnapshot
+        # This process has a fresh log directory and only session 1 receives frame 112.
+        $budgetMs=if ($PeriodicIdle) { 1500 } else { 3500 }
+        $sync=[Diagnostics.Stopwatch]::StartNew()
+        $pattern="\bsignal frame_id=$finalFrameId timestamp_us=(\d+) inputPoints="
+        do {
+            $match=[regex]::Match((Read-LiveLog $stdout),$pattern)
+            if ($match.Success) { break }
+            if ($child.HasExited -or $sync.ElapsedMilliseconds -ge $budgetMs) {
+                throw "Missing Backend observation for final frame $finalFrameId"
+            }
+            Start-Sleep -Milliseconds 10
+        } while ($true)
+        $finalTime=[long]$match.Groups[1].Value
+        $lastTime=$initial.timestamp_us
+        do {
+            $remaining=$budgetMs-$sync.ElapsedMilliseconds
+            if ($remaining -le 0) { throw "Missing Viewer Snapshot for final frame $finalFrameId at $finalTime" }
+            $s=Read-SimSnapshot -timeoutMs $remaining
             if ($null -ne $s.door_command) { throw 'Initial command was repeated or an unexpected command was applied' }
             if ($s.timestamp_us -lt $lastTime) { throw 'Timestamp regressed inside one TCP session' }
-            if ($s.timestamp_us -eq $lastTime -and $s.passengers.Count -eq 1) { $fixed=$s; break }
+            if ($s.timestamp_us -gt $finalTime) { throw "Snapshot exceeded final observation $finalTime" }
             $lastTime=$s.timestamp_us
-        }
-        if ($null -eq $fixed -or $fixed.timestamp_us -le 0 -or $fixed.passengers[0].id -ne 1 -or
+        } until ($s.timestamp_us -eq $finalTime)
+        $fixed=$s
+        Write-Host "Final observation: frame=$finalFrameId timestamp_us=$finalTime"
+        if ($fixed.timestamp_us -le 0 -or $fixed.passengers.Count -ne 1 -or $fixed.passengers[0].id -ne 1 -or
             $fixed.passengers[0].state -ne 'INSIDE' -or $null -ne $fixed.passengers[0].safety_state) {
             throw 'Missing tracked passenger on the latest observation'
         }
@@ -650,4 +697,11 @@ try {
         }
         $child.Dispose()
     }
+    if ($console) {
+        try {
+            if (!$console.WaitForExit(2000)) { $console.Kill() }
+            if (!$copy.Wait(2000)) { throw 'Console log capture did not finish' }
+        } finally { $console.Dispose() }
+    }
+    if ($outputFile) { $outputFile.Dispose() }
 }

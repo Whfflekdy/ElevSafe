@@ -1,11 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace elevsafe
 {
@@ -17,6 +20,9 @@ namespace elevsafe
         std::size_t maxSnapshotBytes = 65536;
         std::size_t maxRequestBytes = 4096;
         std::size_t maxCommands = 32;
+        std::string remoteControlToken;
+        unsigned remoteControlTtlMs = 2000;
+        std::size_t maxControlBytes = 1024;
         bool allowNullDoorRequest = false; // Only software door simulation enables this.
     };
 
@@ -24,6 +30,9 @@ namespace elevsafe
     {
         std::uint64_t clientId;
         std::string command;
+        // Only the authenticated loopback control route supplies these fields.
+        std::string requestId, controlSession, backendSession;
+        std::chrono::steady_clock::time_point expiresAt{};
     };
 
     struct WebSocketStatistics
@@ -62,6 +71,9 @@ namespace elevsafe
         // A disabled command window rejects new requests and discards queued ones atomically.
         void setManualCommandsEnabled(bool enabled);
         std::optional<ManualDoorRequest> popCommand();
+        // The door owner updates eligibility and applies at most one pending remote command.
+        void updateRemoteDoor(bool active, std::string_view reason);
+        bool applyRemoteDoor(const std::function<bool(const ManualDoorRequest&, bool)>& consume, bool motionFinished);
         // Individual atomic counters, not a transactional multi-field snapshot.
         WebSocketStatistics statistics() const noexcept;
         std::uint16_t port() const noexcept;
