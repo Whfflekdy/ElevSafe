@@ -4,7 +4,7 @@
 
 namespace elevsafe::sp {
 
-enum class DoorState { UNKNOWN, OPEN, CLOSED };
+enum class DoorState { UNKNOWN, OPEN, CLOSED, OPENING, CLOSING };
 
 const char* doorStateToString(DoorState s);
 

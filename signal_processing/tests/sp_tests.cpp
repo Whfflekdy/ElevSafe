@@ -209,14 +209,14 @@ void testDoorMotion() {
     EXPECT(d.state() == DoorState::UNKNOWN);                            // 근거 없음
 
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));  // 열리는 중 (0.5초 300점)
-    EXPECT(d.state() == DoorState::OPEN);
+    EXPECT(d.state() == DoorState::OPENING);                            // (OPEN → OPENING)
     for (int i = 0; i < 20; ++i) d.update(Frame{});                    // 열린 채 멈춤, 승강장 비어 있음
-    EXPECT(d.state() == DoorState::OPEN);                               // 예전 방식이면 CLOSED가 됐을 상황
+    EXPECT(d.state() == DoorState::OPEN);                               // 그대로
 
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f)); // 닫히는 중
-    EXPECT(d.state() == DoorState::OPEN);                               // 아직 덜 닫힘
+    EXPECT(d.state() == DoorState::CLOSING);                            // (OPEN → CLOSING)
     for (int i = 0; i < 20; ++i) d.update(Frame{});                    // 다 닫힘
-    EXPECT(d.state() == DoorState::CLOSED);
+    EXPECT(d.state() == DoorState::CLOSED);                             // 그대로
 }
 
 void testDoorMotionReopen() {
@@ -229,8 +229,11 @@ void testDoorMotionReopen() {
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));   // 열림
     for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f));  // 닫히는 중
+    EXPECT(d.state() == DoorState::CLOSING);
     for (int i = 0; i < 6; ++i)  d.update(doorLeafPoints(30, 0.15f));   // 멈추지 않고 바로 다시 열림
-    for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
+    for (int i = 0; i < 4; ++i)  d.update(Frame{});                     // 창 평균이 반대 방향으로 넘어감
+    EXPECT(d.state() == DoorState::OPENING);                             // 다시 열리는 중으로 바뀜 (A 리뷰, PR #58)
+    for (int i = 0; i < 16; ++i) d.update(Frame{});                     // 열린 채 멈춤
     EXPECT(d.state() == DoorState::OPEN);   // 누적 합이었다면 −45+27 = −18 → CLOSED로 틀림
 }
 
