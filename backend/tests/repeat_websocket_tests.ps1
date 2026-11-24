@@ -7,7 +7,8 @@ param(
     [ValidateRange(1, 65535)][int]$Port = 8080,
     [ValidateRange(1, 86400)][int]$MockDurationSeconds = 1,
     [ValidateSet('', 'failed-start-cleanup', 'handshake-snapshots-commands',
-        'queue-bounds-slow-client', 'oversized-pending-handshake')][string]$Case = '',
+        'queue-bounds-slow-client', 'oversized-pending-handshake', 'publisher-shutdown', 'publisher-soak')][string]$Case = '',
+    [ValidateRange(1, 3600)][int]$SoakSeconds = 60,
     [string]$OutputDirectory = '',
     [string]$RepositoryRoot = '',
     [string]$BuildDirectory = 'backend/build-websocket-integration'
@@ -113,6 +114,7 @@ for ($round = 1; $round -le $Count; $round++) {
     $arguments = @('--diagnostics')
     if ($Mode -eq 'Server') {
         if ($Case) { $arguments += @('--case', $Case) }
+        if ($Case -eq 'publisher-soak') { $arguments += @('--soak-seconds', [string]$SoakSeconds) }
     } else {
         $arguments = @('--ws-mock', '--ws-port', [string]$Port, '--ws-duration', [string]$MockDurationSeconds)
     }
@@ -176,3 +178,5 @@ for ($round = 1; $round -le $Count; $round++) {
 }
 $results | Group-Object Status | Select-Object Count, Name
 Write-Host "Results: $csv"
+$failed = @($results | Where-Object Status -ne 'Success')
+if ($failed.Count) { throw "$($failed.Count) WebSocket run(s) failed. See $csv" }

@@ -8,7 +8,10 @@
 #include <boost/beast.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -30,6 +33,7 @@ namespace
     using Error = boost::system::error_code;
 
     bool diagnostics = false;
+    int soakSeconds = 60;
 
     long long timeMs()
     {
@@ -622,6 +626,134 @@ namespace
         context.refresh();
     }
 
+    void testPublisherShutdown(TestContext& context)
+    {
+        auto config = testConfig();
+        elevsafe::WebSocketServer server(config, context.log);
+        context.server = &server;
+        startServer(context, server, config);
+        Client viewer(context, server.port());
+        const auto snapshot = elevsafe::mockSnapshot();
+
+        // Unwind a producer that receives a publication rejection. The transport
+        // remains usable and the exception is reported on the owner's thread.
+        std::exception_ptr failure;
+        std::thread rejected([&]
+        {
+            try
+            {
+                if (!server.publishSnapshot(std::string(config.maxSnapshotBytes + 1, 'x')))
+                    throw std::runtime_error("snapshot rejected");
+            }
+            catch (...) { failure = std::current_exception(); }
+        });
+        rejected.join();
+        expect(failure != nullptr, "failed publication did not reach the producer");
+
+        failure = nullptr;
+        bool stoppedPublish = false;
+        std::jthread producer([&](std::stop_token stop)
+        {
+            try
+            {
+                while (!stop.stop_requested())
+                {
+                    if (!server.publishSnapshot(snapshot))
+                    {
+                        stoppedPublish = true;
+                        break;
+                    }
+                    std::this_thread::yield();
+                }
+            }
+            catch (...) { failure = std::current_exception(); }
+        });
+        expect(viewer.read("publisher.first-snapshot") == snapshot, "worker publication failed");
+        viewer.send("{\"door_command\":\"HOLD\"}");
+        until(context, server, "publisher.queued-command", "one queued command before shutdown",
+            [](const auto& stats) { return stats.commandsReceived == 1; });
+        context.at("publisher.concurrent-stop", server.port());
+        server.stop();
+        producer.join();
+        if (failure) std::rethrow_exception(failure);
+        expect(stoppedPublish && !server.publishSnapshot(snapshot), "publication was accepted after stop");
+        expect(!server.popCommand(), "shutdown retained a queued command");
+        const auto stats = server.statistics();
+        expect(stats.connected == 0 && stats.ingressPending == 0 && stats.sessionPending == 0
+            && stats.activeWrites == 0, "shutdown left pending work");
+        server.stop();
+        context.refresh();
+    }
+
+    void testPublisherSoak(TestContext& context)
+    {
+        using Clock = std::chrono::steady_clock;
+        using namespace std::chrono_literals;
+        auto config = testConfig();
+        config.maxClients = 2;
+        elevsafe::WebSocketServer server(config, context.log);
+        context.server = &server;
+        startServer(context, server, config);
+        Client slow(context, server.port());
+        Client viewer(context, server.port());
+        until(context, server, "soak.viewers.ready", "both viewers ready",
+            [](const auto& stats) { return stats.connected == 2; });
+        auto payload = nlohmann::json::parse(elevsafe::mockSnapshot());
+        payload["passengers"][0]["label"] = std::string(50000, 'x');
+        const auto start = Clock::now();
+        const auto duration = std::chrono::seconds(soakSeconds);
+        const auto durationUs = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        std::size_t published = 0;
+        std::exception_ptr failure;
+        std::jthread producer([&](std::stop_token stop)
+        {
+            try
+            {
+                while (!stop.stop_requested())
+                {
+                    const auto now = Clock::now();
+                    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(now - start).count();
+                    payload["timestamp_us"] = us;
+                    if (!server.publishSnapshot(payload.dump())) throw std::runtime_error("soak snapshot rejected");
+                    ++published;
+                    if (us >= durationUs) break;
+                    std::this_thread::sleep_until(now + 100ms);
+                }
+            }
+            catch (...) { failure = std::current_exception(); }
+        });
+        std::vector<std::int64_t> latencyUs;
+        std::int64_t previousUs = -1;
+        for (;;)
+        {
+            const auto text = viewer.read("soak.snapshot");
+            const auto receivedUs = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
+            const auto stamp = nlohmann::json::parse(text).at("timestamp_us").get<std::int64_t>();
+            expect(stamp > previousUs && stamp <= receivedUs, "invalid or out-of-order delivery during soak");
+            latencyUs.push_back(receivedUs - stamp);
+            previousUs = stamp;
+            if (stamp >= durationUs) break;
+        }
+        producer.join();
+        if (failure) std::rethrow_exception(failure);
+        const auto beforeStop = server.statistics();
+        const auto stopBegin = Clock::now();
+        server.stop();
+        const auto stopMs = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - stopBegin).count();
+        const auto stopped = server.statistics();
+        expect(stopped.connected == 0 && stopped.ingressPending == 0
+            && stopped.sessionPending == 0 && stopped.activeWrites == 0, "soak shutdown leaked work");
+        expect(stopped.peakIngressPending <= 1 && stopped.peakSessionPending <= config.maxClients
+            && stopped.peakActiveWrites <= config.maxClients, "soak exceeded queue bounds");
+        std::sort(latencyUs.begin(), latencyUs.end());
+        std::cout << "SOAK seconds=" << soakSeconds << " published=" << published << " received=" << latencyUs.size()
+            << " elapsed_us=" << previousUs << " p50_us=" << latencyUs[(latencyUs.size() - 1) / 2]
+            << " p95_us=" << latencyUs[(latencyUs.size() * 95 + 99) / 100 - 1] << " max_us=" << latencyUs.back()
+            << " ingress_replaced=" << beforeStop.ingressReplaced << " session_replaced=" << beforeStop.sessionReplaced
+            << " write_timeouts=" << beforeStop.writeTimeouts << " stop_ms=" << stopMs << '\n';
+        context.refresh();
+    }
+
     void testOversizedRequestAndPendingHandshake(TestContext& context)
     {
         const auto config = testConfig();
@@ -1042,7 +1174,17 @@ int main(int argc, char** argv)
         const std::string argument(argv[i]);
         if (argument == "--diagnostics") diagnostics = true;
         else if (argument == "--case" && i + 1 < argc) selected = argv[++i];
-        else { std::cerr << "Usage: websocket_server_test [--diagnostics] [--case NAME]\n"; return 2; }
+        else if (argument == "--soak-seconds" && i + 1 < argc)
+        {
+            const std::string_view value(argv[++i]);
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), soakSeconds);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || soakSeconds < 1 || soakSeconds > 3600)
+            {
+                std::cerr << "Expected --soak-seconds in 1..3600\n";
+                return 2;
+            }
+        }
+        else { std::cerr << "Usage: websocket_server_test [--diagnostics] [--case NAME] [--soak-seconds N]\n"; return 2; }
     }
     struct Case { const char* name; void (*test)(TestContext&); };
     if (selected == "door-risk-process") return runTest("door-risk-process", testDoorRiskProcess) ? 0 : 1;
@@ -1052,6 +1194,8 @@ int main(int argc, char** argv)
     if (selected == "door-risk-scenarios") return runTest("door-risk-scenarios", testDoorRiskScenarios) ? 0 : 1;
     if (selected == "mock-scenarios") return runTest("mock-scenarios", testMockScenarios) ? 0 : 1;
     const Case cases[] = {
+        {"publisher-shutdown", testPublisherShutdown},
+        {"publisher-soak", testPublisherSoak},
         {"null-compatibility", testNullCompatibility},
         {"failed-start-cleanup", testFailedStartCleanup},
         {"handshake-snapshots-commands", testHandshakeSnapshotsAndCommands},
@@ -1061,6 +1205,7 @@ int main(int argc, char** argv)
     bool found = false;
     for (const auto& entry : cases)
     {
+        if (selected.empty() && std::string_view(entry.name).starts_with("publisher-")) continue;
         if (!selected.empty() && selected != entry.name) continue;
         found = true;
         if (!runTest(entry.name, entry.test)) return 1;
