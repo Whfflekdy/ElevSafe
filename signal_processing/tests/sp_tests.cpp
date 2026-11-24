@@ -6,6 +6,7 @@
 #include "clustering/peak_splitter.h"
 #include "preprocessing/door_state_estimator.h"
 #include "preprocessing/roi_filter.h"
+#include "pipeline/signal_pipeline.h"
 
 using namespace elevsafe::sp;
 
@@ -237,6 +238,22 @@ void testDoorMotionReopen() {
     EXPECT(d.state() == DoorState::OPEN);   // 누적 합이었다면 −45+27 = −18 → CLOSED로 틀림
 }
 
+// 유령 거르기: 크기 규칙과 위치 규칙 (센서 (-0.65, 1.31), 뒷벽 띠 y ≥ 1.30)
+void testGhostFilter() {
+    GhostFilterConfig g;
+    g.enabled = true;
+    g.sensor_x = -0.65f;
+    g.sensor_y = 1.31f;
+    auto cl = [](float cx, float cy, int n) { Cluster c; c.cx = cx; c.cy = cy; c.num_points = n; return c; };
+
+    EXPECT(g.isGhost(cl(0.0f, 0.8f, 19)));      // 캐빈 가운데라도 20점 미만이면 유령
+    EXPECT(!g.isGhost(cl(0.0f, 0.8f, 20)));     // 캐빈 가운데 20점은 사람
+    EXPECT(g.isGhost(cl(0.3f, 1.40f, 59)));     // 뒷벽 띠 59점은 유령
+    EXPECT(!g.isGhost(cl(0.3f, 1.40f, 60)));    // 뒷벽에 기댄 사람 (60점 이상)은 남김
+    EXPECT(g.isGhost(cl(-0.55f, 1.0f, 40)));    // 센서 아래(수평 0.33 m) 40점은 유령
+    EXPECT(!g.isGhost(cl(-0.10f, 1.0f, 40)));   // 센서에서 0.63 m 떨어진 40점은 사람
+}
+
 void run(const char* name, void (*fn)()) {
     const int before = g_failed;
     fn();
@@ -258,5 +275,6 @@ int main() {
     run("ROI: HALL 켜짐/꺼짐", testRoiHall);
     run("문 상태: 문짝 움직임", testDoorMotion);
     run("문 상태: 닫히다가 다시 열림", testDoorMotionReopen);
+    run("유령 거르기: 크기·위치", testGhostFilter);
     return g_failed == 0 ? 0 : 1;
 }
