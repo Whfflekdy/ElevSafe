@@ -226,12 +226,14 @@ void testDoorMotionReopen() {
     c.motion_zone = {-0.6f, 0.6f, -0.18f, 0.27f, 1.8f, 2.4f};
     DoorStateEstimator d(c);
 
-    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));   // 열림                          
+    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));   // 열림
     for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f));  // 닫히는 중
-    EXPECT(d.state() == DoorState::CLOSING);   
+    EXPECT(d.state() == DoorState::CLOSING);
     for (int i = 0; i < 6; ++i)  d.update(doorLeafPoints(30, 0.15f));   // 멈추지 않고 바로 다시 열림
-    for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
+    for (int i = 0; i < 4; ++i)  d.update(Frame{});                     // 창 평균이 반대 방향으로 넘어감
+    EXPECT(d.state() == DoorState::OPENING);                             // 다시 열리는 중으로 바뀜 (A 리뷰, PR #58)
+    for (int i = 0; i < 16; ++i) d.update(Frame{});                     // 열린 채 멈춤
     EXPECT(d.state() == DoorState::OPEN);   // 누적 합이었다면 −45+27 = −18 → CLOSED로 틀림
 }
 

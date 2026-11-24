@@ -88,7 +88,7 @@ void DoorStateEstimator::updateMotion(const Frame& points) {
     motion_sum_ = msum;
 
     // 3. 움직임 시작: 합이 on 이상.
-    //    움직이는 동안은 OPEN, 움직임이 끝나면 쌓인 도플러 합이 −면 CLOSED.
+    //    움직이는 동안은 OPENING/CLOSING, 움직임이 끝나면 쌓인 도플러 합이 −면 CLOSED, 아니면 OPEN.
     if (!moving_) {
         if (static_cast<float>(msum) >= config_.motion_on) {
             moving_ = true;
@@ -110,6 +110,9 @@ void DoorStateEstimator::updateMotion(const Frame& points) {
         if (std::fabs(mean) >= config_.motion_reverse_speed && (mean > 0.0) != (event_dsum_ > 0.0))
             event_dsum_ = wdsum;
     }
+
+    //    움직이는 동안 방향 (방향 바뀜 반영 후). 닫히다가 다시 열리면 CLOSING → OPENING (A 리뷰, PR #58)
+    state_ = (event_dsum_ < 0.0) ? DoorState::CLOSING : DoorState::OPENING;
 
     if (static_cast<float>(msum) <= config_.motion_off) {
         moving_ = false;
