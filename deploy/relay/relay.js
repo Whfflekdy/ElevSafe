@@ -1,12 +1,26 @@
 'use strict';
 const http = require('node:http');
+const https = require('node:https');
 const { timingSafeEqual } = require('node:crypto');
 const { WebSocketServer } = require('ws');
 const { integer, limits, snapshotText, sendBounded, installSignals, now } = require('./transport');
 
+const { secret, matches, controlLimits } = require('./control');
+const { readFileSync } = require('node:fs');
+const { relayControl } = require('./control_relay');
+
 function createRelay(options = {}) {
   const key = options.key;
   if (typeof key !== 'string' || !key.length) throw new Error('INGEST_KEY is required');
+  const { origin, httpOrigin, proxyToken } = options;
+  const validOrigin = (value, scheme) => !value || (value.startsWith(scheme + '://') && new URL(value).origin === value);
+  if (!secret(proxyToken) || !(origin || httpOrigin) || !validOrigin(origin, 'https') || !validOrigin(httpOrigin, 'http'))
+    throw new Error('Invalid Dashboard origin or proxy credential');
+  const insecureDemo = options.allowInsecureDemo === true;
+  const credentials = [key, proxyToken];
+  if (options.control) credentials.push(options.control.bridgeToken);
+  if (new Set(credentials).size !== credentials.length) throw new Error('Shared credentials are invalid');
+  const trustedProxy = req => matches(req.headers['x-elevsafe-proxy'], proxyToken);
   const port = integer(options.port, 8090, 'PORT', 0);
   if (port > 65535) throw new Error('Invalid PORT');
   const { maxMessageBytes, maxBufferedBytes } = limits(options);
@@ -14,9 +28,16 @@ function createRelay(options = {}) {
   const heartbeatMs = integer(options.heartbeatMs, 30000, 'HEARTBEAT_MS');
   const log = options.log || (() => {});
   const stats = { accepted: 0, invalid: 0, rejectedIngest: 0, slowViewers: 0, ignoredCommands: 0, errors: 0, expired: 0 };
-  const server = http.createServer((req, res) => res.end('ok'));
-  const viewers = new WebSocketServer({ noServer: true, maxPayload: maxMessageBytes, perMessageDeflate: false });
+  const control = options.control ? relayControl(options.control, event => log('[control] ' + JSON.stringify(event))) : null;
+  const respond = (req, res) => {
+    if (req.url.startsWith('/control')) { res.writeHead(404).end(); return; }
+    res.end('ok');
+  };
+  const server = options.tls ? https.createServer(options.tls, respond) : http.createServer(respond);
+  const viewers = new WebSocketServer({ noServer: true, maxPayload: controlLimits(options.control)?.maxBytes || 1024, perMessageDeflate: false });
   const ingest = new WebSocketServer({ noServer: true, maxPayload: maxMessageBytes, perMessageDeflate: false });
+  const groups = [viewers, ingest, ...(control?.servers || [])];
+  const clients = () => groups.flatMap(group => [...group.clients]);
   let producer = null, lastSnapshot = null, stopping = false, stopPromise;
   const sockets = new Set();
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
@@ -39,8 +60,17 @@ function createRelay(options = {}) {
     if (stopping) return reject(socket, '503 Service Unavailable');
     let url;
     try { url = new URL(req.url, 'http://localhost'); } catch { return reject(socket, '400 Bad Request'); }
+    if (req.url === '/control-link' && control)
+      return control.upgrade(req, socket, head, attach, reject, req.socket.encrypted || (trustedProxy(req) &&
+        (req.headers['x-forwarded-proto'] === 'https' || (insecureDemo && req.headers['x-forwarded-proto'] === 'http'))));
     if (url.pathname === '/radar') {
-      viewers.handleUpgrade(req, socket, head, ws => viewers.emit('connection', ws));
+      const scheme = req.headers['x-forwarded-proto'];
+      const authenticated = scheme === 'https' && !!origin && req.headers.origin === origin && !!req.headers['x-authenticated-user'];
+      const anonymous = scheme === 'http' && !!httpOrigin && req.headers.origin === httpOrigin && !req.headers['x-authenticated-user'];
+      if (req.url !== '/radar' || !trustedProxy(req) || req.headers.authorization || !(authenticated || anonymous))
+        return reject(socket, '403 Forbidden');
+      if (viewers.clients.size >= 16) return reject(socket, '429 Too Many Requests');
+      viewers.handleUpgrade(req, socket, head, ws => viewers.emit('connection', ws, authenticated || insecureDemo));
     } else if (url.pathname === '/ingest') {
       const supplied = Buffer.from(url.searchParams.get('key') || '');
       const expected = Buffer.from(key);
@@ -69,14 +99,15 @@ function createRelay(options = {}) {
       log('[relay] ingest disconnected; cache invalidated');
     });
   });
-  viewers.on('connection', ws => {
+  viewers.on('connection', (ws, mayControl) => {
     attach(ws); expire();
     if (lastSnapshot) broadcast(ws, lastSnapshot.text);
-    ws.on('message', () => { ++stats.ignoredCommands; }); // Never route commands upstream.
+    if (control && mayControl) control.acceptOperator(ws);
+    else ws.on('message', () => { ++stats.ignoredCommands; });
   });
   const expiry = setInterval(expire, Math.min(staleMs, 1000));
   const heartbeat = setInterval(() => {
-    for (const ws of [...viewers.clients, ...ingest.clients]) {
+    for (const ws of clients()) {
       if (!ws.alive) { ws.terminate(); continue; }
       ws.alive = false;
       try { ws.ping(); } catch { ws.terminate(); }
@@ -91,14 +122,15 @@ function createRelay(options = {}) {
   function stop() {
     if (stopPromise) return stopPromise;
     stopping = true; lastSnapshot = null;
+    control?.stop();
     clearInterval(expiry); clearInterval(heartbeat);
     stopPromise = new Promise(resolve => {
       const deadline = setTimeout(() => {
-        for (const ws of [...viewers.clients, ...ingest.clients]) ws.terminate();
+        for (const ws of clients()) ws.terminate();
         for (const socket of sockets) socket.destroy();
       }, 500);
-      const closed = [viewers, ingest, server].map(s => new Promise(done => s.close(() => done())));
-      for (const ws of [...viewers.clients, ...ingest.clients]) ws.close(1001, 'Server shutdown');
+      const closed = [...groups, server].map(s => new Promise(done => s.close(() => done())));
+      for (const ws of clients()) ws.close(1001, 'Server shutdown');
       Promise.all(closed).then(() => { clearTimeout(deadline); resolve(); });
     });
     return stopPromise;
@@ -110,7 +142,15 @@ if (require.main === module) {
   try {
     relay = createRelay({ key: process.env.INGEST_KEY, port: process.env.PORT,
       staleMs: process.env.STALE_MS, maxMessageBytes: process.env.MAX_MESSAGE_BYTES,
-      maxBufferedBytes: process.env.MAX_BUFFERED_BYTES, heartbeatMs: process.env.HEARTBEAT_MS, log: console.log });
+      maxBufferedBytes: process.env.MAX_BUFFERED_BYTES, heartbeatMs: process.env.HEARTBEAT_MS, log: console.log,
+      origin: process.env.CONTROL_ORIGIN, httpOrigin: process.env.CONTROL_HTTP_ORIGIN,
+      allowInsecureDemo: process.env.CONTROL_ALLOW_INSECURE_DEMO === '1',
+      proxyToken: readFileSync(process.env.CONTROL_PROXY_TOKEN_FILE, 'utf8').trim(),
+      control: process.env.CONTROL_ENABLED === '1' ? {
+        bridgeToken: process.env.CONTROL_BRIDGE_TOKEN,
+        maxBytes: process.env.CONTROL_MAX_BYTES, ttlMs: process.env.CONTROL_TTL_MS,
+        requestsPerSecond: process.env.CONTROL_RATE
+      } : undefined });
     installSignals(relay.stop);
     relay.ready.then(() => console.log('[relay] listening'), async () => { await relay.stop(); process.exitCode = 1; });
   } catch { console.error('[relay] invalid configuration'); process.exitCode = 1; }

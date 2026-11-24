@@ -23,6 +23,8 @@ namespace elevsafe
         explicit DoorSimulation(State initial = State::Closed);
         // Returns false for an identical active request; its deadline is preserved.
         bool apply(Command command, Time now);
+        // The same manual action gains a new owner without restarting its motion.
+        void recordManualTakeover() noexcept { applied_ = active_; }
         // Local arbitration seam, not a C interface. No input is a no-op, not release.
         // Auto Open/Hold persist until replaced or overridden by a manual request.
         // Inputs rejected during Manual are not queued for later execution.

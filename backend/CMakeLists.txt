@@ -156,6 +156,10 @@ add_executable(websocket_message_test tests/websocket_message_test.cpp)
 target_link_libraries(websocket_message_test PRIVATE elevsafe_websocket nlohmann_json::nlohmann_json)
 add_test(NAME websocket_message_test COMMAND websocket_message_test)
 
+add_executable(remote_door_control_test tests/remote_door_control_test.cpp)
+target_link_libraries(remote_door_control_test PRIVATE elevsafe_websocket nlohmann_json::nlohmann_json)
+add_test(NAME remote_door_control_test COMMAND remote_door_control_test)
+
 add_executable(websocket_server_test tests/websocket_server_test.cpp)
 target_link_libraries(websocket_server_test PRIVATE elevsafe_door_simulation elevsafe_websocket elevsafe_boost_headers nlohmann_json::nlohmann_json)
 target_compile_options(websocket_server_test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)

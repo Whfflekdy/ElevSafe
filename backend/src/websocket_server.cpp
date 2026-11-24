@@ -1,5 +1,6 @@
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
+#include "remote_door_control.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -46,6 +47,7 @@ namespace elevsafe
         bool notificationPending = false;
         std::mutex commandMutex;
         std::deque<ManualDoorRequest> commands;
+        std::optional<RemoteDoorControl> remoteControl;
         bool manualCommandsEnabled = true; // Protected by commandMutex.
         std::atomic<std::size_t> connected{0}, accepted{0}, sent{0}, ingressDrops{0}, sessionDrops{0};
         std::atomic<std::size_t> received{0}, rejected{0}, queueFull{0};
@@ -56,7 +58,11 @@ namespace elevsafe
         std::future<void> ioFinishedFuture{ioFinished.get_future()};
         std::thread thread;
 
-        Impl(WebSocketConfig value, std::ostream& output) : config(std::move(value)), log(output) {}
+        Impl(WebSocketConfig value, std::ostream& output) : config(std::move(value)), log(output)
+        {
+            if (!config.remoteControlToken.empty()) remoteControl.emplace(config.remoteControlTtlMs);
+        }
+        void postControl(std::uint64_t client, RemoteDoorControl::Json payload);
         void accept();
         void deliver();
         void shutdown(bool force = false);
@@ -83,6 +89,8 @@ namespace elevsafe
         net::steady_timer closeTimer;
         Message active;
         Message pending;
+        std::deque<Message> controlOutbox;
+        bool control = false;
         std::uint64_t writeGeneration = 0;
         bool ready = false;
         bool stopping = false;
@@ -106,21 +114,26 @@ namespace elevsafe
                     if (error) return self->finish("HTTP read", error);
                     if (self->finished) return;
                     const auto& request = self->parser.get();
-                    if (request.target() != "/radar" || !ws::is_upgrade(request))
+                    const bool controlPath = request.target() == "/control-local";
+                    const bool known = request.target() == "/radar" ||
+                        (controlPath && self->owner.remoteControl.has_value());
+                    if (!known) return self->rejectUpgrade(http::status::not_found, request.version());
+                    if (!ws::is_upgrade(request)) return self->rejectUpgrade(http::status::bad_request, request.version());
+                    if (controlPath)
                     {
-                        auto response = std::make_shared<http::response<http::string_body>>(
-                            request.target() != "/radar" ? http::status::not_found : http::status::bad_request,
-                            request.version());
-                        response->set(http::field::content_type, "text/plain");
-                        response->body() = "WebSocket endpoint is /radar\n";
-                        response->prepare_payload();
-                        http::async_write(self->stream.next_layer(), *response,
-                            [self, response](Error error, std::size_t) { self->finish("HTTP rejected", error); });
-                        return;
+                        const auto header = request[http::field::authorization];
+                        if (!RemoteDoorControl::authorized({header.data(), header.size()},
+                                self->owner.config.remoteControlToken))
+                            return self->rejectUpgrade(http::status::forbidden, request.version());
+                        std::lock_guard lock(self->owner.commandMutex);
+                        if (!self->owner.remoteControl->claim(self->id))
+                            return self->rejectUpgrade(http::status::conflict, request.version());
+                        self->control = true;
                     }
                     beast::get_lowest_layer(self->stream).expires_never();
                     self->stream.set_option(ws::stream_base::timeout::suggested(beast::role_type::server));
-                    self->stream.read_message_max(self->owner.config.maxRequestBytes);
+                    self->stream.read_message_max(self->control
+                        ? self->owner.config.maxControlBytes : self->owner.config.maxRequestBytes);
                     self->stream.async_accept(request, [self](Error error)
                     {
                         if (error) return self->finish("handshake", error);
@@ -134,10 +147,27 @@ namespace elevsafe
                 });
         }
 
+        void rejectUpgrade(http::status status, unsigned version)
+        {
+            auto response = std::make_shared<http::response<http::string_body>>(status, version);
+            response->set(http::field::content_type, "text/plain");
+            response->body() = status == http::status::forbidden || status == http::status::conflict
+                ? "WebSocket upgrade rejected\n" : "WebSocket endpoint is /radar\n";
+            response->prepare_payload();
+            http::async_write(stream.next_layer(), *response,
+                [self = shared_from_this(), response](Error error, std::size_t) { self->finish("HTTP rejected", error); });
+        }
+
         void finish(const char* where, Error error = {})
         {
             if (finished) return;
             finished = true;
+            if (control)
+            {
+                std::lock_guard lock(owner.commandMutex);
+                owner.remoteControl->disconnect(id);
+                controlOutbox.clear();
+            }
             Error ignored;
             writeTimer.cancel(ignored);
             closeTimer.cancel(ignored);
@@ -179,8 +209,23 @@ namespace elevsafe
                 }
                 if (self->finished || self->stopping) return;
                 const auto text = beast::buffers_to_string(self->input.data());
-                const auto command = self->stream.got_text() ? parseDoorRequest(text) : std::nullopt;
                 self->input.consume(self->input.size());
+                if (self->control)
+                {
+                    if (!self->stream.got_text()) return self->finish("invalid control payload");
+                    std::optional<RemoteDoorControl::Json> reply;
+                    try
+                    {
+                        std::lock_guard lock(self->owner.commandMutex);
+                        reply = self->owner.remoteControl->receive(self->id, text);
+                    }
+                    catch (const std::invalid_argument&) { return self->finish("invalid control payload"); }
+                    catch (const RemoteDoorControl::Json::exception&) { return self->finish("invalid control payload"); }
+                    if (reply) self->offerControl(std::make_shared<const std::string>(reply->dump()));
+                    self->read();
+                    return;
+                }
+                const auto command = self->stream.got_text() ? parseDoorRequest(text) : std::nullopt;
                 if (!command && self->stream.got_text() && self->owner.config.allowNullDoorRequest
                     && isNullDoorRequest(text))
                 {
@@ -198,7 +243,8 @@ namespace elevsafe
                     bool enabled;
                     {
                         std::lock_guard lock(self->owner.commandMutex);
-                        enabled = self->owner.manualCommandsEnabled;
+                        const auto& control = self->owner.remoteControl;
+                        enabled = self->owner.manualCommandsEnabled && !(control && control->hasPriority());
                         full = enabled && self->owner.commands.size() >= self->owner.config.maxCommands;
                         if (enabled && !full) self->owner.commands.push_back({self->id, *command});
                     }
@@ -217,16 +263,32 @@ namespace elevsafe
                     else
                     {
                         ++self->owner.rejected;
-                        self->owner.writeLog("manual request ignored: no active command window");
+                        self->owner.writeLog("manual request ignored: no active command window or remote priority");
                     }
                 }
                 self->read();
             });
         }
 
+        void offerControl(Message message)
+        {
+            if (!ready || stopping || finished || !control) return;
+            if (message->size() > owner.config.maxControlBytes || controlOutbox.size() >= 8)
+                return finish("control output limit");
+            if (active)
+            {
+                controlOutbox.push_back(std::move(message));
+                return;
+            }
+            pending = std::move(message);
+            const auto count = ++owner.sessionPending;
+            owner.peakPending.store(std::max(owner.peakPending.load(), count));
+            write();
+        }
+
         void offer(Message message)
         {
-            if (!ready || stopping || finished) return;
+            if (!ready || stopping || finished || control) return;
             if (pending) ++owner.sessionDrops;
             else
             {
@@ -265,10 +327,16 @@ namespace elevsafe
                     --self->owner.activeWrites;
                     if (error) ++self->owner.discarded;
                     if (error) return self->finish("write", error);
-                    ++self->owner.sent;
+                    if (!self->control) ++self->owner.sent;
                     if (self->finished) return;
                     if (self->stopping) return self->closeHandshake();
-                    if (self->pending) self->write();
+                    if (!self->controlOutbox.empty())
+                    {
+                        auto next = std::move(self->controlOutbox.front());
+                        self->controlOutbox.pop_front();
+                        self->offerControl(std::move(next));
+                    }
+                    else if (self->pending) self->write();
                 });
             }
             catch (...)
@@ -306,6 +374,20 @@ namespace elevsafe
             if (!active) closeHandshake();
         }
     };
+
+    void WebSocketServer::Impl::postControl(std::uint64_t client, RemoteDoorControl::Json payload)
+    {
+        if (!running) return;
+        auto message = std::make_shared<const std::string>(payload.dump());
+        net::post(io, [this, client, message = std::move(message)]
+        {
+            if (!running) return;
+            const auto session = sessions.find(client);
+            if (session == sessions.end()) return;
+            auto current = session->second;
+            current->offerControl(message);
+        });
+    }
 
     void WebSocketServer::Impl::accept()
     {
@@ -434,6 +516,11 @@ namespace elevsafe
                 || state.config.maxSnapshotBytes == 0 || state.config.maxRequestBytes == 0)
                 throw std::invalid_argument("WebSocket limits must be positive");
             const Tcp::endpoint endpoint(net::ip::make_address(state.config.address), state.config.port);
+            if (state.remoteControl && (!endpoint.address().is_loopback() ||
+                !RemoteDoorControl::validToken(state.config.remoteControlToken) ||
+                state.config.remoteControlTtlMs <= 250 || state.config.remoteControlTtlMs > 10000 ||
+                state.config.maxControlBytes < 512 || state.config.maxControlBytes > 4096))
+                throw std::invalid_argument("Invalid loopback control configuration");
             Error error;
             const int backlog = static_cast<int>(std::min<std::size_t>(state.config.maxClients, 128));
             const char* stage = "open";
@@ -558,6 +645,7 @@ namespace elevsafe
             m_impl->manualCommandsEnabled = enabled;
             if (!enabled)
             {
+                if (m_impl->remoteControl) m_impl->remoteControl->releasePriority();
                 discarded = m_impl->commands.size();
                 m_impl->commands.clear();
             }
@@ -571,6 +659,35 @@ namespace elevsafe
             }
             catch (...) {} // Queue state is already committed.
         }
+    }
+
+    void WebSocketServer::updateRemoteDoor(bool active, std::string_view reason)
+    {
+        auto& state = *m_impl;
+        if (!state.remoteControl) return;
+        std::lock_guard lock(state.commandMutex);
+        auto& control = *state.remoteControl;
+        if (!control.update(active, reason)) return;
+        const auto client = control.boundClient();
+        if (!client) return;
+        if (auto cancelled = control.invalidate()) state.postControl(*client, std::move(*cancelled));
+        state.postControl(*client, control.readiness());
+    }
+
+    bool WebSocketServer::applyRemoteDoor(const std::function<bool(const ManualDoorRequest&, bool)>& consume,
+        bool motionFinished)
+    {
+        auto& state = *m_impl;
+        if (!state.remoteControl) return false;
+        std::lock_guard lock(state.commandMutex);
+        auto& control = *state.remoteControl;
+        if (motionFinished) control.releasePriority();
+        const auto client = control.boundClient();
+        std::optional<RemoteDoorControl::Json> reply;
+        const bool applied = client && control.apply(consume, reply);
+        if (control.hasPriority()) state.commands.clear();
+        if (reply) state.postControl(*client, std::move(*reply));
+        return applied;
     }
 
     std::optional<ManualDoorRequest> WebSocketServer::popCommand()
