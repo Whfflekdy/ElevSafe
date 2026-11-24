@@ -2,11 +2,38 @@
 #include "elevsafe/websocket_message.h"
 
 #include <nlohmann/json.hpp>
+#include <cmath>
 #include <ctime>
 #include <stdexcept>
 
 namespace elevsafe
 {
+    namespace
+    {
+        DetZone toDetectionZone(sp::Zone zone)
+        {
+            switch (zone)
+            {
+            case sp::Zone::DOOR: return DetZone::DOOR;
+            case sp::Zone::CABIN: return DetZone::CABIN;
+            case sp::Zone::HALL: return DetZone::HALL;
+            case sp::Zone::NONE: return DetZone::UNKNOWN;
+            }
+            return DetZone::UNKNOWN;
+        }
+
+        DoorState toTrackingDoorState(sp::DoorState state)
+        {
+            switch (state)
+            {
+            case sp::DoorState::OPEN: return DoorState::OPEN;
+            case sp::DoorState::CLOSED: return DoorState::CLOSED;
+            case sp::DoorState::UNKNOWN: return DoorState::UNKNOWN;
+            }
+            return DoorState::UNKNOWN;
+        }
+    }
+
     FrameDetections toTrackingDetections(const sp::PipelineResult& result)
     {
         if (result.timestamp_us < 0) throw std::invalid_argument("negative B timestamp_us");
@@ -26,7 +53,13 @@ namespace elevsafe
             detection.zmin = cluster.z_min; detection.zmax = cluster.z_max;
             detection.n_points = cluster.num_points;
             detection.mean_doppler = cluster.mean_doppler;
-            detection.mean_power = 0; // Unavailable in B, NOT a measured zero. C currently ignores it.
+            detection.z_top = cluster.z_top;
+            detection.maybe_merged = cluster.maybe_merged ? 1 : 0;
+            detection.zone = toDetectionZone(cluster.zone);
+            // Preserve the detection when its power measurement is unavailable.
+            detection.mean_power = std::isfinite(cluster.power_sum)
+                ? static_cast<double>(cluster.power_sum) / cluster.num_points
+                : 0.0;
             frame.detections.push_back(detection);
         }
         return frame;
@@ -34,6 +67,14 @@ namespace elevsafe
 
     std::string trackingSnapshot(const sp::PipelineResult& result,
         const std::vector<TrackOutput>& tracks, std::chrono::system_clock::time_point publishedAt)
+    {
+        return trackingSnapshot(result.timestamp_us, tracks, publishedAt,
+            sp::doorStateToString(result.estimated_door_state), std::nullopt);
+    }
+
+    std::string trackingSnapshot(std::int64_t timestampUs, const std::vector<TrackOutput>& tracks,
+        std::chrono::system_clock::time_point publishedAt, std::string_view doorState,
+        std::optional<std::string_view> doorCommand)
     {
         const auto seconds = std::chrono::system_clock::to_time_t(publishedAt);
         std::tm utc{};
@@ -50,11 +91,13 @@ namespace elevsafe
         {
             if (track.state != TrackState::CONFIRMED) continue;
             passengers.push_back({{"id", track.id}, {"x", track.x}, {"y", track.y},
-                {"state", track.y < 0 ? "OUTSIDE" : "INSIDE"}, {"safety_state", nullptr}});
+                {"state", toString(track.phase)},
+                {"safety_state", track.safety == Safety::NORMAL ? nlohmann::json(nullptr)
+                    : nlohmann::json(toString(track.safety))}});
         }
         const auto text = nlohmann::json({{"timestamp", timestamp},
-            {"timestamp_us", result.timestamp_us}, {"door_state", sp::doorStateToString(result.estimated_door_state)},
-            {"door_command", nullptr}, {"passengers", passengers}}).dump();
+            {"timestamp_us", timestampUs}, {"door_state", doorState},
+            {"door_command", doorCommand ? nlohmann::json(*doorCommand) : nlohmann::json(nullptr)}, {"passengers", passengers}}).dump();
         if (!isSnapshot(text)) throw std::runtime_error("invalid tracking snapshot");
         return text;
     }
@@ -62,11 +105,23 @@ namespace elevsafe
     std::optional<std::string> TrackingDemo::process(const sp::PipelineResult& result,
         Clock::time_point now, std::chrono::system_clock::time_point publishedAt)
     {
-        const auto tracks = engine_.processDetections(toTrackingDetections(result), true);
-        ++processedFrames_;
+        const auto observation = observe(result);
         if (lastPublish_ && now - *lastPublish_ < publishPeriod) return std::nullopt;
-        const auto snapshot = trackingSnapshot(result, tracks, publishedAt);
+        const auto snapshot = trackingSnapshot(result, observation.tracks, publishedAt);
         lastPublish_ = now;
         return snapshot; // No timer emits old data when Radar input stops.
+    }
+
+    FrameResult TrackingDemo::observe(const sp::PipelineResult& result)
+    {
+        return observe(result, toTrackingDoorState(result.estimated_door_state));
+    }
+
+    FrameResult TrackingDemo::observe(const sp::PipelineResult& result, DoorState doorState)
+    {
+        engine_.setHallEnabled(result.hall_enabled);
+        auto observation = engine_.processFrame(toTrackingDetections(result), doorState);
+        ++processedFrames_;
+        return observation;
     }
 }

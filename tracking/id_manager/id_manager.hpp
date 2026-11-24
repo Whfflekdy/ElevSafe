@@ -49,6 +49,18 @@ struct Track {
     int n_points = 0;                   // 마지막 매칭 검출의 점 개수
     std::deque<ZSample> z_history;      // 매칭된 시점의 측정 z (FALL 룰용)
 
+    // 마지막으로 매칭된 검출의 값 (상태 머신 입력용). LOST 중에는 마지막 값 그대로 남는다.
+    elevsafe::DetZone det_zone = elevsafe::DetZone::UNKNOWN;
+    double det_z_top = 0, det_z_min = 0, det_cz = 0, det_mean_doppler = 0;
+    bool   det_maybe_merged = false;
+    void setFromDetection(const Detection& d) {
+        n_points = d.n_points;
+        det_zone = d.zone;
+        det_z_top = d.z_top; det_z_min = d.zmin; det_cz = d.cz;
+        det_mean_doppler = d.mean_doppler;
+        det_maybe_merged = d.maybe_merged != 0;
+    }
+
     // kf 상태를 읽기 쉬운 값으로 캐시 (kf.state()가 const가 아니라서). predict/correct 뒤 syncState() 호출.
     double x() const { return pos_[0]; }
     double y() const { return pos_[1]; }

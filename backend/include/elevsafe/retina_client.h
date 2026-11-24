@@ -50,6 +50,8 @@ namespace elevsafe
             std::optional<std::chrono::steady_clock::time_point> connectNotAfter;
             // Polled on the owner thread; the predicate may read a lock-free stop flag.
             std::function<bool()> cancelRequested;
+            // Optional owner-thread work while connected, including during idle reads.
+            std::function<void()> onReceiveTick;
         };
         // Numeric IP only: bounded connect without DNS; cancellable receive, no idle timeout.
         int runSession(std::ostream& log, const SessionControl& control, RunDiagnostics& diagnostics);

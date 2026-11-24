@@ -11,7 +11,8 @@ namespace elevsafe::sp {
 enum class Zone: std::uint8_t{
     NONE = 0,  // ROI 밖 (제거 대상) 
     DOOR = 1,  // 출입구 영역
-    CABIN = 2  // 엘리베이터 내부 영역
+    CABIN = 2, // 엘리베이터 내부 영역
+    HALL = 3   // 승강장 영역 (roi.hall_enable=1일 때만)
 };
 
 struct RadarPoint{
@@ -57,6 +58,8 @@ inline const char* zoneToString(Zone zone){
         case Zone::CABIN:
             return "CABIN";
             break;
+        case Zone::HALL:
+            return "HALL";
     }
     return "UNKNOWN"; // 값이 잘못 들어온 경우 대비. 
 }

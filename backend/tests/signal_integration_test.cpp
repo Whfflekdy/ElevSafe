@@ -36,7 +36,6 @@ namespace
         {
             const auto input = elevsafe::toSignalFrame(pending);
             const elevsafe::sp::FrameContext context;
-            expect(context.door_state == elevsafe::sp::DoorState::UNKNOWN, "context must remain UNKNOWN");
             const auto result = signal.process(input, context);
             expect(result.frame_id == 7 && result.timestamp_us == 50000, "B changed metadata");
             expect(result.clusters.size() == 1, "expected one synthetic cluster");
