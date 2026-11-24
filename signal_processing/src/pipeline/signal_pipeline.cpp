@@ -96,7 +96,7 @@ PipelineResult SignalPipeline::process(const FrameData& frame, const FrameContex
         std::vector<Cluster> keep;
         keep.reserve(r.clusters.size());
         for (const Cluster& c : r.clusters) {
-            if (ghost_.isGhost(c)) {
+            if (ghost_.isGhost(c, ds)) {
                 drop[static_cast<std::size_t>(c.cluster_id)] = 1;
                 stats_.ghosts++;
             } else {
@@ -125,6 +125,7 @@ GhostFilterConfig GhostFilterConfig::fromConfig(const Config& cfg) {
     g.zone_points = static_cast<int>(cfg.getFloat("ghost_filter.zone_points", static_cast<float>(g.zone_points)));
     g.back_y = cfg.getFloat("ghost_filter.back_y", g.back_y);
     g.sensor_radius = cfg.getFloat("ghost_filter.sensor_radius", g.sensor_radius);
+    g.hall_needs_open = cfg.getFloat("ghost_filter.hall_needs_open", 0.0f) != 0.0f;
     g.sensor_x = cfg.getFloat("sensor.tx", 0.0f);
     g.sensor_y = cfg.getFloat("sensor.ty", 0.0f);
     return g;
@@ -135,6 +136,13 @@ bool GhostFilterConfig::isGhost(const Cluster& c) const {
     const bool in_zone = c.cy >= back_y ||
                          std::hypot(c.cx - sensor_x, c.cy - sensor_y) <= sensor_radius;
     return in_zone && c.num_points < zone_points;
+}
+
+bool GhostFilterConfig::isGhost(const Cluster& c, DoorState door) const {
+    if (isGhost(c)) return true;
+    if (!hall_needs_open || c.zone != Zone::HALL) return false;
+    const bool open_family = door == DoorState::OPEN || door == DoorState::OPENING || door == DoorState::CLOSING;
+    return !open_family;
 }
 
 // ---------------------------------------------------------------------------

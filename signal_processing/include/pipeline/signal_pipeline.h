@@ -66,9 +66,13 @@ struct GhostFilterConfig {
     float sensor_x = 0.0f;        // 센서 수평 위치 (cfg 의 sensor.tx, sensor.ty)
     float sensor_y = 0.0f;
     float sensor_radius = 0.40f;  // 센서 바로 아래로 볼 수평 반경
+    // HALL 덩어리는 문이 OPEN/OPENING/CLOSING 일 때만 인정 (닫힌 문 너머는 안 보이므로 유령, 11/24)
+    //   근거: 3차 S3-7_t01·S4-4_t01 HALL 켬. 문 CLOSED·UNKNOWN 때 HALL 덩어리 295개 중 진짜 사람 2개
+    bool hall_needs_open = false;
 
     static GhostFilterConfig fromConfig(const Config& cfg);
-    bool isGhost(const Cluster& c) const;
+    bool isGhost(const Cluster& c) const;                   // 크기·위치 규칙
+    bool isGhost(const Cluster& c, DoorState door) const;   // + HALL 문 규칙
 };
 
 // B → A: 프레임 하나의 처리 결과
