@@ -565,7 +565,7 @@ int main(int argc, char** argv)
         }
         if (websocket)
             std::cerr << (signal && !benchmarkMode
-                ? "[ws] Tracking: B clusters >=40 points -> C CONFIRMED with Phase/Safety; no physical door control\n"
+                ? "[ws] Tracking: B clusters -> C CONFIRMED with Phase/Safety; no physical door control\n"
                 : "[ws] transport only: no C result, no live snapshot generation or door control\n");
     }
 
