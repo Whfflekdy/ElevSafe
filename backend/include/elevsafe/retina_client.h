@@ -9,6 +9,7 @@
 #include <iosfwd>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace elevsafe
 {
@@ -33,27 +34,38 @@ namespace elevsafe
         {
             std::string stage = "not_started";
             int errorCode = 0;
+            std::string_view socketOperation;
+            int addressFamily = 0;
+            std::size_t addressLength = 0;
             bool timedOut = false;
             bool connected = false;
             bool cancelled = false;
             RetinaStreamParser::Statistics parser;
             std::size_t bufferedBytes = 0;
+            std::optional<std::chrono::milliseconds> lastByteAge, lastValidFrameAge;
         };
         using Deadline = std::function<std::chrono::steady_clock::time_point()>;
         // Validation-only bounded I/O. Numeric IP; deadline and callback execute
         // on this calling thread. stop() must also be called on this thread.
         // The original run(log) keeps its blocking socket behavior.
         int run(std::ostream& log, const Deadline& deadline, RunDiagnostics& diagnostics);
+        // Preserve the blocking DNS/connect path; poll this session's receive loop only.
+        int runWithReceiveTick(std::ostream& log, RunDiagnostics& diagnostics,
+            const std::function<void()>& tick, const std::function<void()>& end);
         struct SessionControl
         {
+            static constexpr std::chrono::milliseconds maximumReceiveIdleTimeout = std::chrono::hours(24);
             std::chrono::milliseconds connectTimeout{3000};
             std::optional<std::chrono::steady_clock::time_point> connectNotAfter;
             // Polled on the owner thread; the predicate may read a lock-free stop flag.
             std::function<bool()> cancelRequested;
             // Optional owner-thread work while connected, including during idle reads.
             std::function<void()> onReceiveTick;
+            // Seal session-owned publishers before receive statistics and socket teardown.
+            std::function<void()> onReceiveEnd;
+            std::optional<std::chrono::milliseconds> receiveIdleTimeout;
         };
-        // Numeric IP only: bounded connect without DNS; cancellable receive, no idle timeout.
+        // Numeric IP only: bounded connect without DNS; cancellable receive and opt-in idle timeout.
         int runSession(std::ostream& log, const SessionControl& control, RunDiagnostics& diagnostics);
         static bool retryable(const RunDiagnostics& diagnostics, bool reconnectEof) noexcept;
         void stop();
@@ -64,7 +76,8 @@ namespace elevsafe
     private:
         void closeSocket();
         int runImpl(std::ostream& log, const Deadline& deadline,
-            const SessionControl* control, RunDiagnostics& diagnostics);
+            const SessionControl* control, RunDiagnostics& diagnostics,
+            const std::function<void()>& onReceiveTick = {}, const std::function<void()>& onReceiveEnd = {});
 
         std::string m_host;
         std::uint16_t m_port;

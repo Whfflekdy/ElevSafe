@@ -48,6 +48,9 @@ namespace elevsafe
         void observe(std::int64_t timestampUs, std::vector<TrackOutput> tracks,
             std::string_view doorState, std::optional<std::string_view> applied = std::nullopt);
         void updateDoor(std::string_view doorState, std::optional<std::string_view> applied);
+        void checkFailure();
+        // Linearize session invalidation with enqueue. Does not drain WebSocket queues.
+        std::size_t seal();
         Statistics finish();
 
     private:

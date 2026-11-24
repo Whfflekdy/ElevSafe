@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect)
+param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect, [switch]$PeriodicIdle)
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
@@ -60,12 +60,13 @@ try {
     finally { $reservation.Dispose() }
     $accept=$listener.AcceptTcpClientAsync()
     $stage='backend.start'
-    $radarHost=if($PeriodicSnapshot -and -not $EmulatorDoorSim -and -not $PeriodicReconnect){'localhost'}else{'127.0.0.1'}
+    $radarHost=if($PeriodicSnapshot -and -not $EmulatorDoorSim -and -not $PeriodicReconnect -and -not $PeriodicIdle){'localhost'}else{'127.0.0.1'}
     $arguments=@($radarHost,"$radarPort",'--signal-config',('"'+$SignalConfig+'"'),'--websocket','--ws-port',"$wsPort")
     if ($EmulatorDoorSim) { $arguments+=@('--emulator-door-sim','--radar-reconnect','--radar-reconnect-eof') }
     if ($AutoCycle) { $arguments+='--emulator-auto-cycle' }
     if ($PeriodicSnapshot) { $arguments+='--ws-periodic-snapshot' }
     if ($PeriodicReconnect) { $arguments+=@('--radar-reconnect','--radar-reconnect-eof') }
+    if ($PeriodicIdle) { $arguments+=@('--radar-reconnect','--radar-idle-timeout-ms','1800') }
     $child=Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $null=$child.Handle
     Write-Host "START PID=$($child.Id) radar=$radarPort ws=$wsPort UTC=$([DateTime]::UtcNow.ToString('o')) logs=$logs"
@@ -200,6 +201,65 @@ try {
         if ($null -eq $fixed -or $fixed.timestamp_us -le 0 -or $fixed.passengers[0].id -ne 1 -or
             $fixed.passengers[0].state -ne 'INSIDE' -or $null -ne $fixed.passengers[0].safety_state) {
             throw 'Missing tracked passenger on the latest observation'
+        }
+
+        if ($PeriodicIdle) {
+            $stage='periodic.idle-timeout'
+            $next=$listener.AcceptTcpClientAsync()
+            Wait-SimLog '\[radar\] session=1 end stage=idle_timeout code=0'
+            if (!$next.Wait(6000)) { throw 'Radar did not reconnect after idle timeout' }
+            $peer.Dispose()
+            $peer=$next.GetAwaiter().GetResult()
+
+            # Neither Viewer is recreated. Keep its pending read alive from the
+            # silence check through the first observation of the new session.
+            $stage='periodic.idle-drain'
+            $cancel=[Threading.CancellationTokenSource]::new(5000)
+            $drains=@()
+            try {
+                foreach($socket in @($first,$second)) {
+                    $buffer=[byte[]]::new(65536)
+                    $tail=0
+                    while ($true) {
+                        $pending=$socket.ReceiveAsync([ArraySegment[byte]]::new($buffer),$cancel.Token)
+                        if (!$pending.Wait(330)) { break }
+                        $old=Read-SimSnapshot $pending $buffer
+                        # The old session may have published timestamp zero more than once.
+                        # No new Radar bytes have been sent to the replacement peer yet.
+                        if ($null -eq $old.timestamp_us -or $old.timestamp_us -lt 0 -or
+                            $old.timestamp_us -gt $fixed.timestamp_us) {
+                            throw "Invalid tail timestamp $($old.timestamp_us), prior final timestamp $($fixed.timestamp_us)"
+                        }
+                        ++$tail
+                    }
+                    $drains+=@{Task=$pending;Buffer=$buffer;Tail=$tail}
+                }
+                if ($drains[0].Task.IsCompleted -or $drains[1].Task.IsCompleted) {
+                    throw 'Viewer received an update while the new session had no observation'
+                }
+                $stage='periodic.idle-reset'
+                $bytes=Packet 1 0
+                $peer.GetStream().Write($bytes,0,$bytes.Length)
+                foreach($drain in $drains) {
+                    $reset=Read-SimSnapshot $drain.Task $drain.Buffer
+                    if ($reset.timestamp_us -ne 0 -or $null -ne $reset.door_command -or $reset.passengers.Count -ne 0) {
+                        throw 'Old Radar/tracking data leaked into the new session'
+                    }
+                }
+            } finally { $cancel.Dispose() }
+
+            $stage='periodic.idle-final-eof'
+            $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+            if (!$child.WaitForExit(6500) -or $child.ExitCode -ne 0) { throw 'Backend did not stop on clean EOF' }
+            $text=Read-LiveLog $stderr
+            $seals=[regex]::Matches($text,'\[ws-periodic\] session=(\d+) published=(\d+) mean_interval_us=\d+ sealed_enqueues=(\d+)')
+            if ($seals.Count -ne 2 -or ($seals | Where-Object {$_.Groups[2].Value -ne $_.Groups[3].Value}) -or
+                $text -notmatch '\[radar\] session=2 end stage=eof code=0 .*parsed=1 rejected=0 buffered=0 B_frames=1 .*first_timestamp_us=0' -or
+                [regex]::Matches($text, '\[ws\] listening ').Count -ne 1 -or $text -match 'publish failed|10014') {
+                throw 'Radar reset, publisher seal, or WebSocket listener check failed'
+            }
+            Write-Host "PASS periodic idle reconnect: fast_tail=$($drains[0].Tail) slow_tail=$($drains[1].Tail) enqueue_after_seal=0 same_viewers=true reset_timestamp_us=0"
+            return
         }
 
         $stage='periodic.paused-input'
@@ -446,6 +506,7 @@ try {
         } while ($last.passengers.Count -ne 1)
         $stage='emulator-door.paused-open'
         Send-Door $first 'OPEN'
+        Wait-SimLog '\[door-sim\] manual session=1 client=\d+ command=OPEN decision=applied state=OPENING mode=MANUAL'
         do {
             $open=Read-SimSnapshot
             if ($open.door_state -ne 'CLOSED' -and $open.door_state -ne 'OPENING') { throw 'Unexpected state before OPEN' }
@@ -580,7 +641,13 @@ try {
     foreach($ws in @($first,$second)) { if($ws) { $ws.Dispose() } }
     if($peer){$peer.Dispose()}; if($listener){$listener.Stop()}
     if($child) {
-        if(-not $child.HasExited){$child.Kill(); $null=$child.WaitForExit(1000)}
+        if (!$child.WaitForExit(1500)) {
+            try { $child.Kill() }
+            catch {
+                if (!$child.WaitForExit(1000)) { Write-Warning "Backend cleanup failed PID=$($child.Id): $_" }
+            }
+            $null=$child.WaitForExit(1000)
+        }
         $child.Dispose()
     }
 }
