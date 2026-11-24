@@ -174,6 +174,29 @@ int main()
         hold.apply(D::Command::Open, zero + 3s);
         expect(hold.mode() == D::Mode::Auto && !hold.deadline(), "hold release open");
 
+        D pausedRadar;
+        pausedRadar.apply(D::Command::Open, zero);
+        expect(pausedRadar.takeAppliedCommand() == D::Command::Open, "paused Radar OPEN event");
+        pausedRadar.apply(D::Command::Hold, zero + 1s);
+        expect(pausedRadar.deadline() == zero + 3680ms && pausedRadar.takeAppliedCommand() == D::Command::Hold,
+            "HOLD during opening preserves existing timing policy");
+        expect(!pausedRadar.applyAuto(D::Command::Close, zero + 2s), "AUTO overrode manual HOLD");
+        expect(!pausedRadar.advanceMotion(zero + 3679ms) && pausedRadar.advanceMotion(zero + 3680ms)
+            && pausedRadar.state() == D::State::Open && pausedRadar.mode() == D::Mode::Manual,
+            "completion tick lost manual HOLD");
+        expect(!pausedRadar.advanceMotion(zero + 1h) && !pausedRadar.takeAppliedCommand(),
+            "completion tick emitted a command or closed the door");
+        pausedRadar.apply(D::Command::Close, zero + 1h);
+        expect(pausedRadar.takeAppliedCommand() == D::Command::Close, "paused Radar CLOSE event");
+        expect(pausedRadar.advanceMotion(zero + 1h + 2350ms) && pausedRadar.state() == D::State::Closed
+            && pausedRadar.mode() == D::Mode::Auto && !pausedRadar.takeAppliedCommand(),
+            "paused CLOSE did not complete in AUTO");
+        D manualOpen;
+        manualOpen.apply(D::Command::Open, zero);
+        manualOpen.advanceMotion(zero + 2680ms);
+        expect(manualOpen.mode() == D::Mode::Auto && !manualOpen.advanceMotion(zero + 1h)
+            && manualOpen.state() == D::State::Open, "completion-only tick auto-closed after manual OPEN");
+
         D conflict;
         conflict.apply(D::Command::Open, zero);
         conflict.apply(D::Command::Close, zero + 1s);

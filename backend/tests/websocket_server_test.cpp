@@ -12,6 +12,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <cstdio>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -46,7 +47,13 @@ namespace
             {
                 std::lock_guard lock(mutex);
                 text.append(data, static_cast<std::size_t>(size));
-                if (diagnostics) std::osyncstream(std::cerr).write(data, size);
+                if (diagnostics)
+                {
+                    // The caller may already be emitting a syncstream. libstdc++
+                    // can assign the same mutex to two different stream buffers.
+                    std::fwrite(data, 1, static_cast<std::size_t>(size), stderr);
+                    std::fflush(stderr);
+                }
                 return size;
             }
             int_type overflow(int_type character) override
@@ -335,6 +342,25 @@ namespace
         for (const auto* invalid : {"{", "[]", "{}", "{\"door_command\":\"INVALID\"}"}) first.send(invalid);
         until(context, server, "commands.invalid.rejected", "rejectedRequests=4",
             [](const auto& s) { return s.rejectedRequests == 4; });
+        // The test owns the only consumer, so these accepted requests are
+        // guaranteed to remain queued when the Radar owner closes the window.
+        first.send(R"({"door_command":"OPEN"})");
+        first.send(R"({"door_command":"HOLD"})");
+        until(context, server, "command-window.old.accepted", "commandsReceived=5",
+            [](const auto& s) { return s.commandsReceived == 5; });
+        server.setManualCommandsEnabled(false);
+        first.send(R"({"door_command":"OPEN"})");
+        until(context, server, "command-window.closed.rejected", "rejectedRequests=5",
+            [](const auto& s) { return s.rejectedRequests == 5; });
+        server.setManualCommandsEnabled(true);
+        expect(!server.popCommand(), "previous command window left queued requests");
+        second.send(R"({"door_command":"CLOSE"})");
+        until(context, server, "command-window.new.accepted", "commandsReceived=6",
+            [](const auto& s) { return s.commandsReceived == 6; });
+        const auto current = server.popCommand();
+        expect(current && current->command == "CLOSE" && !server.popCommand(),
+            "reopened command window received stale commands or lost the new request");
+
         first.close();
         until(context, server, "broadcast.one-client.remains", "connected=1",
             [](const auto& s) { return s.connected == 1; });
