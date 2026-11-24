@@ -31,6 +31,7 @@ namespace
     namespace fs = std::filesystem;
     constexpr const char* inputHeader = "frame,timestamp_us,x,y,z,doppler,power,target_id";
     constexpr const char* resultHeader = "frame_id,num_clusters,door_state";
+    constexpr const char* doorHeader = "frame_id,timestamp_us,state,hall_enabled";
 
     void require(bool condition, const std::string& message)
     {
@@ -179,28 +180,44 @@ namespace
     {
         int id;
         std::optional<std::int64_t> timestamp;
-        std::size_t clusters;
+        std::optional<std::size_t> clusters;
         sp::DoorState state;
     };
     Record record(const sp::PipelineResult& r) { return {r.frame_id, r.timestamp_us, r.clusters.size(), r.estimated_door_state}; }
 
+    constexpr sp::DoorState doorStates[] = {sp::DoorState::UNKNOWN, sp::DoorState::OPEN, sp::DoorState::CLOSED,
+        sp::DoorState::OPENING, sp::DoorState::CLOSING};
+
+    sp::DoorState parseBaselineDoorState(const std::string& value)
+    {
+        for (auto state : doorStates)
+            if (value == sp::doorStateToString(state)) return state;
+        throw std::runtime_error("Invalid baseline door state: " + value);
+    }
+
     std::vector<Record> readBaseline(std::istream& input)
     {
         std::string line;
-        require(static_cast<bool>(std::getline(input,line)) && trim(line) == resultHeader, "Invalid baseline header");
+        require(static_cast<bool>(std::getline(input, line)), "Invalid baseline header");
+        const auto header = trim(line);
+        const bool doorOnly = header == doorHeader;
+        require(doorOnly || header == resultHeader, "Invalid baseline header");
         std::vector<Record> records;
         while (std::getline(input,line))
         {
             if (trim(line).empty()) continue;
             const auto v = cells(line);
-            require(v.size() == 3, "Invalid baseline row");
-            auto state = sp::DoorState::UNKNOWN;
-            if (v[2] == "OPEN") state = sp::DoorState::OPEN;
-            else if (v[2] == "CLOSED") state = sp::DoorState::CLOSED;
-            else require(v[2] == "UNKNOWN", "Invalid baseline door state");
+            require(v.size() == (doorOnly ? 4u : 3u), "Invalid baseline row");
+            const auto state = parseBaselineDoorState(v[2]);
             const auto id = integer<int>(v[0]);
             require(id >= 0, "Negative baseline frame ID");
-            records.push_back({id, std::nullopt, integer<std::size_t>(v[1]), state});
+            if (doorOnly)
+            {
+                const auto timestamp = integer<std::int64_t>(v[1]);
+                require(timestamp >= 0 && (v[3] == "0" || v[3] == "1"), "Invalid B door CSV metadata");
+                records.push_back({id, timestamp, std::nullopt, state});
+            }
+            else records.push_back({id, std::nullopt, integer<std::size_t>(v[1]), state});
         }
         require(input.eof() && !records.empty(), "Empty/unreadable baseline");
         return records;
@@ -229,7 +246,8 @@ namespace
             if (found == right.end()) { diffs.push_back({label,id,"missing_id","present","missing"}); continue; }
             const auto& b = *found->second;
             if (a->timestamp && a->timestamp != b.timestamp) diffs.push_back({label,id,"timestamp_us",show(*a->timestamp),b.timestamp ? show(*b.timestamp) : "missing"});
-            if (a->clusters != b.clusters) diffs.push_back({label,id,"num_clusters",show(a->clusters),show(b.clusters)});
+            if (a->clusters && a->clusters != b.clusters)
+                diffs.push_back({label,id,"num_clusters",show(*a->clusters),b.clusters ? show(*b.clusters) : "missing"});
             if (a->state != b.state) diffs.push_back({label,id,"door_state",sp::doorStateToString(a->state),sp::doorStateToString(b.state)});
         }
         for (const auto& [id,b] : right)
@@ -264,17 +282,22 @@ namespace
 
     struct Totals
     {
-        std::size_t frames=0, clusters=0, open=0, closed=0, unknown=0, transitions=0;
+        std::size_t frames=0, clusters=0, open=0, closed=0, unknown=0, opening=0, closing=0, transitions=0;
     };
     Totals totals(const std::vector<Record>& records)
     {
         Totals t; auto previous=sp::DoorState::UNKNOWN;
         for (const auto& r : records)
         {
-            ++t.frames; t.clusters+=r.clusters;
-            if (r.state==sp::DoorState::OPEN) ++t.open;
-            else if (r.state==sp::DoorState::CLOSED) ++t.closed;
-            else ++t.unknown;
+            ++t.frames; t.clusters+=r.clusters.value_or(0);
+            switch (r.state)
+            {
+            case sp::DoorState::UNKNOWN: ++t.unknown; break;
+            case sp::DoorState::OPEN: ++t.open; break;
+            case sp::DoorState::CLOSED: ++t.closed; break;
+            case sp::DoorState::OPENING: ++t.opening; break;
+            case sp::DoorState::CLOSING: ++t.closing; break;
+            }
             if (previous!=sp::DoorState::UNKNOWN && previous!=r.state) ++t.transitions;
             previous=r.state;
         }
@@ -283,7 +306,9 @@ namespace
     void writeTotals(std::ostream& out, const Totals& t)
     {
         out << "{\"frames\":"<<t.frames<<",\"clusters\":"<<t.clusters<<",\"open\":"<<t.open
-            <<",\"closed\":"<<t.closed<<",\"unknown\":"<<t.unknown<<",\"transitions\":"<<t.transitions<<'}';
+            <<",\"closed\":"<<t.closed<<",\"unknown\":"<<t.unknown
+            <<",\"opening\":"<<t.opening<<",\"closing\":"<<t.closing
+            <<",\"open_family\":"<<(t.open+t.opening+t.closing)<<",\"transitions\":"<<t.transitions<<'}';
     }
     std::ofstream output(const fs::path& path)
     {
@@ -295,7 +320,7 @@ namespace
     void writeRecords(const fs::path& path, const std::vector<Record>& records)
     {
         auto file=output(path); file<<resultHeader<<'\n';
-        for (const auto& r : records) file<<r.id<<','<<r.clusters<<','<<sp::doorStateToString(r.state)<<'\n';
+        for (const auto& r : records) file<<r.id<<','<<r.clusters.value()<<','<<sp::doorStateToString(r.state)<<'\n';
         file.close();
     }
     std::string quoted(const std::string& text)
@@ -683,7 +708,7 @@ namespace
             for(std::size_t i=0;i<results.size();++i)
             {
                 const auto& r=results[i]; const auto& m=mapping[i];
-                framesFile<<i<<','<<r.id<<','<<m.tcpId<<','<<m.hostTime<<','<<r.clusters<<','<<sp::doorStateToString(r.state)<<'\n';
+                framesFile<<i<<','<<r.id<<','<<m.tcpId<<','<<m.hostTime<<','<<r.clusters.value()<<','<<sp::doorStateToString(r.state)<<'\n';
             }
             framesFile.close();
             const auto writeDiffs=[&](const fs::path& path,const Diffs& diffs)
@@ -980,6 +1005,27 @@ namespace
         b=a; b.clusters[0].cx=-0.0f; diffs.clear(); compareClusters(a,b,diffs); require(diffs.size()==1,"Float bits not checked");
         std::istringstream goodBaseline(std::string(resultHeader)+"\n1,0,UNKNOWN\n");
         require(readBaseline(goodBaseline).size()==1,"Baseline read failed");
+        std::istringstream fiveStateBaseline(std::string(resultHeader)
+            + "\n1,0,UNKNOWN\n2,1,CLOSING\n3,1,OPENING\n4,1,OPEN\n5,0,CLOSED\n");
+        const auto five = readBaseline(fiveStateBaseline);
+        const auto summary = totals(five);
+        require(summary.unknown == 1 && summary.open == 1 && summary.closed == 1
+            && summary.opening == 1 && summary.closing == 1 && summary.transitions == 3,
+            "Five-state baseline counts or direction reversal lost");
+        std::istringstream v7DoorBaseline(std::string(doorHeader)
+            + "\n1,0,UNKNOWN,0\n2,50,CLOSING,1\n3,100,OPENING,1\n4,150,OPEN,1\n5,200,CLOSED,0\n");
+        const auto doorOnly = readBaseline(v7DoorBaseline);
+        auto actual = five;
+        for (std::size_t i = 0; i < actual.size(); ++i) actual[i].timestamp = i * 50;
+        diffs.clear();
+        compareRecords(doorOnly,actual,"door-only",diffs);
+        require(diffs.empty(),"B door CSV did not match the actual states and timestamps");
+        actual[1].state = sp::DoorState::OPEN;
+        actual[2].state = sp::DoorState::UNKNOWN;
+        compareRecords(doorOnly,actual,"door-only",diffs);
+        require(diffs.size() == 2 && diffs[0].expected == "CLOSING" && diffs[0].actual == "OPEN"
+            && diffs[1].expected == "OPENING" && diffs[1].actual == "UNKNOWN",
+            "Different door states were folded in exact comparison");
         rejects([]{std::istringstream bad(std::string(resultHeader)+"\n1,0,INVALID\n");readBaseline(bad);});
         sp::Config cfg; require(cfg.load(cfgPath),"Self-test config failed");
         sp::SignalPipeline direct(cfg),adapter(cfg); require(direct.ok() && adapter.ok(),"Self-test B initialization failed");

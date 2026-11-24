@@ -156,7 +156,9 @@ WebSocket을 활성화하면 transport만 별도의 I/O thread에서 동작합�
 
 설정 로드 및 `SignalPipeline::ok()` 검사를 TCP 연결 전에 수행하며 실패하면 종료합니다.
 연결 세션 동안 B 객체 하나를 유지하고 같은 thread에서 순차 호출합니다.
-`FrameContext::door_state`는 항상 `UNKNOWN`이며 B 추정 결과를 되먹임하지 않습니다.
+합의서 v7에서 `FrameContext`는 빈 확장 구조체입니다. 현재 B 헤더에는
+`door_state`가 기본값 `UNKNOWN`으로 남아 있습니다. A는 이 필드를 읽거나 설정하지 않으며
+B 추정 결과를 다음 프레임에 되먹임하지 않습니다.
 결과 로그에는 frame ID, timestamp, 입력 point 수, cluster 수와 추정 문 상태가 포함됩니다.
 
 프레임 처리의 표준 예외는 frame 번호와 함께 stderr에 기록하고 해당 frame을 건너뜁니다.
@@ -1502,7 +1504,15 @@ Radar 모드의 `--signal-config PATH --websocket` 조합에서만 활성화하�
 
 매 프레임 `RadarFrame → toSignalFrame → SignalPipeline::process → toTrackingDetections →
 TrackingEngine::processFrame`으로 처리합니다. `processPoints()`나 두 번째 DBSCAN은 호출하지 않습니다.
-Adapter의 `num_points >= 40` 필터를 유지합니다. 중심·bbox·z 범위·점 수·Doppler와
+A의 시연용 40점 필터를 제거했습니다. B가 반환하는 양수 점 개수의 모든 Cluster를
+원래 순서대로 C에 전달합니다. 0점과 음수는 입력 유효성 검사에서 제외합니다.
+PR #60부터 B가 선택적으로 유령 Cluster를 제거합니다. `ghost_filter.enable`의 기본값은 OFF이며,
+3차·4차 실행용 설정에서 ON입니다. 기본 기준은 일반 영역 20점 이상, 뒷벽 띠
+(`cy >= 1.30m`) 또는 센서 수평 반경 0.40m 이내 60점 이상입니다. 센서 위치는
+`sensor.tx`, `sensor.ty`를 사용합니다. B는 제거한 Cluster를 결과에서 제외하고 해당 점의
+`cluster_id`를 `-1`로 표시합니다. A는 B가 남긴 20~39점 Cluster도 C에 전달합니다.
+이 설명은 병합된 코드의 동작을 반영합니다. 공식 A–B–C v8 확정 여부는 별도 확인 대상입니다.
+중심·bbox·z 범위·점 수·Doppler와
 B의 zone, z_top, maybe_merged를 옮기고,
 평균 power는 B의 `power_sum / num_points`를 `mean_power`로 전달합니다. 비유한 합계는
 Detection을 유지하고 평균만 0으로 대체하므로, 이 값으로 실제 평균 0과 미측정을 구분할 수 없습니다.
@@ -1511,7 +1521,26 @@ Detection을 유지하고 평균만 0으로 대체하므로, 이 값으로 실�
 C 객체는 TCP 세션 동안 유지하고 재연결 시 트랙, Phase, Safety 이력을 새로 시작합니다.
 
 Snapshot은 v7의 기존 5개 필드를 사용합니다. `timestamp`는 발행 시점 UTC ISO 문자열,
-`timestamp_us`는 B 결과 그대로, `door_state`는 B 추정값(UNKNOWN 포함), `door_command`는 null입니다.
+일반 Radar에서 `timestamp_us`는 B 결과 그대로이며 `door_command`는 null입니다.
+기본 발행과 `--ws-periodic-snapshot` 모두 D에 B의 원래 `door_state`를 보냅니다.
+C에는 다음 표에 따라 별도로 변환합니다.
+
+| B 추정 상태 | C 입력 | D Snapshot |
+| --- | --- | --- |
+| UNKNOWN | UNKNOWN | UNKNOWN |
+| CLOSED | CLOSED | CLOSED |
+| OPEN | OPEN | OPEN |
+| OPENING | OPEN | OPENING |
+| CLOSING | OPEN | CLOSING |
+
+`door_state.motion_enable=1`인 3차와 4차 실행용 설정은 문짝 Doppler 기반입니다.
+세션에서 처음 문 움직임이 감지되기 전까지 B는 UNKNOWN을 유지합니다.
+`motion_enable=0`인 가시성 방식은 UNKNOWN, OPEN, CLOSED 세 상태를 사용합니다.
+`elevator_3rd_wide.cfg`, `elevator_4th_wide.cfg`는 정지 반사 분석용입니다.
+실시간 승객 추적에는 `elevator_3rd.cfg`, `elevator_4th.cfg` 등 해당 녹화의 실행용 설정을 사용합니다.
+
+Emulator의 가상 문은 별도 규칙을 사용합니다. 가상 OPENING과 MANUAL CLOSING은
+C UNKNOWN으로, AUTO CLOSING은 C OPEN으로 전달합니다. D에는 가상 상태를 그대로 보냅니다.
 `passengers`는 CONFIRMED 공개 Tracking ID와 x/y(m)의 전체 목록입니다. B cluster_id나 센서
 Target ID를 사용하지 않습니다. `state`는 C의 Phase(OUTSIDE, ENTERING, INSIDE, EXITING)이고,
 `safety_state`는 NORMAL일 때 null, 위험 상태일 때 FALL 또는 IMMOBILE입니다.
@@ -1541,8 +1570,20 @@ ctest --test-dir backend/build/demo-root -C Release --output-on-failure
 cmake -S backend -B backend/build/demo-backend -A x64 -DEigen3_DIR=<동일-Eigen3-경로>
 ```
 
-`tracking_adapter_test`는 Detection 매핑과 39·40 경계, HALL, Phase/Safety, 빈 프레임, Tracking ID,
-100ms 발행 제한, 새 세션 초기화 및 실제 B 호출을 검사합니다. Windows의 `tracking_radar_websocket_test`는
+`tracking_adapter_test`는 1·10·39·40·100점 전달과 0 이하 제외, Detection 필드 및 평균 power,
+B 문 상태 5종, C의 문턱 HOLD와 방향 반전, HALL, Phase/Safety, 빈 프레임, Tracking ID,
+100ms 발행 제한, 새 세션 초기화 및 실제 B 호출을 검사합니다. B GhostFilter의 19/20/39점,
+뒷벽 59/60점, 센서 반경 안팎과 OFF 경로를 실제 `SignalPipeline` 입력으로 검증합니다.
+B가 모든 Cluster를 제거한 프레임도 C 호출에 포함합니다.
+`signal_replay_compare_self_test`와 `signal_tcp_compare_self_test`도 CTest에 등록됩니다.
+리플레이는 기존 `frame_id,num_clusters,door_state`와 B v7 `frame_id,timestamp_us,state,hall_enabled`
+기준 CSV를 읽고, 입력 형식에 따라 점검할 수 있는 Cluster 수 또는 타임스탬프와 문 상태를
+비교합니다. 요약의 `open`, `opening`, `closing`은 정확한 상태별 집계이고 `open_family`는
+과거 B 요약과 비교하기 위한 합계입니다. 상태 일치 판정에는 원래 5종 값을 사용합니다.
+기존 3차 CSV를 비교하기 전 기록에 사용된 설정과 `motion_enable`을 확인하세요.
+가시성 방식 CSV에서 문짝 움직임 방식과 값이 달라질 수 있습니다. 기준 파일은 보존하고
+새 측정은 별도 출력 디렉터리에 저장하세요.
+CTest에서 관련 시험만 실행하려면 `ctest --test-dir backend/build/demo-root -C Release -R 'tracking_adapter_test|signal_(replay|tcp)_compare_self_test' --output-on-failure`를 사용합니다. Windows의 `tracking_radar_websocket_test`는
 기존 wire layout의 합성 20Hz TCP 입력 64프레임을 실제 Backend로 보내 두 클라이언트 수신,
 추적 ID·위치·빈 목록·입력 중단 시 발행 중단·EOF 종료를 검사합니다. 이는 FOV 실데이터 시험이 아닙니다.
 C의 CSV 로더 시험에는 별도 입력이 필요합니다. `detection_loader_test`는 `tracking/S0-1_t01.csv`,
