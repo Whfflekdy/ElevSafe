@@ -31,6 +31,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <syncstream>
 #include <thread>
 
 namespace
@@ -68,7 +69,7 @@ namespace
     {
         std::cerr << "Usage: elevsafe_backend [host] [port] [--benchmark] [--benchmark-frames N] [--signal-config PATH]\n"
                      "       [--ab-profile [--ab-profile-max-frames N] [--ab-profile-warmup N]]\n"
-                     "       [--radar-reconnect [--radar-reconnect-eof]] (numeric radar IP only)\n"
+                     "       [--radar-reconnect [--radar-reconnect-eof] [--radar-idle-timeout-ms N]] (numeric radar IP only)\n"
                      "       [--emulator-door-sim] (Radar TCP, numeric IP, --signal-config --websocket, loopback WS)\n"
                      "       [--emulator-auto-cycle] (requires --emulator-door-sim; one virtual arrival per process)\n"
                      "       [--websocket] [--ws-bind IP] [--ws-port PORT]\n"
@@ -121,6 +122,17 @@ namespace
         }
     };
 
+    void logManualDoor(const elevsafe::ManualDoorRequest& request, const elevsafe::DoorSimulation& door,
+        bool applied, std::size_t session)
+    {
+        using Door = elevsafe::DoorSimulation;
+        std::osyncstream(std::cerr) << "[door-sim] manual session=" << session
+            << " client=" << request.clientId << " command=" << request.command
+            << " decision=" << (applied ? "applied" : "unchanged")
+            << " state=" << Door::name(door.state())
+            << " mode=" << (door.mode() == Door::Mode::Auto ? "AUTO" : "MANUAL") << '\n';
+    }
+
     int runMock(elevsafe::WebSocketServer& server, std::size_t seconds, bool doorSim, const std::optional<std::string>& scenario)
     {
         mockStop.store(false, std::memory_order_relaxed);
@@ -157,10 +169,7 @@ namespace
                     using Command = elevsafe::DoorSimulation::Command;
                     const auto command = request->command == "OPEN" ? Command::Open
                         : request->command == "HOLD" ? Command::Hold : Command::Close;
-                    if (simulation.apply(command, now))
-                    {
-                        logSimulation("command-applied");
-                    }
+                    logManualDoor(*request, simulation, simulation.apply(command, now), 0);
                 }
                 if (scenario)
                 {
@@ -224,6 +233,7 @@ int main(int argc, char** argv)
     int positionals = 0;
     bool benchmarkMode = false;
     bool reconnectEnabled = false, reconnectEof = false;
+    std::optional<std::chrono::milliseconds> radarIdleTimeout;
     bool emulatorDoorSim = false;
     bool emulatorAutoCycle = false;
     std::optional<std::size_t> benchmarkFrameLimit;
@@ -273,6 +283,21 @@ int main(int argc, char** argv)
         {
             if (doorSim) { std::cerr << "Duplicate --ws-door-sim\n"; return 2; }
             doorSim = true; ++argument; continue;
+        }
+        if (option == "--radar-idle-timeout-ms")
+        {
+            std::size_t milliseconds = 0;
+            constexpr auto maxIdleTimeoutMs = static_cast<std::size_t>(
+                elevsafe::RetinaClient::SessionControl::maximumReceiveIdleTimeout.count());
+            if (radarIdleTimeout || argument + 1 >= argc ||
+                !parsePositiveSize(argv[argument + 1], milliseconds) || milliseconds > maxIdleTimeoutMs)
+            {
+                std::cerr << "Invalid or duplicate --radar-idle-timeout-ms: expected 1-" << maxIdleTimeoutMs << '\n';
+                return 2;
+            }
+            radarIdleTimeout = std::chrono::milliseconds(milliseconds);
+            argument += 2;
+            continue;
         }
         if (option == "--radar-reconnect" || option == "--radar-reconnect-eof")
         {
@@ -451,6 +476,11 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    if (radarIdleTimeout && (!reconnectEnabled || mockMode))
+    {
+        std::cerr << "--radar-idle-timeout-ms requires --radar-reconnect in Radar mode\n";
+        return 2;
+    }
     if ((reconnectEof && !reconnectEnabled) || (reconnectEnabled && mockMode))
     {
         std::cerr << "--radar-reconnect-eof requires --radar-reconnect; reconnect is Radar-only\n";
@@ -568,7 +598,11 @@ int main(int argc, char** argv)
                 }
                 if (abProfileEnabled) abProfile = std::make_unique<elevsafe::AbProfile>(profileLimit, profileWarmup);
             }
-            if (reconnectEnabled) std::cerr << "[radar] session=" << session << " begin\n";
+            const auto sessionStarted = std::chrono::steady_clock::now();
+            if (!benchmarkMode)
+                std::osyncstream(std::cerr) << "[radar] session=" << session << " begin mode="
+                    << (emulatorDoorSim ? "emulator" : "radar") << " reconnect=" << reconnectEnabled
+                    << " idle_timeout_ms=" << (radarIdleTimeout ? radarIdleTimeout->count() : 0) << '\n';
             // Capacity 1 is only the minimum needed for synchronous enqueue -> immediate drain.
             // It is not a production tuning value and must be revisited for a separated producer/consumer design.
             constexpr std::size_t kSynchronousFrameBufferCapacity = 1;
@@ -596,6 +630,8 @@ int main(int argc, char** argv)
             bool lastSnapshotHadCommand = false;
             std::optional<Door::Clock::time_point> lastPublish;
             auto lastPublishedState = virtualDoor.state();
+            using DoorCommand = elevsafe::DoorCommand;
+            auto lastCRequest = DoorCommand::NONE;
             const auto serviceDoor = [&](Door::Time now)
             {
                 // The command window is closed until the first valid observation.
@@ -608,9 +644,14 @@ int main(int argc, char** argv)
                     const auto command = request->command == "OPEN" ? Door::Command::Open
                         : request->command == "HOLD" ? Door::Command::Hold : Door::Command::Close;
                     manualConsumed = true;
-                    doorArbitration.applyManual(command, now);
+                    logManualDoor(*request, virtualDoor, doorArbitration.applyManual(command, now), session);
                 }
+                const auto before = virtualDoor.state();
                 doorArbitration.advanceMotion(now);
+                if (virtualDoor.state() != before)
+                    std::osyncstream(std::cerr) << "[door-sim] motion-complete session=" << session
+                        << " state=" << Door::name(virtualDoor.state()) << " mode="
+                        << (virtualDoor.mode() == Door::Mode::Auto ? "AUTO" : "MANUAL") << '\n';
                 return manualConsumed;
             };
             const auto tickDoor = [&]
@@ -649,9 +690,9 @@ int main(int argc, char** argv)
             auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
             client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
                 &summaryPrinted, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
-                emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor](const elevsafe::RadarFrame& frame)
+                emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor, session, &lastCRequest](const elevsafe::RadarFrame& frame)
             {
-                if (reconnectEnabled && !firstTimestamp) firstTimestamp = frame.timestampUs;
+                if (!benchmarkMode && !firstTimestamp) firstTimestamp = frame.timestampUs;
                 using Profile = elevsafe::AbProfile;
                 std::optional<Profile::FrameScope> profiled;
                 if (abProfile)
@@ -661,7 +702,7 @@ int main(int argc, char** argv)
                 pipeline.onFrame(frame);
                 pipeline.drain([&signal, &profiled, quietFrames, reconnectEnabled, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
                 emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor,
-                receivedAt](const elevsafe::RadarFrame& pendingFrame)
+                receivedAt, session, &lastCRequest](const elevsafe::RadarFrame& pendingFrame)
                 {
                     if (signal)
                     {
@@ -676,7 +717,7 @@ int main(int argc, char** argv)
                             const elevsafe::sp::FrameContext context;
                             const auto bStart = profiled ? Profile::Clock::now() : Profile::Clock::time_point{};
                             const auto result = signal->process(input, context);
-                            if (reconnectEnabled) lastDoorState = result.estimated_door_state;
+                            lastDoorState = result.estimated_door_state;
                             if (profiled)
                             {
                                 const auto bEnd = Profile::Clock::now();
@@ -687,8 +728,19 @@ int main(int argc, char** argv)
                             if (emulatorDoorSim)
                             {
                                 auto observation = tracking->observe(result, cDoorState);
-                                doorArbitration.applyFrame(observation.door_command, result.timestamp_us,
-                                    receivedAt, Door::Clock::now(), manualConsumed, cDoorState);
+                                const auto request = observation.door_command;
+                                if (request != lastCRequest && request != DoorCommand::NONE)
+                                    std::osyncstream(std::cerr) << "[door-sim] C-request session=" << session << " command="
+                                        << (request == DoorCommand::HOLD ? "HOLD" : request == DoorCommand::CLOSE ? "CLOSE" : "OPEN") << '\n';
+                                lastCRequest = request;
+                                if (doorArbitration.applyFrame(request, result.timestamp_us,
+                                    receivedAt, Door::Clock::now(), manualConsumed, cDoorState))
+                                {
+                                    if (const auto applied = virtualDoor.activeCommand())
+                                        std::osyncstream(std::cerr) << "[door-sim] auto-applied session=" << session
+                                            << " source=" << (request == DoorCommand::NONE ? "normal-cycle" : "C")
+                                            << " command=" << Door::name(*applied) << '\n';
+                                }
                                 if (periodic)
                                 {
                                     const auto applied = virtualDoor.takeAppliedCommand();
@@ -733,6 +785,7 @@ int main(int argc, char** argv)
                         }
                         catch (const std::exception& exception)
                         {
+                            if (periodic) periodic->checkFailure();
                             // drain already owns/popped this frame; skip it without retrying B's stateful process.
                             std::cerr << "Signal frame failed: frameCount=" << pendingFrame.frameCount
                                       << " timestampUs=" << pendingFrame.timestampUs
@@ -776,42 +829,69 @@ int main(int argc, char** argv)
             result = 1;
             elevsafe::RetinaClient::RunDiagnostics profileDiagnostics;
             bool runReturned = false;
+            std::exception_ptr receiveFailure, publisherFailure;
+            const auto tick = [&]
+            {
+                if (periodic) periodic->checkFailure();
+                if (emulatorDoorSim) tickDoor();
+            };
+            std::optional<std::size_t> sealedEnqueues;
+            const auto sealPublisher = [&]
+            {
+                if (!sealedEnqueues) sealedEnqueues = periodic->seal();
+            };
             try
             {
                 if (reconnectEnabled || emulatorDoorSim)
                 {
                     elevsafe::RetinaClient::SessionControl control;
                     if (reconnectEnabled) control.connectNotAfter = retryBudget.deadline();
-                    if (emulatorDoorSim) control.onReceiveTick = tickDoor;
+                    control.receiveIdleTimeout = radarIdleTimeout;
+                    if (periodic || emulatorDoorSim) control.onReceiveTick = tick;
+                    if (periodic) control.onReceiveEnd = sealPublisher;
                     control.cancelRequested = [] { return radarStop.load(std::memory_order_relaxed); };
                     result = client.runSession(std::cerr, control, profileDiagnostics);
                 }
-                else result = abProfile ? client.run(std::cerr, {}, profileDiagnostics) : client.run(std::cerr);
+                else if (periodic) result = client.runWithReceiveTick(std::cerr, profileDiagnostics, tick, sealPublisher);
+                else result = client.run(std::cerr, {}, profileDiagnostics);
                 runReturned = true;
             }
-            catch (const std::exception& exception)
+            catch (...) { receiveFailure = std::current_exception(); }
+
+            const auto reportFailure = [](const char* label, const std::exception_ptr& failure)
             {
-                if (reconnectEnabled) profileDiagnostics.stage = "processing_exception";
-                std::cerr << "Backend stopped: " << exception.what() << '\n';
-            }
+                try { std::rethrow_exception(failure); }
+                catch (const std::exception& error) { std::osyncstream(std::cerr) << label << error.what() << '\n'; }
+                catch (...) { std::osyncstream(std::cerr) << label << "unknown exception\n"; }
+            };
 
             if (periodic)
             {
                 try
                 {
+                    sealPublisher();
                     const auto stats = periodic->finish();
                     snapshotsPublished = stats.published;
                     std::cerr << "[ws-periodic] session=" << session << " published=" << stats.published
-                              << " mean_interval_us=" << stats.meanIntervalUs << '\n';
+                              << " mean_interval_us=" << stats.meanIntervalUs
+                              << " sealed_enqueues=" << *sealedEnqueues << '\n';
                 }
-                catch (const std::exception& exception)
+                catch (...)
                 {
+                    publisherFailure = std::current_exception();
                     result = 1;
-                    runReturned = false;
-                    std::cerr << "[ws-periodic] stopped: " << exception.what() << '\n';
+                    std::osyncstream(std::cerr) << "[ws-periodic] session=" << session
+                        << " joined transport_stage=" << profileDiagnostics.stage << '\n';
+                    profileDiagnostics.stage = "publisher_failure";
                 }
             }
             if (emulatorDoorSim) websocket->setManualCommandsEnabled(false);
+            if (publisherFailure) reportFailure("[ws-periodic] publish failed: ", publisherFailure);
+            if (receiveFailure && receiveFailure != publisherFailure)
+            {
+                if (!publisherFailure) profileDiagnostics.stage = "processing_exception";
+                reportFailure("Backend stopped: ", receiveFailure);
+            }
 
             if (tracking)
                 std::cerr << "[tracking-demo] session=" << session << " frames=" << tracking->processedFrames()
@@ -827,7 +907,7 @@ int main(int argc, char** argv)
                 std::cout << ",\"run_returned\":" << (runReturned ? "true" : "false")
                           << ",\"clean_eof\":" << (runReturned && result == 0 && profileDiagnostics.stage == "eof" ? "true" : "false")
                           << ",\"exit_code\":" << result << ",\"termination_stage\":\""
-                          << (runReturned ? profileDiagnostics.stage : "processing_exception")
+                          << profileDiagnostics.stage
                           << "\",\"socket_error_code\":" << profileDiagnostics.errorCode
                           << ",\"parser_statistics_finalized\":" << (runReturned ? "true" : "false")
                           << ",\"parser_packets_parsed\":";
@@ -841,21 +921,34 @@ int main(int argc, char** argv)
                 std::cout << "}\n";
             }
 
-            if (reconnectEnabled)
+            if (!benchmarkMode)
             {
-                std::cerr << "[radar] session=" << session << " end stage=" << profileDiagnostics.stage
+                std::osyncstream sessionLog(std::cerr);
+                sessionLog << "[radar] session=" << session << " end stage=" << profileDiagnostics.stage
                           << " code=" << profileDiagnostics.errorCode
                           << " connected=" << profileDiagnostics.connected
                           << " parsed=" << profileDiagnostics.parser.packetsParsed
                           << " rejected=" << profileDiagnostics.parser.packetsRejected
                           << " buffered=" << profileDiagnostics.bufferedBytes;
-                if (signal) std::cerr << " B_frames=" << signal->stats().frames
+                if (signal) sessionLog << " B_frames=" << signal->stats().frames
                                       << " background=" << signal->usesBackground()
                                       << " last_door_state=" << elevsafe::sp::doorStateToString(lastDoorState);
-                if (firstTimestamp) std::cerr << " first_timestamp_us=" << *firstTimestamp;
-                std::cerr << '\n';
+                if (firstTimestamp) sessionLog << " first_timestamp_us=" << *firstTimestamp;
+                if (profileDiagnostics.connected)
+                {
+                    const auto age = [](const std::optional<std::chrono::milliseconds>& value)
+                    { return value ? std::to_string(value->count()) : std::string("never"); };
+                    sessionLog << " first_byte_pending=" << !profileDiagnostics.lastByteAge.has_value()
+                              << " last_byte_age_ms=" << age(profileDiagnostics.lastByteAge)
+                              << " last_valid_frame_age_ms=" << age(profileDiagnostics.lastValidFrameAge);
+                }
+                if (!profileDiagnostics.socketOperation.empty())
+                    sessionLog << " socket_operation=" << profileDiagnostics.socketOperation;
+                sessionLog << " snapshots=" << snapshotsPublished << " exit_code=" << result
+                    << " duration_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sessionStarted).count() << '\n';
             }
-            if (!reconnectEnabled || !runReturned) break;
+            if (!reconnectEnabled || !runReturned || publisherFailure) break;
             if (radarStop.load(std::memory_order_relaxed) || profileDiagnostics.cancelled)
             { result = 0; break; }
             if (!elevsafe::RetinaClient::retryable(profileDiagnostics, reconnectEof)) break;
@@ -865,7 +958,9 @@ int main(int argc, char** argv)
                 std::cerr << "[radar] recovery exhausted retries=" << retryBudget.retries() << " (limit=3, budget=15s)\n";
                 result = 1; break;
             }
-            std::cerr << "[radar] retry=" << retryBudget.retries() << "/3 wait_ms=1000 connect_timeout_ms=3000\n";
+            std::osyncstream(std::cerr) << "[radar] retry=" << retryBudget.retries()
+                << "/3 wait_ms=1000 connect_timeout_ms=3000 after_session=" << session
+                << " reason=" << profileDiagnostics.stage << " code=" << profileDiagnostics.errorCode << '\n';
             while (elevsafe::RadarReconnectBudget::Clock::now() < *next && !radarStop.load(std::memory_order_relaxed))
                 std::this_thread::sleep_until(std::min(*next,
                     elevsafe::RadarReconnectBudget::Clock::now() + std::chrono::milliseconds(50)));

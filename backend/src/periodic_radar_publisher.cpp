@@ -51,6 +51,7 @@ namespace elevsafe
     {
         std::lock_guard lock(mutex_);
         if (failure_) std::rethrow_exception(failure_);
+        if (stopping_) return;
         const bool first = !schedule_.due();
         schedule_.observe(timestampUs, std::move(tracks), doorState, applied, RadarSnapshotSchedule::Clock::now());
         if (first) changed_.notify_one();
@@ -60,6 +61,7 @@ namespace elevsafe
     {
         std::lock_guard lock(mutex_);
         if (failure_) std::rethrow_exception(failure_);
+        if (stopping_) return;
         schedule_.updateDoor(doorState, applied);
     }
 
@@ -95,15 +97,28 @@ namespace elevsafe
         }
     }
 
+    void PeriodicRadarPublisher::checkFailure()
+    {
+        std::lock_guard lock(mutex_);
+        if (failure_) std::rethrow_exception(failure_);
+    }
+
+    std::size_t PeriodicRadarPublisher::seal()
+    {
+        std::lock_guard lock(mutex_);
+        if (!stopping_)
+        {
+            stopping_ = true;
+            schedule_.end();
+            changed_.notify_one();
+        }
+        return published_;
+    }
+
     void PeriodicRadarPublisher::stop()
     {
         if (!worker_.joinable()) return;
-        {
-            std::lock_guard lock(mutex_);
-            stopping_ = true;
-            schedule_.end();
-        }
-        changed_.notify_one();
+        seal();
         worker_.join();
     }
 

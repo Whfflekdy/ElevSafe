@@ -138,16 +138,36 @@ namespace elevsafe
 #endif
         }
 
+        struct ReceiveActivity
+        {
+            using Clock = std::chrono::steady_clock;
+            RetinaClient::RunDiagnostics& diagnostics;
+            Clock::time_point connectedAt = Clock::now();
+            std::optional<Clock::time_point> lastByteAt, lastValidFrameAt;
+
+            ~ReceiveActivity()
+            {
+                const auto now = Clock::now();
+                if (lastByteAt)
+                    diagnostics.lastByteAge = std::chrono::duration_cast<std::chrono::milliseconds>(now - *lastByteAt);
+                if (lastValidFrameAt)
+                    diagnostics.lastValidFrameAge = std::chrono::duration_cast<std::chrono::milliseconds>(now - *lastValidFrameAt);
+            }
+        };
+
         int waitSocket(std::intptr_t socket, bool writing, const RetinaClient::Deadline& deadline,
-            const std::function<bool()>& cancelled = {}, const std::function<void()>& onIdle = {})
+            const std::function<bool()>& cancelled = {}, const std::function<void()>& onIdle = {},
+            bool* idleExpired = nullptr)
         {
             for (;;)
             {
                 if (cancelled && cancelled()) return cancelledError();
                 const auto left = deadline ? deadline() - std::chrono::steady_clock::now() : std::chrono::seconds(1);
-                if (left <= std::chrono::steady_clock::duration::zero()) return timeoutError();
+                const bool expired = left <= std::chrono::steady_clock::duration::zero();
+                if (expired && !idleExpired) return timeoutError();
                 // Re-query the same-thread deadline periodically; no watchdog thread.
-                const auto micros = std::max<std::int64_t>(1, std::min<std::int64_t>(onIdle ? 25000 : (cancelled ? 100000 : 1000000),
+                // At the idle boundary, queued bytes, EOF or a native error take precedence.
+                const auto micros = expired ? 0 : std::max<std::int64_t>(1, std::min<std::int64_t>(onIdle ? 25000 : (cancelled ? 100000 : 1000000),
                     std::chrono::duration_cast<std::chrono::microseconds>(left).count()));
                 timeval interval{static_cast<long>(micros / 1000000), static_cast<long>(micros % 1000000)};
                 fd_set ready, errors;
@@ -165,6 +185,12 @@ namespace elevsafe
                 if (result > 0) return 0;
                 if (result == 0)
                 {
+                    if (expired)
+                    {
+                        *idleExpired = true;
+                        return timeoutError();
+                    }
+                    if (idleExpired && std::chrono::steady_clock::now() >= deadline()) continue;
                     if (onIdle && (!cancelled || !cancelled())) onIdle();
                     continue;
                 }
@@ -227,17 +253,27 @@ namespace elevsafe
         return runImpl(log, deadline, nullptr, diagnostics);
     }
 
+    int RetinaClient::runWithReceiveTick(std::ostream& log, RunDiagnostics& diagnostics,
+        const std::function<void()>& tick, const std::function<void()>& end)
+    {
+        return runImpl(log, {}, nullptr, diagnostics, tick, end);
+    }
+
     int RetinaClient::runSession(std::ostream& log, const SessionControl& control, RunDiagnostics& diagnostics)
     {
         if (control.connectTimeout <= std::chrono::milliseconds::zero())
             throw std::invalid_argument("connectTimeout must be positive");
-        return runImpl(log, {}, &control, diagnostics);
+        if (control.receiveIdleTimeout && (*control.receiveIdleTimeout <= std::chrono::milliseconds::zero() ||
+            *control.receiveIdleTimeout > SessionControl::maximumReceiveIdleTimeout))
+            throw std::invalid_argument("receiveIdleTimeout out of range");
+        return runImpl(log, {}, &control, diagnostics, control.onReceiveTick, control.onReceiveEnd);
     }
 
     bool RetinaClient::retryable(const RunDiagnostics& diagnostics, bool reconnectEof) noexcept
     {
         if (diagnostics.cancelled) return false;
         if (diagnostics.stage == "eof") return reconnectEof;
+        if (diagnostics.stage == "idle_timeout") return diagnostics.timedOut && diagnostics.errorCode == 0;
         if (diagnostics.stage != "connect" && diagnostics.stage != "receive") return false;
 #ifdef _WIN32
         return diagnostics.errorCode == WSAECONNREFUSED || diagnostics.errorCode == WSAECONNRESET
@@ -253,7 +289,8 @@ namespace elevsafe
     }
 
     int RetinaClient::runImpl(std::ostream& log, const Deadline& deadline,
-        const SessionControl* control, RunDiagnostics& diagnostics)
+        const SessionControl* control, RunDiagnostics& diagnostics,
+        const std::function<void()>& onReceiveTick, const std::function<void()>& onReceiveEnd)
     {
         diagnostics = {};
         const auto connectEnd = control ? (std::min)(std::chrono::steady_clock::now() + control->connectTimeout,
@@ -302,6 +339,7 @@ namespace elevsafe
         if (resolveResult != 0)
         {
             diagnostics.stage = "resolve";
+            diagnostics.socketOperation = "getaddrinfo";
             diagnostics.errorCode = resolveResult;
 #ifdef _WIN32
             log << "getaddrinfo failed: " << resolveResult << '\n';
@@ -318,7 +356,13 @@ namespace elevsafe
         {
             if (control && cancelled()) break;
             if (connectDeadline && std::chrono::steady_clock::now() >= connectDeadline())
-            { lastConnectError = timeoutError(); haveConnectError = true; break; }
+            {
+                diagnostics.socketOperation = "connect_deadline";
+                lastConnectError = timeoutError(); haveConnectError = true; break;
+            }
+            diagnostics.addressFamily = address->ai_family;
+            diagnostics.addressLength = address->ai_addrlen;
+            diagnostics.socketOperation = "socket";
 #ifdef _WIN32
             const SOCKET socket = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
             if (socket == INVALID_SOCKET)
@@ -338,6 +382,7 @@ namespace elevsafe
 #endif
 
             const int setupError = (deadline || control) ? makeNonblocking(m_socket) : 0;
+            diagnostics.socketOperation = setupError != 0 ? "nonblocking_setup" : "connect";
             const int connectResult = setupError == 0 ? ::connect(
 #ifdef _WIN32
                 static_cast<SOCKET>(m_socket),
@@ -349,9 +394,11 @@ namespace elevsafe
             int connectError = setupError != 0 ? setupError : (connectResult == 0 ? 0 : lastSocketError());
             if (connectDeadline && pendingSocketError(connectError))
             {
+                diagnostics.socketOperation = "select_connect";
                 connectError = waitSocket(m_socket, true, connectDeadline, control ? cancelled : std::function<bool()>{});
                 if (connectError == 0)
                 {
+                    diagnostics.socketOperation = "getsockopt_SO_ERROR";
                     int socketErrorCode = 0;
                     socklen_t length = sizeof(socketErrorCode);
                     if (getsockopt(
@@ -361,13 +408,20 @@ namespace elevsafe
                         static_cast<int>(m_socket), SOL_SOCKET, SO_ERROR, &socketErrorCode,
 #endif
                         &length) != 0) connectError = lastSocketError();
-                    else connectError = socketErrorCode;
+                    else
+                    {
+                        diagnostics.socketOperation = "connect_SO_ERROR";
+                        connectError = socketErrorCode;
+                    }
                 }
             }
             if (connectError == 0)
             {
                 if (control && std::chrono::steady_clock::now() >= connectEnd)
-                { lastConnectError = timeoutError(); haveConnectError = true; closeSocket(); break; }
+                {
+                    diagnostics.socketOperation = "connect_deadline";
+                    lastConnectError = timeoutError(); haveConnectError = true; closeSocket(); break;
+                }
                 break;
             }
 
@@ -396,10 +450,14 @@ namespace elevsafe
             diagnostics.errorCode = haveConnectError ? lastConnectError : lastSocketError();
             diagnostics.timedOut = diagnostics.errorCode == timeoutError();
             const std::string error = haveConnectError ? socketError(lastConnectError) : currentSocketError();
-            log << "TCP connect failed for " << m_host << ':' << m_port << ": " << error << '\n';
+            log << "TCP connect failed for " << m_host << ':' << m_port << ": " << error
+                << " operation=" << diagnostics.socketOperation << " family=" << diagnostics.addressFamily
+                << " address_length=" << diagnostics.addressLength << '\n';
             return 1;
         }
 
+        diagnostics.socketOperation = {};
+        ReceiveActivity activity{diagnostics};
         log << "Connected to " << m_host << ':' << m_port << '\n';
         diagnostics.connected = true;
         diagnostics.stage = "receiving";
@@ -409,10 +467,11 @@ namespace elevsafe
         parser.setProcessingMetricsEnabled(m_processingMetricsEnabled);
         if (m_processingMetricsFrameLimit.has_value())
             parser.setProcessingMetricsFrameLimit(*m_processingMetricsFrameLimit);
-        parser.setFrameCallback([this, &frameClock, &parser, &cancelled, control](RadarFrame& frame)
+        parser.setFrameCallback([this, &frameClock, &parser, &cancelled, &activity, control](RadarFrame& frame)
         {
             if (m_stopRequested || (control && cancelled())) { m_stopRequested = true; return; }
-            frame.timestampUs = frameClock.timestampUs(RelativeFrameClock::Clock::now());
+            activity.lastValidFrameAt = ReceiveActivity::Clock::now();
+            frame.timestampUs = frameClock.timestampUs(*activity.lastValidFrameAt);
             if (!m_processingMetricsFrozen && parser.processingMetricsFrozen())
             {
                 m_processingSummary = parser.processingSummary();
@@ -425,24 +484,52 @@ namespace elevsafe
         std::array<std::uint8_t, 8192> receiveBuffer{};
         int result = 0;
 
-        const auto onReceiveTick = control ? control->onReceiveTick : std::function<void()>{};
+        bool receiveEnded = false;
+        const auto endReceive = [&]
+        {
+            if (!std::exchange(receiveEnded, true) && onReceiveEnd) onReceiveEnd();
+        };
+        const bool waitForReceive = deadline || control || onReceiveTick;
+        if (onReceiveTick && !deadline && !control)
+        {
+            if (const int error = makeNonblocking(m_socket))
+            {
+                diagnostics.stage = "receive";
+                diagnostics.socketOperation = "nonblocking_setup";
+                diagnostics.errorCode = error;
+                endReceive();
+                log << "TCP receive setup failed: " << socketError(error) << '\n';
+                return 1;
+            }
+        }
+        const auto idleTimeout = control ? control->receiveIdleTimeout : std::nullopt;
+        const Deadline receiveDeadline = idleTimeout ? Deadline([&activity, idleTimeout]
+        {
+            return activity.lastByteAt.value_or(activity.connectedAt) + *idleTimeout;
+        }) : deadline;
         while (!m_stopRequested)
         {
-            if (deadline || control)
+            if (waitForReceive)
             {
-                const int error = waitSocket(m_socket, false, deadline, control ? cancelled : std::function<bool()>{}, onReceiveTick);
-                if (error != 0)
+                bool idleExpired = false;
+                const int error = waitSocket(m_socket, false, receiveDeadline,
+                    control ? cancelled : std::function<bool()>{}, onReceiveTick, idleTimeout ? &idleExpired : nullptr);
+                const bool cancelledWait = control && (error != 0 || idleTimeout) && cancelled();
+                if (error != 0 || cancelledWait)
                 {
-                    if (control && cancelled())
+                    endReceive();
+                    if (cancelledWait)
                     {
                         diagnostics.stage = "stopped"; diagnostics.cancelled = true;
                         log << "TCP cancelled while receiving\n";
                         break;
                     }
-                    diagnostics.stage = "receive";
-                    diagnostics.errorCode = error;
+                    diagnostics.stage = idleExpired ? "idle_timeout" : "receive";
+                    if (!idleExpired) diagnostics.socketOperation = "select_receive";
+                    diagnostics.errorCode = idleExpired ? 0 : error;
                     diagnostics.timedOut = error == timeoutError();
-                    log << "TCP receive wait failed: " << socketError(error) << '\n';
+                    if (idleExpired) log << "Radar receive idle timeout after " << idleTimeout->count() << " ms\n";
+                    else log << "TCP receive wait failed: " << socketError(error) << " operation=select_receive\n";
                     result = 1;
                     break;
                 }
@@ -463,6 +550,7 @@ namespace elevsafe
 
             if (received == 0)
             {
+                endReceive();
                 diagnostics.stage = "eof";
                 log << "Remote endpoint closed the connection.\n";
                 break;
@@ -471,23 +559,27 @@ namespace elevsafe
             if (received < 0)
             {
                 const int error = lastSocketError();
-                if ((deadline || control) && pendingSocketError(error)) continue;
+                if (waitForReceive && pendingSocketError(error)) continue;
+                endReceive();
                 if (!m_stopRequested)
                 {
                     diagnostics.stage = "receive";
+                    diagnostics.socketOperation = "recv";
                     diagnostics.errorCode = error;
-                    log << "TCP receive failed: " << socketError(error) << '\n';
+                    log << "TCP receive failed: " << socketError(error) << " operation=recv\n";
                     result = 1;
                 }
                 break;
             }
 
+            activity.lastByteAt = ReceiveActivity::Clock::now();
             parser.feed(std::span<const std::uint8_t>(
                 receiveBuffer.data(),
                 static_cast<std::size_t>(received)));
             if (onReceiveTick && !cancelled()) onReceiveTick();
         }
 
+        endReceive();
         m_processingSummary = parser.processingSummary();
         diagnostics.parser = parser.statistics();
         diagnostics.bufferedBytes = parser.bufferedBytes();
