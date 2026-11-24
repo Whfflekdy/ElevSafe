@@ -17,6 +17,14 @@ services:
       MAX_MESSAGE_BYTES: ${MAX_MESSAGE_BYTES:-65536}
       MAX_BUFFERED_BYTES: ${MAX_BUFFERED_BYTES:-131072}
       HEARTBEAT_MS: ${HEARTBEAT_MS:-30000}
+      CONTROL_ENABLED: ${CONTROL_ENABLED:-0}
+      CONTROL_ORIGIN: ${CONTROL_ORIGIN:-}
+      CONTROL_OPERATOR_TOKEN: ${CONTROL_OPERATOR_TOKEN:-}
+      CONTROL_BRIDGE_TOKEN: ${CONTROL_BRIDGE_TOKEN:-}
+      CONTROL_TRUST_PROXY: ${CONTROL_TRUST_PROXY:-0}
+      CONTROL_MAX_BYTES: ${CONTROL_MAX_BYTES:-1024}
+      CONTROL_TTL_MS: ${CONTROL_TTL_MS:-2000}
+      CONTROL_RATE: ${CONTROL_RATE:-5}
     restart: unless-stopped
     mem_limit: 256m
     cpus: 0.5
@@ -26,6 +34,8 @@ services:
     build:
       context: ../frontend
       dockerfile: ../deploy/web/Dockerfile
+      args:
+        REACT_APP_CONTROL_MODE: ${REACT_APP_CONTROL_MODE:-view}
     ports:
       - "${WEB_PORT:-18080}:80"
     volumes:

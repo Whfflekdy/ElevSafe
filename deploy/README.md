@@ -257,3 +257,79 @@ WSL 두 환경의 cleanup은 각각 34/34 완료했다. Linux 성공으로 Windo
 학교 서버, LTE, Alpine, 최신 B 원점을 적용한 PCR/D 화면은 이번에도 미검증이다.
 Frontend/Backend/B/C 제품 소스를 별도 수정하지 않았다.
 이번 Windows Node 9/10 실패와 과거 CTest 실패를 PR에 명시해야 한다.
+
+
+
+## 외부 Dashboard 원격 제어 (격리 시연)
+
+기본 배포는 조회 전용이다. 원격 제어는 소프트웨어 가상 문 모드에만
+사용한다. 기존 /radar와 /ingest의 Snapshot 경로 및 JSON v7은 그대로다.
+
+| 실행 위치 | 활성화 및 설정 |
+|---|---|
+| Relay | CONTROL_ENABLED=1, CONTROL_ORIGIN(허용할 HTTPS 출처 1개), CONTROL_OPERATOR_TOKEN, CONTROL_BRIDGE_TOKEN |
+| Bridge | CONTROL_ENABLED=1, CONTROL_REMOTE_URL(WSS의 /control-link), CONTROL_BRIDGE_TOKEN, CONTROL_LOCAL_URL(loopback의 /control-local), CONTROL_LOCAL_TOKEN |
+| Backend | --ws-remote-control, CONTROL_LOCAL_TOKEN. Radar는 --emulator-door-sim, 시험용 Mock은 --ws-mock --ws-door-sim 필요 |
+| Dashboard | REACT_APP_CONTROL_MODE=remote로 빌드. 개발 기본은 local, 배포 기본은 view |
+
+세 제어 자격증명은 각각 고엔트로피 32~256자(base64url 문자 집합)로
+별도 생성하고 INGEST_KEY와도 구분한다. 운영자 토큰은 관제 화면의 비밀번호
+입력으로 제공하고, Relay는 HTTPS POST /control/login을 검증한 뒤
+15분 유효 Secure/HttpOnly/SameSite=Strict 세션 쿠키를 발급한다.
+이는 제한된 시연용 단일 역할이다. 토큰을 URL, 프론트엔드 빌드 설정, 로그에
+넣지 않는다. 로그아웃이나 세션 만료 시 미적용 요청을 취소하고,
+이미 적용된 결과의 수신이 끊기면 상태를 확인한 뒤 새 요청을 판단한다.
+
+대시보드는 같은 출처의 WSS /control로 로그인 세션을 제시한다.
+Bridge는 WSS /control-link에 외향 연결하고 A는 loopback /control-local에서만
+별도 인증을 받는다. Compose의 기본 HTTP 프록시는 제어 업그레이드를 열지 않는다.
+서버 담당자는 승인된 HTTPS 종료 지점에서 올바른 X-Forwarded-Proto를 덮어쓰고
+Relay의 포트를 신뢰된 프록시로만 제한한 뒤 CONTROL_TRUST_PROXY=1을 설정한다.
+인증서 검증과 TLS 종료 경로를 실제 배포 전에 확인한다.
+
+제어 메시지에는 Snapshot과 별도로 아래 형식을 사용한다.
+
+| 메시지 | 필드와 의미 |
+|---|---|
+| door_request (D → Relay) | client_request_id, door_command. OPEN/HOLD/CLOSE만 허용 |
+| door_request (Relay → Bridge → A) | request_id, control_session_id, backend_session_id, operator_id, door_command, Relay가 만든 issued_at, expires_at |
+| control_validate / control_validity | A가 현재 요청의 TTL을 확인하고 Relay가 정수 밀리초 remaining_ms를 응답 |
+| control_ready | enabled, backend_connected, ready, reason, backend_session_id |
+| door_result | 명령·요청 ID와 status 및 reason. D 응답에는 client_request_id도 포함 |
+| control_revoke | 관제 연결 단절·로그아웃·만료 시 해당 연결의 우선권과 미적용 요청 폐기 |
+| control_cancel | 개별 링크·Backend 세션의 미적용 요청 폐기 |
+
+ACCEPTED는 Relay 접수다. APPLIED는 가상 문 명령 적용 또는 기존 동작을
+그대로 이어받는 원격 소유권 이전이다. 이전 시 이동 타이머는 유지된다.
+거부된 요청은 소유권을 바꾸지 않는다.
+REJECTED, EXPIRED, CANCELLED는 해당 단계에서 확인한 거부·만료·취소다.
+단절로 최종 적용을 확인할 수 없으면 UNKNOWN을 사용하며 자동 재전송하지 않는다.
+이동 완료는 기존 door_state로 확인한다. 원격 HOLD 중 제어 연결이 끊기면
+우선권만 해제한다. 가상 문은 HOLD를 유지하고 새 현장 OPEN/CLOSE 또는
+새 유효 원격 명령이 들어올 때까지 정상 운행 CLOSE를 예약하지 않는다.
+TCP 단절은 각 링크의 기존 WebSocket 종료와 heartbeat로 감지한다.
+
+제어 메시지 상한 기본값은 1KiB(CONTROL_MAX_BYTES), 요청은 운영자 세션당
+초당 5건(CONTROL_RATE), 현장 미적용 요청은 최대 1건이다.
+TTL 기본값은 2초(CONTROL_TTL_MS)이며 Relay·Bridge·A에 같은 값을 준다.
+Relay는 원래 UTC 발급·만료 시각과 단조 시계 기한 중 더 일찍 만료하는
+기준의 남은 시간을 응답한다. A는 이 예산에서 확인 요청의 왕복 전체를
+차감하고 접수 세션과 만료를 적용 직전에 다시 확인한다. 따라서 노드 간
+UTC 오차를 추정할 필요가 없다. 확인 가능한 예산이 없거나 다 소진된
+요청은 적용하지 않으며 UTC 역행으로 기존 요청 수명이 연장되지 않는다.
+제어 메시지의 변경은 Relay·Bridge·A를 함께 배포해야 한다.
+기존 /radar Snapshot 경로와 JSON v7 형식은 유지한다.
+
+PowerShell 통합 실행에서 시험용 Mock은 -Mode Mock -DoorSim -RemoteControl,
+Radar Emulator는 -Mode Radar -EmulatorDoorSim -RemoteControl을 사용한다.
+기존 BackendExe, Radar 모드 SignalConfig, REMOTE_URL 설정은 같이 필요하다.
+실행기는 인증값을 인수나 출력에 넣지 않는다.
+
+로컬 WSS 시험은 OpenSSL로 임시 인증서를 만들고 Node 클라이언트가 그
+인증서를 신뢰하도록 구성한다. 기존 deploy/tests/transport.test.js에
+인증·Viewer 차단 시험이 포함돼 있다. ELEVSAFE_TEST_BACKEND에 Release
+Backend의 절대 경로를 지정하면 실제 가상 문을 포함한 Node E2E도 등록된다.
+
+기존 FOV_t03 헤드리스 실행 파일을 재사용하려면 ELEVSAFE_TEST_FOV_EMULATOR,
+ELEVSAFE_TEST_FOV_DATA, ELEVSAFE_TEST_FOV_CONFIG를 같은 격리 검증 환경에
+지정한다. 이 녹화 시나리오에서는 포트 29172와 8000이 비어 있어야 한다.

@@ -1,6 +1,7 @@
 'use strict';
 const WebSocket = require('ws');
 const { integer, limits, snapshotText, sendBounded, installSignals } = require('../relay/transport');
+const { createControlBridge } = require('./control_bridge');
 function websocketUrl(value, name) {
   let url;
   try { url = new URL(value); } catch { throw new Error(`Invalid ${name}`); }
@@ -16,6 +17,11 @@ function createBridge(options = {}) {
   const connectTimeoutMs = integer(options.connectTimeoutMs, 5000, 'CONNECT_TIMEOUT_MS');
   const heartbeatMs = integer(options.heartbeatMs, 30000, 'HEARTBEAT_MS');
   const log = options.log || (() => {});
+  const ingestKey = new URL(remoteUrl).searchParams.get('key');
+  if (options.control && [options.control.localToken, options.control.bridgeToken].includes(ingestKey))
+    throw new Error('Shared control and ingest credentials are invalid');
+  const control = options.control && createControlBridge(options.control,
+    { reconnectMs, connectTimeoutMs, heartbeatMs, log });
   const stats = { forwarded: 0, dropped: 0, invalid: 0, slowRemote: 0, errors: 0, localOpens: 0, remoteOpens: 0 };
   const local = { name: 'local', url: localUrl, socket: null, timer: null };
   const remote = { name: 'remote', url: remoteUrl, socket: null, timer: null };
@@ -29,7 +35,7 @@ function createBridge(options = {}) {
     let socket;
     try {
       socket = new WebSocket(side.url, { handshakeTimeout: connectTimeoutMs,
-        maxPayload: maxMessageBytes, perMessageDeflate: false });
+        maxPayload: maxMessageBytes, perMessageDeflate: false, ca: side === remote ? options.ca : undefined });
     } catch { ++stats.errors; schedule(side); return; }
     side.socket = socket; socket.alive = true;
     socket.on('open', () => {
@@ -66,7 +72,7 @@ function createBridge(options = {}) {
   function stop() {
     if (stopPromise) return stopPromise;
     stopping = true; clearInterval(heartbeat);
-    const closing = [];
+    const closing = control ? [control.stop()] : [];
     for (const side of [local, remote]) {
       clearTimeout(side.timer); side.timer = null;
       const socket = side.socket;
@@ -88,7 +94,12 @@ if (require.main === module) {
     const bridge = createBridge({ localUrl: process.env.LOCAL_URL, remoteUrl: process.env.REMOTE_URL,
       maxMessageBytes: process.env.MAX_MESSAGE_BYTES, maxBufferedBytes: process.env.MAX_BUFFERED_BYTES,
       reconnectMs: process.env.RECONNECT_MS, connectTimeoutMs: process.env.CONNECT_TIMEOUT_MS,
-      heartbeatMs: process.env.HEARTBEAT_MS, log: console.log });
+      heartbeatMs: process.env.HEARTBEAT_MS, log: console.log,
+      control: process.env.CONTROL_ENABLED === '1' ? {
+        remoteUrl: process.env.CONTROL_REMOTE_URL, bridgeToken: process.env.CONTROL_BRIDGE_TOKEN,
+        localUrl: process.env.CONTROL_LOCAL_URL, localToken: process.env.CONTROL_LOCAL_TOKEN,
+        maxBytes: process.env.CONTROL_MAX_BYTES, ttlMs: process.env.CONTROL_TTL_MS
+      } : undefined });
     installSignals(bridge.stop);
   } catch { console.error('[bridge] invalid configuration (check LOCAL_URL / REMOTE_URL / limits)'); process.exitCode = 1; }
 }

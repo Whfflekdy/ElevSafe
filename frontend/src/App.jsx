@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
+import useRemoteDoorControl from './useRemoteDoorControl';
 
 // 🛠️ [실제 도면 규격 설정 - 단위: cm]
 
@@ -27,6 +28,8 @@ const SCALE = 1.6;
  * true : WebSocket으로 데이터 수신 및 명령 전송
  */
 const USE_REAL_WEBSOCKET = true;
+const CONTROL_MODE = process.env.REACT_APP_CONTROL_MODE ||
+  (process.env.NODE_ENV === 'production' ? 'view' : 'local');
 // 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
 const RADAR_WS_URL = process.env.REACT_APP_WS_URL
   || (process.env.NODE_ENV === 'production'
@@ -173,6 +176,7 @@ function FloorPlan({ doorState, children }) {
 function App() {
   const [doorState, setDoorState] = useState('UNKNOWN');
   const [doorCommand, setDoorCommand] = useState(null);
+  const remoteDoor = useRemoteDoorControl(USE_REAL_WEBSOCKET && CONTROL_MODE === 'remote');
   const [selectedDot, setSelectedDot] = useState(null); // 클릭한 승객 말풍선 띄우기용
   // 실제 연동에서는 빈 배열로 시작하고 서버 데이터로 채웁니다.
   // 테스트용 x, y도 m 단위이며, 문 중앙 기준 좌표입니다.
@@ -538,6 +542,11 @@ function App() {
     const timeStr = new Date().toLocaleTimeString();
 
     if (USE_REAL_WEBSOCKET) {
+      if (CONTROL_MODE === 'remote') {
+        remoteDoor.send(command);
+        return;
+      }
+      if (CONTROL_MODE !== 'local') return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         log(`[${timeStr}] 연결되지 않아 명령을 전송하지 못했습니다.`);
@@ -545,7 +554,6 @@ function App() {
       }
       try {
         ws.send(JSON.stringify({ door_command: command }));
-        setDoorCommand(command);
         log(`[${timeStr}] 📤 명령 송신: ${command}`);
       } catch (error) {
         console.error('명령 전송 오류:', error);
@@ -712,14 +720,37 @@ function App() {
                 </span>
               </div>
 
+              {USE_REAL_WEBSOCKET && CONTROL_MODE === 'view' && <p>조회 전용</p>}
+              {USE_REAL_WEBSOCKET && CONTROL_MODE === 'remote' && (
+                <div>
+                  <p role="status">
+                    {!remoteDoor.secure ? '원격 제어에는 HTTPS가 필요합니다 · 조회 전용' : remoteDoor.connection
+                      ? (remoteDoor.readiness.ready ? '원격 관제 가능' : 'Backend 접수 불가 · ' + (remoteDoor.readiness.reason || '준비 중'))
+                      : '원격 제어 연결 끊김 · 조회 전용'}
+                  </p>
+                  {remoteDoor.connection ? <button type="button" onClick={remoteDoor.logout}>관제 로그아웃</button> : remoteDoor.secure && (
+                    <form onSubmit={event => {
+                      event.preventDefault();
+                      const input = event.currentTarget.elements.operatorToken;
+                      const token = input.value;
+                      input.value = '';
+                      remoteDoor.login(token);
+                    }}>
+                      <label>관제 자격증명 <input name="operatorToken" type="password" autoComplete="off" required /></label>
+                      <button type="submit">관제 연결</button>
+                    </form>
+                  )}
+                  {remoteDoor.result && <p role="status">{remoteDoor.result}</p>}
+                </div>
+              )}
               <div className="control-buttons">
 
                 {doorState === 'CLOSED' || doorState === 'CLOSING' ? (
-                  <button onClick={() => handleDoorCommand('OPEN')} className="btn-open">강제 OPEN</button>
+                  <button onClick={() => handleDoorCommand('OPEN')} disabled={USE_REAL_WEBSOCKET && (CONTROL_MODE !== 'local' && (CONTROL_MODE !== 'remote' || !remoteDoor.readiness.ready))} className="btn-open">강제 OPEN</button>
                 ) : (
-                  <button onClick={() => handleDoorCommand('HOLD')} className="btn-hold">강제 HOLD</button>
+                  <button onClick={() => handleDoorCommand('HOLD')} disabled={USE_REAL_WEBSOCKET && (CONTROL_MODE !== 'local' && (CONTROL_MODE !== 'remote' || !remoteDoor.readiness.ready))} className="btn-hold">강제 HOLD</button>
                 )}
-                <button onClick={() => handleDoorCommand('CLOSE')} className="btn-close">강제 CLOSE</button>
+                <button onClick={() => handleDoorCommand('CLOSE')} disabled={USE_REAL_WEBSOCKET && (CONTROL_MODE !== 'local' && (CONTROL_MODE !== 'remote' || !remoteDoor.readiness.ready))} className="btn-close">강제 CLOSE</button>
               </div>
             </div>
           </div>
