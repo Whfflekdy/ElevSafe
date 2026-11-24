@@ -6,7 +6,6 @@ const { once } = require('node:events');
 const { createRequire } = require('node:module');
 const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
-const https = require('node:https');
 const net = require('node:net');
 const path = require('node:path');
 const os = require('node:os');
@@ -97,11 +96,16 @@ async function startServer(t, role, port = 0) {
   await readyFixture(t, role, requested, once(server, 'listening'), () => server.address());
   return server;
 }
+const proxyToken = randomBytes(32).toString('hex');
+const testOrigin = 'https://127.0.0.1';
+const proxyHeaders = { Origin: testOrigin, 'X-Elevsafe-Proxy': proxyToken,
+  'X-Forwarded-Proto': 'https', 'X-Authenticated-User': 'fixture' };
+
 function managedRelay(t, options) {
   const role = 'relay', requested = { address: options.host, port: options.port };
   diagnostic(t, role, 'prepare-start', { requested });
   let relay;
-  try { relay = createRelay(options); }
+  try { relay = createRelay({ proxyToken, origin: testOrigin, ...options }); }
   catch (error) {
     diagnostic(t, role, 'create-failed', { requested, ...errorFields(error) });
     throw error;
@@ -235,7 +239,7 @@ test('single ingest, identical viewers, commands blocked, invalid input and disc
   await rejectCode(t, r.base + '/ingest?key=invalid-test', 403);
   const producer = await connect(t, r.ingestUrl);
   await rejectCode(t, r.ingestUrl, 409);
-  const a = await connect(t, r.viewerUrl), b = await connect(t, r.viewerUrl);
+  const a = await connect(t, r.viewerUrl, { headers: proxyHeaders }), b = await connect(t, r.viewerUrl, { headers: proxyHeaders });
   producer.send(snapshot(100));
   await until(() => a.messages.length === 1 && b.messages.length === 1, 'both viewers');
   assert.equal(a.messages[0], snapshot(100)); assert.deepEqual(a.messages, b.messages);
@@ -246,11 +250,11 @@ test('single ingest, identical viewers, commands blocked, invalid input and disc
   producer.send(Buffer.from(snapshot()));
   await until(() => r.relay.stats.invalid === 4, 'invalid payloads rejected');
   assert.equal(r.relay.stats.accepted, 1);
-  const c = await connect(t, r.viewerUrl);
+  const c = await connect(t, r.viewerUrl, { headers: proxyHeaders });
   await until(() => c.messages.length === 1, 'fresh cached snapshot');
   producer.close(); await once(producer, 'close');
   await until(() => !r.relay.cached(), 'disconnect cache invalidated');
-  const d = await connect(t, r.viewerUrl);
+  const d = await connect(t, r.viewerUrl, { headers: proxyHeaders });
   await delay(80); assert.equal(d.messages.length, 0);
   const next = await connect(t, r.ingestUrl);
   next.send(snapshot(0)); // A new Radar session may restart relative time at zero.
@@ -265,7 +269,7 @@ test('monotonic stale expiration; invalid traffic cannot refresh cache', { timeo
   await until(() => r.relay.stats.accepted === 1, 'accepted');
   await delay(80); p.send('bad');
   await until(() => !r.relay.cached(), 'stale expiration');
-  const v = await connect(t, r.viewerUrl);
+  const v = await connect(t, r.viewerUrl, { headers: proxyHeaders });
   await delay(80); assert.equal(v.messages.length, 0);
   p.send(snapshot(0));
   await until(() => v.messages.length === 1, 'fresh after stale');
@@ -277,7 +281,7 @@ test('oversized input closes only offending connection; relay stays live', { tim
   p.send('x'.repeat(1025)); await once(p, 'close');
   await until(() => r.relay.stats.errors > 0, 'payload error');
   const p2 = await connect(t, r.ingestUrl);
-  const v = await connect(t, r.viewerUrl);
+  const v = await connect(t, r.viewerUrl, { headers: proxyHeaders });
   p2.send(snapshot()); await until(() => v.messages.length === 1, 'relay survived');
 });
 
@@ -293,7 +297,7 @@ test('Fake Backend -> Bridge -> Relay, restart recovery and shutdown timers', { 
   bridge = managedBridge(t, { localUrl: `ws://127.0.0.1:${fakePort}/radar`,
     remoteUrl: `ws://127.0.0.1:${relayPort}/ingest?key=${key}`, reconnectMs: 50, connectTimeoutMs: 500 });
   await until(() => bridge.stats.localOpens === 1 && bridge.stats.remoteOpens === 1, 'initial bridge');
-  const v = await connect(t, `ws://127.0.0.1:${relayPort}/radar`);
+  const v = await connect(t, `ws://127.0.0.1:${relayPort}/radar`, { headers: proxyHeaders });
   for (const c of fake.clients) c.send(snapshot(50));
   await until(() => v.messages.length === 1, 'end-to-end');
   v.send('{"door_command":"CLOSE"}');
@@ -303,7 +307,7 @@ test('Fake Backend -> Bridge -> Relay, restart recovery and shutdown timers', { 
   await until(() => bridge.stats.dropped >= 1, 'offline drops');
   relay = managedRelay(t, { key, host: '127.0.0.1', port: relayPort }); await relay.ready;
   await until(() => bridge.stats.remoteOpens === 2, 'relay restart');
-  const v2 = await connect(t, `ws://127.0.0.1:${relayPort}/radar`);
+  const v2 = await connect(t, `ws://127.0.0.1:${relayPort}/radar`, { headers: proxyHeaders });
   await delay(80); assert.equal(v2.messages.length, 0); // No replay from before reconnect.
   await serverStops.get(fake)();
   fake = await startServer(t, 'fake-backend', fakePort);
@@ -321,7 +325,7 @@ test('Fake Backend -> Bridge -> Relay, restart recovery and shutdown timers', { 
 test('real paused viewer is bounded while healthy viewer continues', { timeout: 15000 }, async t => {
   const r = await startRelay(t);
   const p = await connect(t, r.ingestUrl);
-  const slow = await connect(t, r.viewerUrl), healthy = await connect(t, r.viewerUrl);
+  const slow = await connect(t, r.viewerUrl, { headers: proxyHeaders }), healthy = await connect(t, r.viewerUrl, { headers: proxyHeaders });
   slow._socket.pause(); // Test-only network backpressure, not product code.
   const value = JSON.parse(snapshot()); value.passengers[0].label = 'x'.repeat(60000);
   for (let i = 0; i < 600 && r.relay.stats.slowViewers === 0; ++i) {
@@ -385,43 +389,41 @@ function controlTls(t) {
   return { key: fs.readFileSync(key), cert: fs.readFileSync(cert) };
 }
 
-function controlHttp(url, ca, headers) {
-  return new Promise((resolve, reject) => {
-    const request = https.request(url, { ca, method: 'POST', headers }, response => {
-      response.resume();
-      response.once('end', () => resolve(response));
-    });
-    request.once('error', reject);
-    request.end();
-  });
-}
-
 async function controlRelayFixture(t, options = {}) {
   const tls = controlTls(t);
   const token = () => randomBytes(32).toString('hex');
-  const operatorToken = token(), bridgeToken = token(), localToken = token(), key = token();
-  // Bind on port 0 while using a fixed test Origin. Origin is checked independently of routing.
-  const origin = 'https://127.0.0.1';
-  const start = (port = 0) => managedRelay(t, { key, host: '127.0.0.1', port, tls, ...options,
-    control: { operatorToken, bridgeToken, origin, ...options.control } });
+  const bridgeToken = token(), localToken = token(), key = token();
+  const events = [];
+  const nginx = process.env.ELEVSAFE_TEST_NGINX;
+  const portProbe = nginx && await startServer(t, 'nginx-port');
+  const httpProbe = nginx && await startServer(t, 'http-port');
+  const httpPort = httpProbe && httpProbe.address().port;
+  if (httpProbe) await serverStops.get(httpProbe)();
+  const httpOrigin = 'http://127.0.0.1:' + (httpPort || 18080);
+  const publicPort = portProbe && portProbe.address().port;
+  if (portProbe) await serverStops.get(portProbe)();
+  const origin = nginx ? 'https://127.0.0.1:' + publicPort : testOrigin;
+  const start = (port = 0) => managedRelay(t, { key, host: '127.0.0.1', port, tls: nginx ? undefined : tls, origin, httpOrigin,
+    log(line) { if (line.startsWith('[control] ')) events.push(JSON.parse(line.slice(10))); },
+    ...options, control: { bridgeToken, ...options.control } });
   const relay = start();
   await relay.ready;
-  const host = '127.0.0.1:' + relay.server.address().port;
-  const browser = async () => {
-    const response = await controlHttp('https://' + host + '/control/login', tls.cert,
-      { Origin: origin, Authorization: 'Bearer ' + operatorToken });
-    assert.equal(response.statusCode, 204);
-    const cookie = response.headers['set-cookie'][0];
-    assert.match(cookie, /Secure; HttpOnly; SameSite=Strict/);
-    const headers = { Origin: origin, Cookie: cookie.split(';')[0] };
-    return { ws: await connect(t, 'wss://' + host + '/control', { ca: tls.cert, headers }), headers };
-  };
+  const relayPort = relay.server.address().port;
+  const host = '127.0.0.1:' + (publicPort || relayPort);
+  const headers = nginx ? { Origin: origin, Authorization: 'Basic ' + Buffer.from(
+    'admin:' + process.env.ELEVSAFE_TEST_PASSWORD).toString('base64') } : proxyHeaders;
+  if (nginx) await require('./nginx_fixture')(t, { tls, relayPort, publicPort, httpPort, proxyToken, registerCleanup });
+  const browser = async () => ({ ws: await connect(t, 'wss://' + host + '/radar', { ca: tls.cert, headers }) });
+  const anonymous = () => nginx ? connect(t, 'ws://127.0.0.1:' + httpPort + '/radar',
+    { headers: { Origin: httpOrigin, 'X-Authenticated-User': 'spoofed', 'X-Forwarded-Proto': 'https' } })
+    : connect(t, 'wss://' + host + '/radar', { ca: tls.cert, headers: {
+      Origin: httpOrigin, 'X-Elevsafe-Proxy': proxyToken, 'X-Forwarded-Proto': 'http' } });
   const restart = async () => {
-    const replacement = start(Number(host.split(':')[1]));
+    const replacement = start(relayPort);
     await replacement.ready;
     return replacement;
   };
-  return { relay, host, origin, browser, restart, key, operatorToken, bridgeToken, localToken, tls };
+  return { relay, host, origin, headers, browser, anonymous, restart, key, bridgeToken, localToken, tls, events, relayPort };
 }
 
 function controlResults(ws) {
@@ -432,8 +434,22 @@ function expectControl(ws, predicate, label) {
   return until(() => controlResults(ws).some(predicate), label, 4500).then(() => controlResults(ws).find(predicate));
 }
 
-function operatorRequest(ws, id, command) {
-  ws.send(JSON.stringify({ type: 'door_request', client_request_id: id, door_command: command }));
+function operatorRequest(r, ws, command) {
+  r.from = r.events.length;
+  ws.send(JSON.stringify({ door_command: command }));
+}
+
+async function outcome(r, status, reason) {
+  const result = () => r.events.slice(r.from).find(m => m.type === 'door_result' && m.status === status &&
+    (!reason || m.reason === reason));
+  await until(result, 'Relay diagnostic ' + status + ' ' + (reason || ''), 4500);
+  return result();
+}
+
+async function ready(r) {
+  const latest = () => r.events.filter(m => m.type === 'control_ready').at(-1);
+  await until(() => latest()?.ready, 'Backend ready', 6000);
+  return latest();
 }
 
 test('Relay TTL budget is bounded by monotonic time and UTC expiry', () => {
@@ -444,63 +460,65 @@ test('Relay TTL budget is bounded by monotonic time and UTC expiry', () => {
   assert.equal(remainingControlMs(2000, 12000, 400.5, 10400), 1599);
 });
 
-test('WSS control authenticates separately, fences requests and keeps radar read-only', { timeout: 15000 }, async t => {
-  const r = await controlRelayFixture(t, { control: { requestsPerSecond: 5, ttlMs: 1000 } });
-  const { host, tls, origin } = r;
-  const base = 'wss://' + host;
-  await rejectCode(t, base + '/control', 403, { ca: tls.cert, headers: { Origin: origin } });
-  await rejectCode(t, base + '/control-link', 403, { ca: tls.cert, headers: { Authorization: 'Bearer ' + r.key } });
-  const { ws: user, headers } = await r.browser();
-  await rejectCode(t, base + '/control', 403, { ca: tls.cert, headers: { ...headers, Origin: 'https://different.invalid' } });
-  const link = await connect(t, base + '/control-link',
-    { ca: tls.cert, headers: { Authorization: 'Bearer ' + r.bridgeToken } });
-  const binding = await expectControl(link, m => m.type === 'control_link', 'link generation');
-  const viewer = await connect(t, base + '/radar', { ca: tls.cert });
-  const second = await connect(t, base + '/radar', { ca: tls.cert });
-  const producer = await connect(t, base + '/ingest?key=' + r.key, { ca: tls.cert });
+test('HTTP demo disabled preserves snapshots and blocks commands independently of HTTPS', async t => {
+  const r = await controlRelayFixture(t);
+  const anonymous = await r.anonymous();
+  const producer = await connect(t, 'wss://' + r.host + '/ingest?key=' + r.key, { ca: r.tls.cert });
+  producer.send(snapshot(23));
+  await until(() => anonymous.messages.length, 'HTTP viewer snapshot');
+  assert.deepEqual(anonymous.messages, [snapshot(23)]);
+  operatorRequest(r, anonymous, 'OPEN');
+  await until(() => r.relay.stats.ignoredCommands === 1, 'HTTP command denied');
+  assert.equal(r.events.filter(e => e.type === 'door_result').length, 0);
+  const { ws } = await r.browser();
+  operatorRequest(r, ws, 'HOLD');
+  await outcome(r, 'REJECTED', 'BACKEND_UNAVAILABLE');
+});
+
+test('authenticated radar accepts bounded commands and sends only snapshots', { timeout: 20000 }, async t => {
+  const r = await controlRelayFixture(t, { allowInsecureDemo: true, control: { requestsPerSecond: 30, ttlMs: 2000 } });
+  const base = 'wss://' + r.host;
+  const direct = (process.env.ELEVSAFE_TEST_NGINX ? 'ws' : 'wss') + '://127.0.0.1:' + r.relayPort;
+  await rejectCode(t, direct + '/radar', 403, { ca: r.tls.cert, headers: {Origin: r.origin, 'X-Authenticated-User': 'fake'} });
+  await rejectCode(t, base + '/radar', process.env.ELEVSAFE_TEST_NGINX ? 401 : 403, { ca: r.tls.cert });
+  await rejectCode(t, base + '/radar', 403, { ca: r.tls.cert, headers: {...r.headers, Origin: 'https://different.invalid'} });
+  await rejectCode(t, base + '/control-link', 403, { ca: r.tls.cert, headers: { Authorization: 'Bearer ' + r.key } });
+  const link = await connect(t, base + '/control-link', { ca: r.tls.cert, headers: {Authorization: 'Bearer ' + r.bridgeToken} });
+  const binding = await expectControl(link, m => m.type === 'control_link', 'link');
+  const {ws: a} = await r.browser(), b = await r.anonymous();
+  const producer = await connect(t, base + '/ingest?key=' + r.key, { ca: r.tls.cert });
   producer.send(snapshot(30));
-  await until(() => viewer.messages.length === 1 && second.messages.length === 1, 'viewer snapshots');
-  assert.equal(viewer.messages[0], snapshot(30));
-  assert.deepEqual(second.messages, viewer.messages);
-  viewer.send('{"door_command":"CLOSE"}');
-  await until(() => r.relay.stats.ignoredCommands === 1, 'viewer read-only');
-  assert.equal(controlResults(link).filter(m => m.type === 'door_request').length, 0);
-
-  const backend = 'backend-one';
-  link.send(JSON.stringify({ type: 'control_ready', enabled: true, backend_connected: true, ready: true, reason: null, backend_session_id: backend }));
-  await expectControl(user, m => m.type === 'control_ready' && m.ready, 'control ready');
-  user.send('{"type":"door_request","client_request_id":"bad","door_command":null}');
-  await expectControl(user, m => m.reason === 'INVALID_COMMAND', 'invalid command');
-  operatorRequest(user, 'first', 'OPEN');
-  const accepted = await expectControl(user, m => m.client_request_id === 'first' && m.status === 'ACCEPTED', 'relay acceptance');
-  const request = await expectControl(link, m => m.type === 'door_request', 'relay forwarding');
+  await until(() => a.messages.length && b.messages.length, 'two viewers');
+  assert.deepEqual(a.messages, [snapshot(30)]);
+  assert.deepEqual(b.messages, a.messages);
+  link.send(JSON.stringify({type:'control_ready', enabled:true, backend_connected:true, ready:true,
+    reason:null, backend_session_id:'backend-one'}));
+  await ready(r);
+  for (const input of ['{}', '[]', 'null', '{', '{"door_command":null}', '{"door_command":"OTHER"}',
+    '{"door_command":"OPEN","operator_id":"x"}', '{"door_command":"OPEN","expires_at":0}',
+    '{"door_command":"OPEN","request_id":"x"}', Buffer.from('{"door_command":"OPEN"}')]) {
+    r.from = r.events.length;
+    a.send(input);
+    await outcome(r, 'REJECTED', 'INVALID_COMMAND');
+  }
+  operatorRequest(r, a, 'OPEN');
+  const accepted = await outcome(r, 'ACCEPTED');
+  const request = await expectControl(link, m => m.type === 'door_request', 'internal request');
   assert.equal(request.request_id, accepted.request_id);
-  assert.equal(request.backend_session_id, backend);
   assert.equal(request.control_session_id, binding.control_session_id);
-  assert.equal(Date.parse(request.expires_at) - Date.parse(request.issued_at), 1000);
-  link.send(JSON.stringify({ type: 'control_validate', request_id: request.request_id,
-    control_session_id: request.control_session_id, backend_session_id: request.backend_session_id }));
-  const proof = await expectControl(link, m => m.type === 'control_validity', 'Relay expiry budget');
-  assert.equal(proof.request_id, request.request_id);
-  assert.ok(proof.remaining_ms > 0 && proof.remaining_ms <= 1000);
-  operatorRequest(user, 'first', 'OPEN');
-  await expectControl(user, m => m.reason === 'DUPLICATE_REQUEST', 'duplicate blocked');
-  operatorRequest(user, 'second', 'CLOSE');
-  await expectControl(user, m => m.reason === 'QUEUE_FULL', 'one pending');
-  operatorRequest(user, 'third', 'CLOSE');
-  await expectControl(user, m => m.client_request_id === 'third', 'fifth attempt');
-  operatorRequest(user, 'fourth', 'CLOSE');
-  await expectControl(user, m => m.reason === 'RATE_LIMIT', 'rate limit');
+  assert.equal(Date.parse(request.expires_at) - Date.parse(request.issued_at), 2000);
+  operatorRequest(r, b, 'CLOSE');
+  await outcome(r, 'REJECTED', 'QUEUE_FULL');
+  link.send(JSON.stringify({type:'control_validate', request_id:request.request_id,
+    control_session_id:binding.control_session_id, backend_session_id:'backend-one'}));
+  const proof = await expectControl(link, m => m.type === 'control_validity', 'TTL proof');
+  assert.ok(proof.remaining_ms > 0 && proof.remaining_ms <= 2000);
+  a.close();
+  await expectControl(link, m => m.type === 'control_revoke' && m.operator_id === request.operator_id, 'owner disconnected');
   assert.equal(controlResults(link).filter(m => m.type === 'door_request').length, 1);
-
-  const response = await controlHttp('https://' + host + '/control/logout', tls.cert, headers);
-  assert.equal(response.statusCode, 204);
-  await expectControl(link, m => m.type === 'control_revoke' &&
-    m.operator_id === request.operator_id && m.control_session_id === request.control_session_id, 'logout revocation');
-  await rejectCode(t, base + '/control', 403, { ca: tls.cert, headers });
   producer.send(snapshot(40));
-  await until(() => viewer.messages.at(-1) === snapshot(40) && second.messages.at(-1) === snapshot(40), 'snapshot after control revocation');
-  assert.deepEqual(second.messages, viewer.messages);
+  await until(() => b.messages.length === 2, 'remaining viewer');
+  assert.deepEqual(b.messages, [snapshot(30), snapshot(40)]);
 });
 
 if (process.env.ELEVSAFE_TEST_BACKEND) {
@@ -537,24 +555,24 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
     local.send(fakeRemoteClaim);
     await until(() => lines.some(line => line.includes('invalid manual request')), 'source spoof rejected');
     const via = 'wss://' + r.host;
-    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert });
+    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert, headers: r.headers });
     managedBridge(t, { localUrl: backendUrl + '/radar', remoteUrl: via + '/ingest?key=' + r.key,
       reconnectMs: 80, ca: r.tls.cert, control: { remoteUrl: via + '/control-link', localUrl: backendUrl + '/control-local',
         bridgeToken: r.bridgeToken, localToken: r.localToken, ca: r.tls.cert },
     });
     const { ws: operator } = await r.browser();
-    await expectControl(operator, m => m.type === 'control_ready' && m.ready, 'real Backend control ready');
+    await ready(r);
     const started = performance.now();
-    operatorRequest(operator, 'open', 'OPEN');
-    await expectControl(operator, m => m.client_request_id === 'open' && m.status === 'ACCEPTED', 'OPEN accepted');
-    await expectControl(operator, m => m.client_request_id === 'open' && m.status === 'APPLIED', 'OPEN applied');
+    operatorRequest(r, operator, 'OPEN');
+    await outcome(r, 'ACCEPTED');
+    await outcome(r, 'APPLIED');
     console.log('control OPEN request-to-result ms=' + Math.round(performance.now() - started));
     await expectControl(viewer, m => m.door_state === 'OPENING' && m.door_command === 'OPEN', 'opening published');
     local.send('{"door_command":"CLOSE"}');
     await until(() => lines.some(line => line.includes('remote priority')), 'lower-priority local request discarded');
     await expectControl(viewer, m => m.door_state === 'OPEN', 'open completed');
-    operatorRequest(operator, 'hold', 'HOLD');
-    await expectControl(operator, m => m.client_request_id === 'hold' && m.status === 'APPLIED', 'HOLD applied');
+    operatorRequest(r, operator, 'HOLD');
+    await outcome(r, 'APPLIED');
     operator.close();
     await once(operator, 'close');
     const before = viewer.messages.length;
@@ -569,9 +587,9 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
     const localClosed = await expectControl(local, m => m.door_state === 'CLOSED' &&
       m.timestamp_us > localClosing.timestamp_us, 'local close completed');
     const { ws: second } = await r.browser();
-    await expectControl(second, m => m.type === 'control_ready' && m.ready, 'fresh control connection');
-    operatorRequest(second, 'fresh-open', 'OPEN');
-    await expectControl(second, m => m.client_request_id === 'fresh-open' && m.status === 'APPLIED', 'fresh OPEN applied');
+    await ready(r);
+    operatorRequest(r, second, 'OPEN');
+    await outcome(r, 'APPLIED');
     await expectControl(viewer, m => m.door_state === 'OPENING' && m.door_command === 'OPEN' &&
       m.timestamp_us > localClosed.timestamp_us, 'fresh opening published');
     assert.equal(lines.filter(line => line.includes('source=remote') && line.includes('decision=applied')).length, 3);
@@ -625,10 +643,10 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
 
     async function openOperator() {
       const { ws } = await r.browser();
-      await expectControl(ws, m => m.type === 'control_ready' && m.ready, 'control ready');
+      await ready(r);
       return ws;
     }
-    const applied = (ws, id) => expectControl(ws, m => m.client_request_id === id && m.status === 'APPLIED', id);
+    const applied = () => outcome(r, 'APPLIED');
     const localDoor = (index, state, command) => until(() => controlResults(local).slice(index)
       .some(m => m.door_state === state && (command === undefined || m.door_command === command)), state, 5200);
     const fingerprint = () => backend.output().split('\n')
@@ -654,58 +672,58 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
     local.send('{"door_command":"HOLD"}');
     await localDoor(start, 'OPEN');
     start = local.messages.length;
-    operatorRequest(operator, 'takeover', 'HOLD');
-    await applied(operator, 'takeover');
+    operatorRequest(r, operator, 'HOLD');
+    await applied();
     await localDoor(start, 'OPEN', 'HOLD');
-    operatorRequest(operator, 'redundant', 'HOLD');
-    await expectControl(operator, m => m.client_request_id === 'redundant' && m.status === 'REJECTED' &&
-      m.reason === 'ALREADY_IN_STATE', 'same owner and command rejected without an event');
-    operatorRequest(operator, 'takeover', 'HOLD');
-    await expectControl(operator, m => m.client_request_id === 'takeover' && m.reason === 'DUPLICATE_REQUEST',
-      'duplicate request ID rejected');
+    operatorRequest(r, operator, 'HOLD');
+    await outcome(r, 'REJECTED', 'ALREADY_IN_STATE');
+    const {ws: successor} = await r.browser();
+    operatorRequest(r, successor, 'HOLD');
+    await outcome(r, 'APPLIED');
+    operator.close();
+    await once(operator, 'close');
+    operator = successor;
     local.send('{"door_command":"HOLD"}');
     local.send('{"door_command":"CLOSE"}');
     await until(() => (backend.output().match(/remote priority/g) || []).length >= 2, 'lower priorities blocked');
-    assert.equal(fingerprint(), 1);
+    assert.equal(fingerprint(), 2);
     assert.ok(link);
 
     // Pause reads on the authenticated Relay link. A cannot obtain validity before TTL.
     link.pause();
     try {
-      operatorRequest(operator, 'expired-close', 'CLOSE');
-      await expectControl(operator, m => m.client_request_id === 'expired-close' && m.status === 'ACCEPTED',
-        'Relay admitted CLOSE before pause released');
+      operatorRequest(r, operator, 'CLOSE');
+      await outcome(r, 'ACCEPTED');
       await delay(ttlMs + 80);
     } finally {
       link.resume();
     }
-    await expectControl(operator, m => m.client_request_id === 'expired-close' && m.status === 'EXPIRED',
-      'CLOSE expired during cross-link validity check');
-    assert.equal(fingerprint(), 1, 'expired CLOSE never reached application');
+    await outcome(r, 'EXPIRED');
+    assert.equal(fingerprint(), 2, 'expired CLOSE never reached application');
     assert.equal(controlResults(local).at(-1).door_state, 'OPEN');
 
     await heldThenLocalClose(() => r.relay.stop(), 'Relay stop');
     captureLink(await r.restart());
     operator = await openOperator();
     start = local.messages.length;
-    operatorRequest(operator, 'bridge-hold', 'HOLD');
-    await applied(operator, 'bridge-hold');
+    operatorRequest(r, operator, 'HOLD');
+    await applied();
     await localDoor(start, 'OPEN');
-    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert });
+    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert, headers: r.headers });
     const previousLink = link;
     await heldThenLocalClose(async () => {
-      const since = operator.messages.length;
+      const since = r.events.length;
       previousLink.destroy();
-      await until(() => controlResults(operator).slice(since).some(m => m.type === 'control_ready' && !m.ready),
+      await until(() => r.events.slice(since).some(m => m.type === 'control_ready' && !m.ready),
         'Bridge control path ended');
     }, 'Bridge control link loss');
     assert.equal(viewer.readyState, WebSocket.OPEN);
-    await until(() => link !== previousLink && controlResults(operator).at(-1)?.ready === true, 'control link recovered');
+    await until(() => link !== previousLink && r.events.filter(m => m.type === 'control_ready').at(-1)?.ready === true, 'control link recovered');
     start = local.messages.length;
-    operatorRequest(operator, 'fresh-after-link', 'OPEN');
-    await applied(operator, 'fresh-after-link');
+    operatorRequest(r, operator, 'OPEN');
+    await applied();
     await localDoor(start, 'OPENING', 'OPEN');
-    assert.equal(fingerprint(), 3);
+    assert.equal(fingerprint(), 4);
     console.log('HOLD takeover emits one event, expired CLOSE not applied, fresh remote command applied after reconnect');
   });
 }
@@ -728,19 +746,19 @@ if (process.env.ELEVSAFE_TEST_BACKEND && process.env.ELEVSAFE_TEST_FOV_EMULATOR)
     await until(() => backend.output().includes('[ws] listening '), 'FOV Backend ready', 5000);
     const via = 'wss://' + r.host;
     const local = 'ws://127.0.0.1:' + port;
-    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert });
+    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert, headers: r.headers });
     const { ws: operator } = await r.browser();
     managedBridge(t, { localUrl: local + '/radar', remoteUrl: via + '/ingest?key=' + r.key,
       reconnectMs: 80, ca: r.tls.cert, control: { remoteUrl: via + '/control-link',
         localUrl: local + '/control-local', bridgeToken: r.bridgeToken, localToken: r.localToken, ca: r.tls.cert } });
-    const first = await expectControl(operator, m => m.type === 'control_ready' && m.ready, 'first Radar epoch');
-    operatorRequest(operator, 'fov-hold', 'HOLD');
-    await expectControl(operator, m => m.client_request_id === 'fov-hold' && m.status === 'APPLIED', 'HOLD applied to FOV');
+    const first = await ready(r);
+    operatorRequest(r, operator, 'HOLD');
+    await outcome(r, 'APPLIED');
     await expectControl(viewer, m => m.door_command === 'HOLD', 'HOLD was published');
-    await until(() => controlResults(operator).some(m => m.reason === 'RADAR_STALE'), 'stale observation closes admission', 7000);
-    operatorRequest(operator, 'stale-close', 'CLOSE');
-    await expectControl(operator, m => m.client_request_id === 'stale-close' && m.status === 'REJECTED', 'stale CLOSE rejected');
-    await until(() => controlResults(operator).some(m => m.type === 'control_ready' && m.ready &&
+    await until(() => r.events.some(m => m.reason === 'RADAR_STALE'), 'stale observation closes admission', 7000);
+    operatorRequest(r, operator, 'CLOSE');
+    await outcome(r, 'REJECTED');
+    await until(() => r.events.some(m => m.type === 'control_ready' && m.ready &&
       m.backend_session_id !== first.backend_session_id), 'second Radar epoch ready', 8000);
     await until(() => controlResults(viewer).some((m, i, all) => i > 0 && m.timestamp_us < all[i - 1].timestamp_us),
       'first Snapshot of new Radar session', 4500);
@@ -750,8 +768,8 @@ if (process.env.ELEVSAFE_TEST_BACKEND && process.env.ELEVSAFE_TEST_FOV_EMULATOR)
     assert.equal(snapshots[newSession].door_command, null);
     assert.ok(snapshots.slice(newSession).every(m => m.door_command !== 'HOLD'), 'previous HOLD was replayed');
     console.log('FOV new Radar session starts CLOSED, observation timestamp_us=' + snapshots[newSession].timestamp_us);
-    operatorRequest(operator, 'resumed-open', 'OPEN');
-    await expectControl(operator, m => m.client_request_id === 'resumed-open' && m.status === 'APPLIED', 'new session applied');
+    operatorRequest(r, operator, 'OPEN');
+    await outcome(r, 'APPLIED');
     await expectControl(viewer, m => m.door_state === 'OPENING' && m.door_command === 'OPEN', 'current session OPEN was published');
     assert.ok(controlResults(viewer).every(m => Object.keys(m).length === 5), 'Snapshot JSON v7 changed');
     assert.ok(controlResults(viewer).some((m, i, all) => i > 0 && m.timestamp_us < all[i - 1].timestamp_us),
@@ -801,7 +819,7 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
     const localUrl = 'ws://127.0.0.1:' + port;
     const via = 'wss://' + r.host;
     const local = await connect(t, localUrl + '/radar');
-    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert });
+    const viewer = await connect(t, via + '/radar', { ca: r.tls.cert, headers: r.headers });
     const { ws: operator } = await r.browser();
     managedBridge(t, { localUrl: localUrl + '/radar', remoteUrl: via + '/ingest?key=' + r.key,
       reconnectMs: 80, ca: r.tls.cert, control: { remoteUrl: via + '/control-link',
@@ -828,7 +846,7 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
     };
     const feeding = setInterval(send, 125);
     registerCleanup(t, 'synthetic-radar-tick', () => clearInterval(feeding));
-    await expectControl(operator, m => m.type === 'control_ready' && m.ready, 'arbitration control ready');
+    await ready(r);
     await expectControl(viewer, m => m.door_state === 'OPEN', 'normal arrival opened the door');
     for (const step of [0.32, 0.24, 0.16, 0.08, 0, 0]) {
       y = step;
@@ -837,8 +855,8 @@ if (process.env.ELEVSAFE_TEST_BACKEND) {
     const hold = await expectControl(viewer, m => m.door_command === 'HOLD' &&
       m.passengers.some(person => ['ENTERING', 'EXITING'].includes(person.state)), 'live C threshold HOLD');
     assert.match(backend.output(), /C-request session=1 command=HOLD/);
-    operatorRequest(operator, 'override-c-hold', 'CLOSE');
-    await expectControl(operator, m => m.client_request_id === 'override-c-hold' && m.status === 'APPLIED', 'remote CLOSE over C HOLD');
+    operatorRequest(r, operator, 'CLOSE');
+    await outcome(r, 'APPLIED');
     const closing = await expectControl(viewer, m => m.door_state === 'CLOSING' &&
       m.door_command === 'CLOSE' && m.timestamp_us >= hold.timestamp_us, 'remote closing');
     local.send('{"door_command":"OPEN"}');

@@ -10,7 +10,7 @@ Radar Emulator / 센서 → A Parser → B SignalPipeline → C TrackingEngine
 
 최신 main의 Frontend를 그대로 사용한다. UNKNOWN 표시, 재접속 backoff, 렌더링,
 개발/배포 WebSocket URL 분기는 변경하지 않는다. 원격 문 버튼은 PR #33 리뷰 합의대로 남긴다.
-Relay는 viewer의 모든 메시지를 버리며 Bridge에도 원격 → Backend 전달 경로가 없다.
+HTTP는 로그인 없이 접속하며 HTTPS는 nginx Basic 인증을 요구한다. 제어를 켜면 같은 `/radar` 연결에서 가상 문 명령을 접수한다.
 화면의 명령 송신 표시가 실제 명령 접수·실행·ACK를 의미하지 않는다.
 
 ## 구성과 실행
@@ -40,8 +40,7 @@ node --test --test-concurrency=1 deploy/tests/transport.test.js
 
 ```powershell
 cd deploy
-# INGEST_KEY가 이미 안전하게 설정된 상태
-# 기본 웹 포트 18080. 기존 프로세스/포트 점유를 먼저 확인한다.
+# 아래의 INGEST_KEY, PROXY_TOKEN_FILE을 준비한다. HTTP 기본 주소는 http://localhost:18080이다.
 docker compose up -d --build
 docker compose ps
 ```
@@ -63,7 +62,7 @@ $env:LOCAL_URL = 'ws://127.0.0.1:18081/radar'
 node bridge.js
 ```
 
-브라우저에서 `http://localhost:18080`을 연다. 실제 A를 사용할 때는 LOCAL_URL을
+브라우저에서 `CONTROL_HTTP_ORIGIN` 또는 `CONTROL_ORIGIN`으로 지정한 주소를 연다. 실제 A를 사용할 때는 LOCAL_URL을
 `ws://127.0.0.1:8080/radar`로 바꾸거나 생략한다. 최신 main을 빌드한 Backend에서:
 
 ```powershell
@@ -76,13 +75,7 @@ node bridge.js
 `$BackendExe`는 실제 Release 경로를 확인해 지정한다. PCR과 배경맵은 별도 사용자 데이터다.
 실재생에서는 시작 로그의 `background=enabled`를 확인한다. SafetyJudge는 연결하지 않는다.
 
-D 개발 실행은 기본적으로 로컬 A에 연결한다. 로컬 Relay를 확인하려면:
-
-```powershell
-cd frontend
-$env:REACT_APP_WS_URL = 'ws://127.0.0.1:18080/radar'
-npm start
-```
+D 개발 실행(`frontend`에서 `npm start`)은 기본적으로 로컬 A의 `/radar`에 직접 연결한다.
 
 배포 빌드는 기본적으로 페이지와 같은 호스트의 `/radar`를 사용한다. HTTPS 페이지는 wss를 쓴다.
 REACT_APP_WS_URL은 빌드 시 설정이며 컨테이너 실행 후 바꿔도 이미 생성된 JS에는 반영되지 않는다.
@@ -112,7 +105,7 @@ Windows PowerShell 5.1, Node.js 20 이상, 사용할 Release Backend EXE가 필�
 
 `REMOTE_URL`은 승인된 비밀 전달 방식으로 현재 PowerShell 환경에 미리 공급한다.
 형식은 `wss://<relay-host>/ingest?key=<비밀값>`이다. 실제 키를 명령 이력이나 로그에 남기지 않는다.
-로컬 검증에만 `ws://` loopback 주소를 사용한다. 원격 화면은 조회 전용이다.
+격리 HTTP 시연에서는 `ws://`를 사용할 수 있다. 서버 제어 스위치의 기본값은 OFF다.
 
 아래 `$BackendExe`는 저장소 루트에서 `build`에 구성한 Windows x64 Release 빌드의 예시다.
 별도 출력 폴더를 사용했다면 실제 EXE 경로를 지정한다.
@@ -179,8 +172,8 @@ LOCAL_URL/REMOTE_URL은 ws 또는 wss URL이어야 하며 URL 사용자명·비�
 기존 PR 기록의 학교 주소/포트는 현재 운영 상태를 보증하지 않는다.
 
 - nginx의 /ingest와 /radar access log는 끈다. 상위 proxy·error log·모니터링의 URL 수집도 서버 담당자가 점검해야 한다.
-- 이 구성 자체는 TLS를 설치하지 않는다. 공개 네트워크에서는 wss 또는 승인된 TLS proxy/VPN을 준비한다.
-  ws로 키와 Snapshot을 보내면 평문이다. viewer 인증도 아직 없다.
+- nginx는 주입된 인증서로 TLS를 종료한다. 운영 도메인과 인증서 발급·갱신은 서버 담당자가 준비한다.
+  HTTPS/WSS를 구성하면 Dashboard와 /radar는 동일한 realm에서 인증한다.
 - Compose 이름은 기존 `elevsafe`, relay 256MiB/0.5CPU, web 128MiB/0.5CPU, 로그 10MiB×3을 유지한다.
   동일 프로젝트/포트 중복 실행과 다른 컨테이너 영향은 서버 담당자가 확인한다.
 - 서버 전체 prune, 무관한 컨테이너 종료, 임의 포트 변경을 하지 않는다.
@@ -260,76 +253,54 @@ Frontend/Backend/B/C 제품 소스를 별도 수정하지 않았다.
 
 
 
-## 외부 Dashboard 원격 제어 (격리 시연)
+## 접속 프로토콜별 Dashboard와 가상 문 관제
 
-기본 배포는 조회 전용이다. 원격 제어는 소프트웨어 가상 문 모드에만
-사용한다. 기존 /radar와 /ingest의 Snapshot 경로 및 JSON v7은 그대로다.
+HTTP와 HTTPS는 같은 Dashboard 정적 파일과 `/radar`를 사용한다. D 소스 변경이나 별도 조회 화면은 필요 없다. 개발 환경의 `npm start`는 기존처럼 현장 Backend로 직접 연결한다.
 
-| 실행 위치 | 활성화 및 설정 |
+| 접속 | Dashboard 및 Snapshot | 가상 문 버튼이 명령을 전달하는 조건 |
+|---|---|---|
+| HTTP / WS | 무인증 | Relay의 `CONTROL_ENABLED=1` 및 `CONTROL_ALLOW_INSECURE_DEMO=1` |
+| HTTPS / WSS | 문서·정적 파일·WebSocket 모두 Basic 인증 | 인증 성공 및 `CONTROL_ENABLED=1` |
+
+두 스위치는 기본 OFF다. HTTP 관제를 열면 해당 주소에 도달하는 누구나 가상 문을 조작할 수 있다. HTTPS의 비밀번호는 HTTP 경로를 보호하지 않는다. HTTP에서는 서비스 자격증명도 전송 중 노출될 수 있으므로 접근을 제한한 시연망에서만 사용한다. 실제 엘리베이터 및 STM32는 대상에서 제외한다.
+
+### 설치 전 준비
+
+| Compose 설정 | 공급 위치 및 용도 |
 |---|---|
-| Relay | CONTROL_ENABLED=1, CONTROL_ORIGIN(허용할 HTTPS 출처 1개), CONTROL_OPERATOR_TOKEN, CONTROL_BRIDGE_TOKEN |
-| Bridge | CONTROL_ENABLED=1, CONTROL_REMOTE_URL(WSS의 /control-link), CONTROL_BRIDGE_TOKEN, CONTROL_LOCAL_URL(loopback의 /control-local), CONTROL_LOCAL_TOKEN |
-| Backend | --ws-remote-control, CONTROL_LOCAL_TOKEN. Radar는 --emulator-door-sim, 시험용 Mock은 --ws-mock --ws-door-sim 필요 |
-| Dashboard | REACT_APP_CONTROL_MODE=remote로 빌드. 개발 기본은 local, 배포 기본은 view |
+| `CONTROL_HTTP_ORIGIN` | 실제 HTTP 주소와 포트. 기본 `http://localhost:18080`. 포트나 호스트를 바꾸면 함께 설정 |
+| `CONTROL_ORIGIN` | 정확한 외부 HTTPS origin 하나. 비표준 포트는 포함하고 경로와 끝 슬래시는 생략한다. |
+| `DASHBOARD_USERS_FILE` | 저장소 밖에 생성한 bcrypt htpasswd 파일 경로. nginx에만 읽기 전용 제공 |
+| `TLS_CHAIN_FILE`, `TLS_KEY_FILE` | 해당 도메인의 인증서 체인과 개인키 경로. nginx에만 제공 |
+| `PROXY_TOKEN_FILE` | nginx와 Relay만 읽는 별도 비밀 파일. 32~256자의 무작위 base64url 문자열 한 줄 |
+| `INGEST_KEY` | 기존 단일 생산자 `/ingest` 인증 |
+| `CONTROL_ENABLED=1`, `CONTROL_BRIDGE_TOKEN` | 원격 명령을 허용할 때 Relay와 Bridge에 설정. Bridge는 `/control-link`에 전용 Bearer 인증 |
+| `CONTROL_LOCAL_TOKEN` | Bridge와 loopback A만 공유. A의 `--ws-remote-control`은 Mock 문 시뮬레이션 또는 Radar Emulator 문 시뮬레이션에서만 허용 |
 
-세 제어 자격증명은 각각 고엔트로피 32~256자(base64url 문자 집합)로
-별도 생성하고 INGEST_KEY와도 구분한다. 운영자 토큰은 관제 화면의 비밀번호
-입력으로 제공하고, Relay는 HTTPS POST /control/login을 검증한 뒤
-15분 유효 Secure/HttpOnly/SameSite=Strict 세션 쿠키를 발급한다.
-이는 제한된 시연용 단일 역할이다. 토큰을 URL, 프론트엔드 빌드 설정, 로그에
-넣지 않는다. 로그아웃이나 세션 만료 시 미적용 요청을 취소하고,
-이미 적용된 결과의 수신이 끊기면 상태를 확인한 뒤 새 요청을 판단한다.
+예를 들어 제한된 디렉터리에서 `umask 077` 후 `htpasswd -cB /private/elevsafe/users admin`을 실행하고 프롬프트에서 시험 비밀번호를 입력한다. 기존 계정 파일을 갱신할 때는 `-c`를 빼고, 운영에는 별도의 긴 임의 비밀번호를 사용한다. `openssl rand -hex 32 > /private/elevsafe/proxy-token`으로 프록시 전용 비밀을 생성할 수 있다. 모든 기계용 키는 서로 다르게 생성한다. Compose secret의 원본 파일은 필요한 컨테이너 프로세스가 읽을 수 있어야 한다. 저장소·이미지·프론트 빌드에 이 파일을 넣지 않는다.
 
-대시보드는 같은 출처의 WSS /control로 로그인 세션을 제시한다.
-Bridge는 WSS /control-link에 외향 연결하고 A는 loopback /control-local에서만
-별도 인증을 받는다. Compose의 기본 HTTP 프록시는 제어 업그레이드를 열지 않는다.
-서버 담당자는 승인된 HTTPS 종료 지점에서 올바른 X-Forwarded-Proto를 덮어쓰고
-Relay의 포트를 신뢰된 프록시로만 제한한 뒤 CONTROL_TRUST_PROXY=1을 설정한다.
-인증서 검증과 TLS 종료 경로를 실제 배포 전에 확인한다.
+기본 `docker compose up -d --build`는 HTTP만 기동한다. 인증서·개인키·htpasswd 파일은 이 구성에 필요하지 않다. `WEB_BIND`와 `WEB_PORT`는 호스트 바인딩이며 기본은 `127.0.0.1:18080`이다. 다른 기기에서 사용할 때는 승인된 시연망 인터페이스와 외부 Origin을 지정한다. 예를 들어 포트 3000을 사용하면 `WEB_PORT=3000`, `CONTROL_HTTP_ORIGIN=http://<시연호스트>:3000`으로 맞춘다.
 
-제어 메시지에는 Snapshot과 별도로 아래 형식을 사용한다.
+HTTPS를 함께 제공하려면 TLS·계정 파일과 `CONTROL_ORIGIN`을 설정하고 아래 명령을 사용한다. HTTPS 기본 바인딩은 `127.0.0.1:18443`이며 `HTTPS_BIND`, `HTTPS_PORT`로 지정한다. HTTP 관제를 끄려면 두 서비스에서 `CONTROL_ALLOW_INSECURE_DEMO=0`으로 재기동하고 Bridge의 제어 연결은 WSS로 전환한다. HTTP 조회까지 외부에 제공하지 않을 경우 HTTP 리스너의 호스트 바인딩을 loopback에 두고 상위 프록시도 해당 포트를 공개하지 않는다.
 
-| 메시지 | 필드와 의미 |
-|---|---|
-| door_request (D → Relay) | client_request_id, door_command. OPEN/HOLD/CLOSE만 허용 |
-| door_request (Relay → Bridge → A) | request_id, control_session_id, backend_session_id, operator_id, door_command, Relay가 만든 issued_at, expires_at |
-| control_validate / control_validity | A가 현재 요청의 TTL을 확인하고 Relay가 정수 밀리초 remaining_ms를 응답 |
-| control_ready | enabled, backend_connected, ready, reason, backend_session_id |
-| door_result | 명령·요청 ID와 status 및 reason. D 응답에는 client_request_id도 포함 |
-| control_revoke | 관제 연결 단절·로그아웃·만료 시 해당 연결의 우선권과 미적용 요청 폐기 |
-| control_cancel | 개별 링크·Backend 세션의 미적용 요청 폐기 |
+```sh
+docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
 
-ACCEPTED는 Relay 접수다. APPLIED는 가상 문 명령 적용 또는 기존 동작을
-그대로 이어받는 원격 소유권 이전이다. 이전 시 이동 타이머는 유지된다.
-거부된 요청은 소유권을 바꾸지 않는다.
-REJECTED, EXPIRED, CANCELLED는 해당 단계에서 확인한 거부·만료·취소다.
-단절로 최종 적용을 확인할 수 없으면 UNKNOWN을 사용하며 자동 재전송하지 않는다.
-이동 완료는 기존 door_state로 확인한다. 원격 HOLD 중 제어 연결이 끊기면
-우선권만 해제한다. 가상 문은 HOLD를 유지하고 새 현장 OPEN/CLOSE 또는
-새 유효 원격 명령이 들어올 때까지 정상 운행 CLOSE를 예약하지 않는다.
-TCP 단절은 각 링크의 기존 WebSocket 종료와 heartbeat로 감지한다.
+Relay에는 공개 포트가 없다. nginx는 `/radar`에서 브라우저 Authorization을 제거하고, 실제 리스너의 scheme·인증 결과·프록시 전용 자격증명을 덮어쓴다. Relay는 이 증명과 해당 scheme의 정확한 Origin을 검사한다. `/ingest` 키, `/control-link` Bearer, loopback `/control-local` 인증은 HTTP 시연에서도 필요하다. HTTP 전용이면 Bridge에도 `CONTROL_ALLOW_INSECURE_DEMO=1`을 설정하고 `CONTROL_REMOTE_URL=ws://<시연호스트>:<포트>/control-link`를 사용한다. HTTPS에서는 `wss://`를 사용한다. Backend/Bridge 실행 시 Mock은 `-DoorSim -RemoteControl`, Radar Emulator는 `-EmulatorDoorSim -RemoteControl`을 사용한다.
 
-제어 메시지 상한 기본값은 1KiB(CONTROL_MAX_BYTES), 요청은 운영자 세션당
-초당 5건(CONTROL_RATE), 현장 미적용 요청은 최대 1건이다.
-TTL 기본값은 2초(CONTROL_TTL_MS)이며 Relay·Bridge·A에 같은 값을 준다.
-Relay는 원래 UTC 발급·만료 시각과 단조 시계 기한 중 더 일찍 만료하는
-기준의 남은 시간을 응답한다. A는 이 예산에서 확인 요청의 왕복 전체를
-차감하고 접수 세션과 만료를 적용 직전에 다시 확인한다. 따라서 노드 간
-UTC 오차를 추정할 필요가 없다. 확인 가능한 예산이 없거나 다 소진된
-요청은 적용하지 않으며 UTC 역행으로 기존 요청 수명이 연장되지 않는다.
-제어 메시지의 변경은 Relay·Bridge·A를 함께 배포해야 한다.
-기존 /radar Snapshot 경로와 JSON v7 형식은 유지한다.
+상위 프록시가 TLS를 종료하면 인증을 적용하는 내부 nginx의 **HTTPS 리스너로 다시 연결**하고 upstream 인증서를 검증한다. Host·Origin·Upgrade·Basic 헤더를 보존한다. HTTPS 요청을 내부 HTTP 시연 리스너에 전달하면 Basic 인증 경계가 사라진다. 단순히 클라이언트 전달 헤더로 HTTPS를 판정하는 구성은 지원하지 않는다.
 
-PowerShell 통합 실행에서 시험용 Mock은 -Mode Mock -DoorSim -RemoteControl,
-Radar Emulator는 -Mode Radar -EmulatorDoorSim -RemoteControl을 사용한다.
-기존 BackendExe, Radar 모드 SignalConfig, REMOTE_URL 설정은 같이 필요하다.
-실행기는 인증값을 인수나 출력에 넣지 않는다.
+### 명령과 소유권
 
-로컬 WSS 시험은 OpenSSL로 임시 인증서를 만들고 Node 클라이언트가 그
-인증서를 신뢰하도록 구성한다. 기존 deploy/tests/transport.test.js에
-인증·Viewer 차단 시험이 포함돼 있다. ELEVSAFE_TEST_BACKEND에 Release
-Backend의 절대 경로를 지정하면 실제 가상 문을 포함한 Node E2E도 등록된다.
+제어를 허용한 소켓마다 독립 운영자 ID를 발급한다. 입력은 단일 필드 `{"door_command":"OPEN"}` 형식이며 HOLD/CLOSE도 같은 형식이다. Relay가 요청 ID와 TTL을 부여한다. 최대 접속은 16개, 제어 입력 기본 상한은 1KiB, 빈도는 연결당 초당 5건(`CONTROL_RATE`), 전체는 그 네 배다. HTTP 및 HTTPS 전체에서 미완료 요청은 한 건이다. 처리 중 새 요청은 QUEUE_FULL로 거부되고 재전송되지 않는다. 반복 클릭에는 별도의 요청 ID가 부여된다.
 
-기존 FOV_t03 헤드리스 실행 파일을 재사용하려면 ELEVSAFE_TEST_FOV_EMULATOR,
-ELEVSAFE_TEST_FOV_DATA, ELEVSAFE_TEST_FOV_CONFIG를 같은 격리 검증 환경에
-지정한다. 이 녹화 시나리오에서는 포트 29172와 8000이 비어 있어야 한다.
+A는 명령 적용 직전에 세션과 최초 발급 TTL을 확인한다. 기본 TTL은 2초이며 Relay·Bridge·A의 `CONTROL_TTL_MS`를 맞춘다. 원격 → 현장 수동 → C 안전 → A 정상 운행 순서를 유지한다. 원격 HOLD 소유자가 끊어지면 문은 HOLD를 유지하고 현장 제어권이 복구된다. 소유권을 넘겨받은 뒤 이전 연결이 끊겨도 현재 소유권은 유지된다.
+
+D는 송신 직후 최근 명령을 표시한다. 접수·실제 적용·만료는 Relay의 `[control]` 진단에서 요청 ID와 결과로 구분하고, 실제 문 상태는 기존 Snapshot에서 확인한다. `/radar`에는 JSON v7 Snapshot만 전송한다. 공용 계정으로는 개인을 식별할 수 없으며 브라우저 Basic 인증 캐시는 별도 React 로그아웃을 제공하지 않는다.
+
+### 계정 변경과 연결 폐기
+
+변경 시간을 정하고 web을 중지해 기존 브라우저와 Bridge 연결을 닫는다. Relay를 중지하고 현장에서 미적용 요청 폐기·제어권 복구를 확인한다. 안전한 계정 파일을 교체한 뒤 Relay와 web을 재생성해 secret 마운트를 갱신한다. nginx의 단순 reload 또는 비밀번호 파일 변경만으로 열린 WS가 모두 폐기되지는 않는다. 새 비밀번호로 재인증하고 이전 비밀번호 거부, 기존 HOLD 유지, 새 명령만 적용되는지 확인한다.
+
+서버 인증 경계의 실제 시험에는 `ELEVSAFE_TEST_NGINX`(nginx 실행 파일), `ELEVSAFE_TEST_HTPASSWD`, `ELEVSAFE_TEST_PASSWORD`를 격리된 Linux 환경에 지정한다. `ELEVSAFE_TEST_BACKEND`를 설정하면 가상 문 통합 시험을, `ELEVSAFE_TEST_FOV_EMULATOR`, `ELEVSAFE_TEST_FOV_DATA`, `ELEVSAFE_TEST_FOV_CONFIG`까지 설정하면 실제 FOV 재생 시험을 등록한다. 시험은 임시 loopback HTTP 및 HTTPS 포트를 사용한다. 실제 관제 화면용 빌드는 `ELEVSAFE_TEST_DASHBOARD`로 지정할 수 있다.

@@ -96,6 +96,7 @@ if (require.main === module) {
       reconnectMs: process.env.RECONNECT_MS, connectTimeoutMs: process.env.CONNECT_TIMEOUT_MS,
       heartbeatMs: process.env.HEARTBEAT_MS, log: console.log,
       control: process.env.CONTROL_ENABLED === '1' ? {
+        allowInsecureDemo: process.env.CONTROL_ALLOW_INSECURE_DEMO === '1',
         remoteUrl: process.env.CONTROL_REMOTE_URL, bridgeToken: process.env.CONTROL_BRIDGE_TOKEN,
         localUrl: process.env.CONTROL_LOCAL_URL, localToken: process.env.CONTROL_LOCAL_TOKEN,
         maxBytes: process.env.CONTROL_MAX_BYTES, ttlMs: process.env.CONTROL_TTL_MS

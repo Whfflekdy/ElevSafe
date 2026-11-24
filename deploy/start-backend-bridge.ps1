@@ -40,7 +40,6 @@ function Start-Child([string]$Executable, [string[]]$Arguments, [switch]$Bridge)
     $info.WorkingDirectory = $root
     $info.UseShellExecute = $false
     # Share the console so console Ctrl+C can also reach the children.
-    $info.EnvironmentVariables.Remove('CONTROL_OPERATOR_TOKEN')
     if ($Bridge) {
         $info.EnvironmentVariables['LOCAL_URL'] = $localUrl
         $info.EnvironmentVariables['CONTROL_ENABLED'] = if ($RemoteControl) {'1'} else {'0'}
@@ -159,10 +158,11 @@ else {
 if ($RemoteControl) {
     if (!($DoorSim -or $EmulatorDoorSim)) { throw '-RemoteControl requires -DoorSim or -EmulatorDoorSim.' }
     $controlUrl = $null
+    $controlSchemes = if ($env:CONTROL_ALLOW_INSECURE_DEMO -ceq '1') { @('wss', 'ws') } else { @('wss') }
     if (-not [Uri]::TryCreate($env:CONTROL_REMOTE_URL, [UriKind]::Absolute, [ref]$controlUrl) -or
-        $controlUrl.Scheme -cne 'wss' -or !$controlUrl.Host -or $controlUrl.AbsolutePath -cne '/control-link' -or
+        $controlUrl.Scheme -notin $controlSchemes -or !$controlUrl.Host -or $controlUrl.AbsolutePath -cne '/control-link' -or
         $controlUrl.UserInfo -or $controlUrl.Query -or $controlUrl.Fragment) {
-        throw 'Set CONTROL_REMOTE_URL to an authenticated Relay wss control-link endpoint.'
+        throw 'Set CONTROL_REMOTE_URL to a Relay control-link endpoint (wss, or ws with explicit demo opt-in).'
     }
     if ($env:CONTROL_BRIDGE_TOKEN -cnotmatch '^[a-zA-Z0-9_-]{32,256}$' -or
         $env:CONTROL_LOCAL_TOKEN -cnotmatch '^[a-zA-Z0-9_-]{32,256}$' -or

@@ -5,10 +5,10 @@ const { now } = require('../relay/transport');
 const { controlId, controlLimits, exact, inspectRequest, isValidation, isValidity, readControl, result,
   secret, sendControl, validReady, validResult } = require('../relay/control');
 
-function controlUrl(value, remote) {
+function controlUrl(value, remote, allowInsecureDemo = false) {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash ||
-      (remote ? url.protocol !== 'wss:' || url.pathname !== '/control-link'
+      (remote ? (url.protocol !== 'wss:' && !(allowInsecureDemo === true && url.protocol === 'ws:')) || url.pathname !== '/control-link'
         : url.protocol !== 'ws:' || url.pathname !== '/control-local' ||
           !['127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('Invalid control URL');
   return url.href;
@@ -18,7 +18,7 @@ function createControlBridge(config, { reconnectMs, connectTimeoutMs, heartbeatM
   const { maxBytes, ttlMs } = controlLimits(config);
   if (!secret(config.bridgeToken) || !secret(config.localToken) || config.bridgeToken === config.localToken)
     throw new Error('Invalid Bridge control authentication');
-  const remote = { name: 'control-link', url: controlUrl(config.remoteUrl, true), key: config.bridgeToken };
+  const remote = { name: 'control-link', url: controlUrl(config.remoteUrl, true, config.allowInsecureDemo), key: config.bridgeToken };
   const local = { name: 'control-local', url: controlUrl(config.localUrl, false), key: config.localToken };
   let stopping = false, stopPromise, linkId = null, backend = null, pending = null;
   const notReady = () => ({ type: 'control_ready', enabled: true, backend_connected: false, ready: false,

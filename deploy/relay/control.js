@@ -33,8 +33,7 @@ function readControl(data, binary, maxBytes) {
 }
 
 function isBrowserRequest(value) {
-  return exact(value, ['type', 'client_request_id', 'door_command']) &&
-    value.type === 'door_request' && controlId(value.client_request_id) && commands.has(value.door_command);
+  return exact(value, ['door_command']) && commands.has(value.door_command);
 }
 
 function utc(value) {
