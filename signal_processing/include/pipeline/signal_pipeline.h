@@ -69,6 +69,13 @@ struct GhostFilterConfig {
     // HALL 덩어리는 문이 OPEN/OPENING/CLOSING 일 때만 인정 (닫힌 문 너머는 안 보이므로 유령, 11/24)
     //   근거: 3차 S3-7_t01·S4-4_t01 HALL 켬. 문 CLOSED·UNKNOWN 때 HALL 덩어리 295개 중 진짜 사람 2개
     bool hall_needs_open = false;
+    // 문턱 띠 규칙: 중심이 문턱 근처(door_y_min ≤ cy ≤ door_y_max, |cx| ≤ door_x)이고 점이 zone_points 미만이면 유령
+    //   문짝·문틀 덩어리(20~50점)가 C 에서 "높이가 떨어진 사람"으로 보여 가짜 FALL 이 나는 것을 막음 (3차 S3-7_t01, 11/24)
+    //   문턱을 지나는 실제 승객은 200점 이상이라 남음
+    bool door_band = false;
+    float door_y_min = -0.35f;
+    float door_y_max = 0.15f;
+    float door_x = 0.60f;
 
     static GhostFilterConfig fromConfig(const Config& cfg);
     bool isGhost(const Cluster& c) const;                   // 크기·위치 규칙

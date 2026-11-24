@@ -126,6 +126,10 @@ GhostFilterConfig GhostFilterConfig::fromConfig(const Config& cfg) {
     g.back_y = cfg.getFloat("ghost_filter.back_y", g.back_y);
     g.sensor_radius = cfg.getFloat("ghost_filter.sensor_radius", g.sensor_radius);
     g.hall_needs_open = cfg.getFloat("ghost_filter.hall_needs_open", 0.0f) != 0.0f;
+    g.door_band = cfg.getFloat("ghost_filter.door_band", 0.0f) != 0.0f;
+    g.door_y_min = cfg.getFloat("ghost_filter.door_y_min", g.door_y_min);
+    g.door_y_max = cfg.getFloat("ghost_filter.door_y_max", g.door_y_max);
+    g.door_x = cfg.getFloat("ghost_filter.door_x", g.door_x);
     g.sensor_x = cfg.getFloat("sensor.tx", 0.0f);
     g.sensor_y = cfg.getFloat("sensor.ty", 0.0f);
     return g;
@@ -133,8 +137,10 @@ GhostFilterConfig GhostFilterConfig::fromConfig(const Config& cfg) {
 
 bool GhostFilterConfig::isGhost(const Cluster& c) const {
     if (c.num_points < min_points) return true;
+    const bool in_door = door_band && c.cy >= door_y_min && c.cy <= door_y_max && std::fabs(c.cx) <= door_x;
     const bool in_zone = c.cy >= back_y ||
-                         std::hypot(c.cx - sensor_x, c.cy - sensor_y) <= sensor_radius;
+                         std::hypot(c.cx - sensor_x, c.cy - sensor_y) <= sensor_radius ||
+                         in_door;
     return in_zone && c.num_points < zone_points;
 }
 

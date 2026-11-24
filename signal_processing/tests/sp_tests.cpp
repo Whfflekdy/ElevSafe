@@ -266,6 +266,14 @@ void testGhostFilter() {
     Cluster cabin = cl(0.3f, 0.8f, 100);
     cabin.zone = Zone::CABIN;
     EXPECT(!g.isGhost(cabin, DoorState::CLOSED));       // CABIN 은 문 규칙과 무관
+
+    // 문턱 띠 규칙: 문짝 덩어리(작음)는 빼고, 문턱을 지나는 사람(큼)은 남김
+    EXPECT(!g.isGhost(cl(0.37f, 0.0f, 33)));      // 규칙 꺼짐이면 그대로
+    g.door_band = true;
+    EXPECT(g.isGhost(cl(0.37f, 0.0f, 33)));       // 3차 S3-7 문짝 덩어리 (가짜 FALL 원인)
+    EXPECT(g.isGhost(cl(0.0f, -0.30f, 32)));      // 승강장 쪽 문 위 덩어리
+    EXPECT(!g.isGhost(cl(-0.1f, 0.0f, 260)));     // 문턱을 지나는 승객
+    EXPECT(!g.isGhost(cl(0.37f, 0.30f, 33)));     // 문턱 띠 밖(캐빈 쪽)은 크기 규칙만
 }
 
 void run(const char* name, void (*fn)()) {
@@ -289,6 +297,6 @@ int main() {
     run("ROI: HALL 켜짐/꺼짐", testRoiHall);
     run("문 상태: 문짝 움직임", testDoorMotion);
     run("문 상태: 닫히다가 다시 열림", testDoorMotionReopen);
-    run("유령 거르기: 크기·위치·HALL 문", testGhostFilter);
+    run("유령 거르기: 크기·위치·HALL 문·문턱 띠", testGhostFilter);
     return g_failed == 0 ? 0 : 1;
 }
