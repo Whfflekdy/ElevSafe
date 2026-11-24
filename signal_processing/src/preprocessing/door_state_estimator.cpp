@@ -9,6 +9,8 @@ const char* doorStateToString(DoorState s) {
     switch(s){
         case DoorState::OPEN:    return "OPEN";
         case DoorState::CLOSED:  return "CLOSED";
+        case DoorState::OPENING: return "OPENING";
+        case DoorState::CLOSING: return "CLOSING";
         case DoorState::UNKNOWN: break;
     }
     return "UNKNOWN";
@@ -92,7 +94,7 @@ void DoorStateEstimator::updateMotion(const Frame& points) {
             moving_ = true;
             motion_seen_ = true;
             event_dsum_ = wdsum;                 // 시작한 window 의 도플러부터 쌓기
-            state_ = DoorState::OPEN;            // 움직이는 중에는 열리든 닫히든 문이 덜 닫힌 상태
+            state_ = (wdsum < 0.0) ? DoorState::CLOSING : DoorState::OPENING;   // 시작 window 도플러 부호로 방향
         }
         return;
     }

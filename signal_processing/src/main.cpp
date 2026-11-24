@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
         const DoorState ds = r.estimated_door_state;
         hall_on = r.hall_enabled;
         door_file << r.frame_id << ',' << r.timestamp_us << ',' << doorStateToString(ds) << ',' << (r.hall_enabled ? 1 : 0) << '\n';
-        if (ds == DoorState::OPEN) ++open_frames;
+        if (ds == DoorState::OPEN || ds == DoorState::OPENING || ds == DoorState::CLOSING) ++open_frames;
         if (prev_state != DoorState::UNKNOWN && ds != prev_state) ++transitions;
         prev_state = ds;
 
