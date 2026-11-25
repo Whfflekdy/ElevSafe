@@ -26,7 +26,7 @@ const SCALE = 1.6;
  * false: 예시 승객과 문 애니메이션으로 UI 테스트 (서버 연결 안 함)
  * true : WebSocket으로 데이터 수신 및 명령 전송
  */
-const USE_REAL_WEBSOCKET = true;
+const USE_REAL_WEBSOCKET = false;
 // 개발(npm start)일 때는 지금처럼 127.0.0.1, 빌드해서 서버에 올리면 "페이지를 연 주소/radar"
 const RADAR_WS_URL = process.env.REACT_APP_WS_URL
   || (process.env.NODE_ENV === 'production'
@@ -161,8 +161,12 @@ function FloorPlan({ doorState, children }) {
           height: CONFIG_CM.DOOR_THICKNESS * SCALE,
         }}
       >
-        <div className="plan-door plan-door-left" style={{ transition: inlineTransition }} />
-        <div className="plan-door plan-door-right" style={{ transition: inlineTransition }} />
+        <div className="plan-door plan-door-left" style={{ transition: inlineTransition }}>
+          {doorState === 'UNKNOWN' && '문 상태'}
+        </div>
+        <div className="plan-door plan-door-right" style={{ transition: inlineTransition }}>
+          {doorState === 'UNKNOWN' && '확인 중'}
+        </div>
       </div>
       {children}
     </div>
@@ -419,7 +423,7 @@ function App() {
             x: 0.0,
             y: 0.0,
             state: 'ENTERING',
-            safety_state: 'FALL',
+            safety_state: 'IMMOBILE',
             label: 'Passenger #2'
           },
           {
@@ -642,12 +646,10 @@ function App() {
           <h2>엘리베이터 및 승강장 2D 평면도 (1cm = {SCALE}px Scale)</h2>
           
           <div className="canvas-container">
-            {/* 데이터 끊김이거나 doorState가 UNKNOWN일 때 오버레이 표시 */}
-            {(isDataLost || doorState === 'UNKNOWN') && (
+            {/* 데이터 끊김일 때 오버레이 표시 */}
+            {isDataLost && (
               <div className="unknown-overlay">
-                <span className="unknown-text">
-                  {isDataLost ? '데이터 끊김' : '확인 중...'}
-                </span>
+                <span className="unknown-text">데이터 끊김</span>
               </div>
             )}
 
