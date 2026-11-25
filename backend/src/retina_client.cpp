@@ -139,7 +139,7 @@ namespace elevsafe
         }
 
         int waitSocket(std::intptr_t socket, bool writing, const RetinaClient::Deadline& deadline,
-            const std::function<bool()>& cancelled = {})
+            const std::function<bool()>& cancelled = {}, const std::function<void()>& onIdle = {})
         {
             for (;;)
             {
@@ -147,7 +147,7 @@ namespace elevsafe
                 const auto left = deadline ? deadline() - std::chrono::steady_clock::now() : std::chrono::seconds(1);
                 if (left <= std::chrono::steady_clock::duration::zero()) return timeoutError();
                 // Re-query the same-thread deadline periodically; no watchdog thread.
-                const auto micros = std::max<std::int64_t>(1, std::min<std::int64_t>(cancelled ? 100000 : 1000000,
+                const auto micros = std::max<std::int64_t>(1, std::min<std::int64_t>(onIdle ? 25000 : (cancelled ? 100000 : 1000000),
                     std::chrono::duration_cast<std::chrono::microseconds>(left).count()));
                 timeval interval{static_cast<long>(micros / 1000000), static_cast<long>(micros % 1000000)};
                 fd_set ready, errors;
@@ -163,7 +163,11 @@ namespace elevsafe
                 FD_SET(native, &ready); FD_SET(native, &errors);
                 const int result = select(width, writing ? nullptr : &ready, writing ? &ready : nullptr, &errors, &interval);
                 if (result > 0) return 0;
-                if (result == 0) continue;
+                if (result == 0)
+                {
+                    if (onIdle && (!cancelled || !cancelled())) onIdle();
+                    continue;
+                }
                 const int error = lastSocketError();
 #ifdef _WIN32
                 if (error == WSAEINTR) continue;
@@ -421,11 +425,12 @@ namespace elevsafe
         std::array<std::uint8_t, 8192> receiveBuffer{};
         int result = 0;
 
+        const auto onReceiveTick = control ? control->onReceiveTick : std::function<void()>{};
         while (!m_stopRequested)
         {
             if (deadline || control)
             {
-                const int error = waitSocket(m_socket, false, deadline, control ? cancelled : std::function<bool()>{});
+                const int error = waitSocket(m_socket, false, deadline, control ? cancelled : std::function<bool()>{}, onReceiveTick);
                 if (error != 0)
                 {
                     if (control && cancelled())
@@ -480,6 +485,7 @@ namespace elevsafe
             parser.feed(std::span<const std::uint8_t>(
                 receiveBuffer.data(),
                 static_cast<std::size_t>(received)));
+            if (onReceiveTick && !cancelled()) onReceiveTick();
         }
 
         m_processingSummary = parser.processingSummary();
