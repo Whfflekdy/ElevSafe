@@ -238,6 +238,40 @@ void testDoorMotionReopen() {
     EXPECT(d.state() == DoorState::OPEN);   // 누적 합이었다면 −45+27 = −18 → CLOSED로 틀림
 }
 
+// 시작 상태와 재연결 이어받기 (11/26)
+void testDoorMotionInitialAndSeed() {
+    DoorStateConfig c;
+    c.view_zone = {-0.44f, 0.44f, -2.88f, -0.18f, 0.1f, 2.1f};
+    c.motion_enabled = true;
+    c.motion_zone = {-0.6f, 0.6f, -0.18f, 0.27f, 1.8f, 2.4f};
+
+    DoorStateEstimator d0(c);                        // 기본: UNKNOWN 으로 시작 (기존과 같음)
+    for (int i = 0; i < 20; ++i) d0.update(Frame{});
+    EXPECT(d0.state() == DoorState::UNKNOWN);
+
+    c.motion_initial = DoorState::CLOSED;            // 시작 상태 CLOSED
+    DoorStateEstimator d(c);
+    EXPECT(d.state() == DoorState::CLOSED);
+    for (int i = 0; i < 20; ++i) d.update(Frame{});
+    EXPECT(d.state() == DoorState::CLOSED);
+
+    d.seed(DoorState::OPENING);                      // 움직이던 중 끊김: 끝 상태 모름 → 무시
+    EXPECT(d.state() == DoorState::CLOSED);
+    d.seed(DoorState::OPEN);                         // 이전 세션이 OPEN 으로 끝남 → 이어받음
+    d.update(Frame{});
+    EXPECT(d.state() == DoorState::OPEN);
+
+    for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f));   // 첫 움직임: 닫힘
+    for (int i = 0; i < 20; ++i) d.update(Frame{});
+    EXPECT(d.state() == DoorState::CLOSED);
+    d.seed(DoorState::OPEN);                         // 움직임을 본 뒤에는 무시
+    EXPECT(d.state() == DoorState::CLOSED);
+
+    DoorStateConfig b = c;                           // 오타는 설정 오류
+    b.motion_initial_ok = false;
+    EXPECT(!b.isValid());
+}
+
 // 유령 거르기: 크기 규칙과 위치 규칙 (센서 (-0.65, 1.31), 뒷벽 띠 y ≥ 1.30)
 void testGhostFilter() {
     GhostFilterConfig g;
@@ -297,6 +331,7 @@ int main() {
     run("ROI: HALL 켜짐/꺼짐", testRoiHall);
     run("문 상태: 문짝 움직임", testDoorMotion);
     run("문 상태: 닫히다가 다시 열림", testDoorMotionReopen);
+    run("문 상태: 시작 상태·재연결 이어받기", testDoorMotionInitialAndSeed);
     run("유령 거르기: 크기·위치·HALL 문·문턱 띠", testGhostFilter);
     return g_failed == 0 ? 0 : 1;
 }
