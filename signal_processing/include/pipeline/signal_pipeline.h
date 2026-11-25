@@ -117,6 +117,10 @@ public:
                            Frame* processed_points = nullptr);
 
     bool usesBackground() const { return use_bg_; }
+
+    // 재연결 때 A 가 새 파이프라인을 만든 직후, 이전 세션의 마지막 문 상태를 넣는다.
+    // 문짝 움직임 방식에서 첫 움직임 전까지만 쓰이고, OPEN·CLOSED 외에는 무시된다.
+    void seedDoorState(DoorState s) { door_est_.seed(s); }
     bool ghostFilterEnabled() const { return ghost_.enabled; }
     const PipelineStats& stats() const { return stats_; }
 
