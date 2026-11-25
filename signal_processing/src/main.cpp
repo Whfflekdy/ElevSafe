@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
         const DoorState ds = r.estimated_door_state;
         hall_on = r.hall_enabled;
         door_file << r.frame_id << ',' << r.timestamp_us << ',' << doorStateToString(ds) << ',' << (r.hall_enabled ? 1 : 0) << '\n';
-        if (ds == DoorState::OPEN) ++open_frames;
+        if (ds == DoorState::OPEN || ds == DoorState::OPENING || ds == DoorState::CLOSING) ++open_frames;
         if (prev_state != DoorState::UNKNOWN && ds != prev_state) ++transitions;
         prev_state = ds;
 
@@ -142,6 +142,8 @@ int main(int argc, char** argv) {
 
     std::cout << "[봉우리 분할] 나눈 덩어리 " << s.splits
           << "개, maybe_merged " << s.merged << "개\n";
+    if (pipeline.ghostFilterEnabled())
+        std::cout << "[유령 거르기] 뺀 덩어리 " << s.ghosts << "개\n";
 
     if (!writeFramesCSV(output_path, outputs)) return 1;
     std::cout << "출력 저장: " << output_path << "\n";

@@ -1,14 +1,19 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig,
-    [string[]]$Cases = @('refused-limit', 'refused-restart', 'fin-default', 'partial-fin-restart', 'rst-websocket', 'processing-error'))
+    [string[]]$Cases = @('refused-limit', 'refused-restart', 'fin-default', 'partial-fin-restart', 'rst-websocket', 'processing-error', 'idle-recover', 'idle-limit'),
+    [ValidateRange(1, 100)][int]$Repeat = 1,
+    [string]$OutputDirectory = '')
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
 $helper = Join-Path (Split-Path (Split-Path $SignalConfig)) 'websocket_radar_fixture.ps1'
 . ([scriptblock]::Create((Get-Content -LiteralPath $helper -Raw -Encoding UTF8))) `
     -BackendExe $BackendExe -SignalConfig $SignalConfig -FunctionsOnly
-$outputDirectory = Join-Path (Split-Path $BackendExe) ('radar-reconnect-fixture/' + [guid]::NewGuid().ToString('N'))
+$outputDirectory = if ($OutputDirectory) { $OutputDirectory }
+    else { Join-Path (Split-Path $BackendExe) ('radar-reconnect-fixture/' + [guid]::NewGuid().ToString('N')) }
+if (Test-Path -LiteralPath $outputDirectory) { throw 'OutputDirectory must be new; existing logs will not be overwritten' }
 $null = New-Item -ItemType Directory -Path $outputDirectory
+$outputDirectory = (Resolve-Path -LiteralPath $outputDirectory).Path
 $failures = @()
 
 function Assert-That($condition, [string]$message) { if (-not $condition) { throw $message } }
@@ -94,10 +99,13 @@ function Finish-Server($server) {
     Assert-That ($server.Process.ExitCode -eq 0) 'Fixture server failed (native socket error recorded above)'
 }
 
-foreach ($mode in $Cases) {
+$caseNumber = 0
+foreach ($mode in (@($Cases) * $Repeat)) {
+    ++$caseNumber
+    $tag = if ($Repeat -eq 1) { $mode } else { '{0:D3}-{1}' -f $caseNumber, $mode }
     $listener = $null; $peer = $null; $process = $null; $ws = $null; $server1 = $null; $server2 = $null; $stage = 'fixture.bind'
-    $stdout = Join-Path $outputDirectory ($mode + '-stdout.log')
-    $stderr = Join-Path $outputDirectory ($mode + '-stderr.log')
+    $stdout = Join-Path $outputDirectory ($tag + '-stdout.log')
+    $stderr = Join-Path $outputDirectory ($tag + '-stderr.log')
     try {
         if ($mode -in @('partial-fin-restart', 'rst-websocket')) {
             [byte[]]$payload = (Make-Packet 41) + (Make-Packet 42)
@@ -106,25 +114,49 @@ foreach ($mode in $Cases) {
                 $payload += [byte[]]$partial[0..9]
             }
             $ending = if ($mode -eq 'rst-websocket') { 'rst' } else { 'fin' }
-            $server1 = Start-Server 0 $payload $ending ($mode + '-first')
+            $server1 = Start-Server 0 $payload $ending ($tag + '-first')
             $port = $server1.Port
         } else {
             $listener = Bound-Socket 0
             $port = $listener.LocalEndPoint.Port
-            if ($mode -notlike 'refused-*') { $stage = 'fixture.listen'; $listener.Listen(8) }
+            if ($mode -notlike 'refused-*') {
+                $stage = 'fixture.listen'
+                Write-Host "LISTEN mode=$mode pid=$PID family=IPv4 address=127.0.0.1 requested_port=0 bound_port=$port backlog=8"
+                $listener.Listen(8)
+            }
         }
         $arguments = @('127.0.0.1', [string]$port, '--signal-config', ('"' + $SignalConfig + '"'), '--radar-reconnect')
         if ($mode -eq 'partial-fin-restart') { $arguments += '--radar-reconnect-eof' }
+        if ($mode -like 'idle-*') { $arguments += @('--radar-idle-timeout-ms', '600') }
         if ($mode -eq 'rst-websocket') {
             $reservation = Bound-Socket 0; $wsPort = $reservation.LocalEndPoint.Port; $reservation.Dispose()
-            $arguments += @('--websocket', '--ws-port', [string]$wsPort)
+            $arguments += @('--websocket', '--ws-port', [string]$wsPort, '--ws-periodic-snapshot')
         } else { $arguments += @('--ab-profile', '--ab-profile-warmup', '1') }
         $stage = 'backend.start'
         $process = Start-Process -FilePath $BackendExe -ArgumentList $arguments -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $null = $process.Handle
-        Write-Host "START mode=$mode PID=$($process.Id) port=$port time=$([DateTimeOffset]::Now.ToString('o'))"
-        if ($mode -eq 'refused-limit') {
+        Write-Host "START mode=$mode PID=$($process.Id) port=$port time=$([DateTimeOffset]::Now.ToString('o')) tag=$tag"
+        if ($mode -like 'idle-*') {
+            $sessions = if ($mode -eq 'idle-limit') { 4 } else { 2 }
+            for ($attempt = 1; $attempt -le $sessions; ++$attempt) {
+                $stage = "fixture.idle.accept-$attempt"
+                $peer = Accept-Peer $listener $process
+                if ($mode -eq 'idle-recover' -and $attempt -eq 2) {
+                    $stage = 'fixture.idle.send-recovered'
+                    Send-Bytes $peer (Make-Packet 7)
+                    $peer.Shutdown([Net.Sockets.SocketShutdown]::Send)
+                } else {
+                    $stage = "fixture.idle.wait-$attempt"
+                    if ($mode -eq 'idle-limit' -and $attempt -eq 1) {
+                        $partial = Make-Packet 41
+                        Send-Bytes $peer ([byte[]]$partial[0..9])
+                    }
+                    Wait-Text $stderr "session=$attempt end stage=idle_timeout code=0 .*last_valid_frame_age_ms=never" $process
+                    $peer.Dispose(); $peer = $null
+                }
+            }
+        } elseif ($mode -eq 'refused-limit') {
             # Bound, non-listening port: cannot be occupied by an unrelated test server.
         } else {
             if ($mode -eq 'refused-restart') {
@@ -148,7 +180,7 @@ foreach ($mode in $Cases) {
                     Wait-Text $stderr 'command=OPEN' $process
                 }
                 # A new process starts only after the old server has completely exited.
-                $stage = 'fixture.restart'; $server2 = Start-Server $port (Make-Packet 7) 'fin' ($mode + '-second')
+                $stage = 'fixture.restart'; $server2 = Start-Server $port (Make-Packet 7) 'fin' ($tag + '-second')
                 if ($ws) {
                     Send-Command $ws 'HOLD'; Send-Command $ws 'CLOSE'
                     Wait-Text $stderr 'command=CLOSE' $process
@@ -169,10 +201,18 @@ foreach ($mode in $Cases) {
         $errorText = Read-Text $stderr
         $text = (Read-Text $stdout) + "`n" + $errorText
         Assert-That ($text -notmatch 'winsock error 10014|code=10014\b|\[system:10014') 'Winsock 10014; not retried by fixture'
-        $expectedExit = if ($mode -in @('refused-limit','partial-fin-restart','processing-error')) { 1 } else { 0 }
+        $expectedExit = if ($mode -in @('refused-limit','partial-fin-restart','processing-error','idle-limit')) { 1 } else { 0 }
         Assert-That ($process.ExitCode -eq $expectedExit) "Unexpected exit $($process.ExitCode), expected $expectedExit"
-        if ($mode -eq 'refused-limit') {
-            Assert-That ([regex]::Matches($errorText, 'TCP connect failed').Count -eq 4) 'Expected initial failure plus exactly three retries'
+        if ($mode -eq 'idle-recover') {
+            Assert-That ($errorText -match 'session=1 end stage=idle_timeout code=0 .*first_byte_pending=1 last_byte_age_ms=never last_valid_frame_age_ms=never') 'First-byte timeout diagnostics missing'
+            Assert-That ($errorText -match 'session=2 end stage=eof code=0 .*parsed=1 rejected=0 buffered=0 .*B_frames=1 .*first_timestamp_us=0 .*last_valid_frame_age_ms=\d+') 'Recovered session lost its first frame or reused prior state'
+            Assert-That ([regex]::Matches($errorText, '\[radar\] retry=').Count -eq 1) 'Expected exactly one retry before clean EOF'
+        } elseif ($mode -eq 'idle-limit') {
+            Assert-That ($errorText -match 'session=1 end stage=idle_timeout code=0 .*parsed=0 rejected=0 buffered=10 .*first_byte_pending=0 last_byte_age_ms=\d+ last_valid_frame_age_ms=never') 'Idle after a partial packet did not record byte/parser state'
+            Assert-That ([regex]::Matches($errorText, 'session=[234] end stage=idle_timeout code=0 .*parsed=0 rejected=0 buffered=0 .*first_byte_pending=1').Count -eq 3) 'Partial bytes leaked across retries'
+            Assert-That ([regex]::Matches($errorText, '\[radar\] retry=').Count -eq 3 -and $errorText -match 'recovery exhausted retries=3') 'Idle used a different retry budget'
+        } elseif ($mode -eq 'refused-limit') {
+            Assert-That ([regex]::Matches($errorText, 'TCP connect failed.* operation=(connect|connect_SO_ERROR) family=2 address_length=16').Count -eq 4) 'Expected native connect diagnostics on the initial refusal and three retries'
             Assert-That ($errorText -match 'recovery exhausted retries=3') 'Retry limit was not reported'
         } elseif ($mode -eq 'processing-error') {
             Assert-That ($errorText -match 'frameCount exceeds B frame_id range' -and $errorText -notmatch '\[radar\] retry=') 'Processing exception retried'
@@ -185,6 +225,8 @@ foreach ($mode in $Cases) {
             Assert-That ($errorText -match 'session=2 end stage=eof.*B_frames=1') 'B statistics not reset'
             Assert-That ($errorText.IndexOf('command=OPEN') -lt $errorText.IndexOf('command=HOLD') -and
                 $errorText.IndexOf('command=HOLD') -lt $errorText.IndexOf('command=CLOSE')) 'Manual request order changed'
+            $seals = [regex]::Matches($errorText, '\[ws-periodic\] session=(\d+) published=(\d+) mean_interval_us=\d+ sealed_enqueues=(\d+)')
+            Assert-That ($seals.Count -eq 2 -and !($seals | Where-Object {$_.Groups[2].Value -ne $_.Groups[3].Value})) 'RST/EOF publisher seal was not preserved'
             Assert-That ($errorText -match 'stop.complete') 'WebSocket did not finish cleanup'
         }
         $profiles = @([regex]::Matches($text, '(?m)^AB_PROFILE_JSON (.+)\r?$') | ForEach-Object { ConvertFrom-Json $_.Groups[1].Value })
@@ -204,10 +246,10 @@ foreach ($mode in $Cases) {
             Assert-That ($profiles.Count -eq 2 -and $profiles[0].metrics.observed_frames -eq 0 -and
                 $profiles[1].clean_eof -and $profiles[1].metrics.observed_frames -eq 2) 'Initial refusal/restart did not recover'
         }
-        Write-Host "PASS mode=$mode exit=$($process.ExitCode) profiles=$($profiles.Count) logs=$outputDirectory"
+        Write-Host "PASS mode=$mode exit=$($process.ExitCode) profiles=$($profiles.Count) tag=$tag logs=$outputDirectory"
     } catch {
-        $failures += "$mode stage=$stage error=$_"
-        Write-Error -ErrorAction Continue "FAIL mode=$mode stage=$stage error=$_ logs=$outputDirectory"
+        $failures += "$tag stage=$stage error=$_"
+        Write-Error -ErrorAction Continue "FAIL mode=$mode stage=$stage tag=$tag error=$_ logs=$outputDirectory"
         $native = $_.Exception
         while ($native.InnerException) { $native = $native.InnerException }
         if ($native -is [Net.Sockets.SocketException]) { Write-Host "Native socket code=$($native.NativeErrorCode) stage=$stage" }

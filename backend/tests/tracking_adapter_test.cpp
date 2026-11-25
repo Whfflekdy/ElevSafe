@@ -4,7 +4,9 @@
 #include "elevsafe/signal_adapter.h"
 #include "elevsafe/websocket_message.h"
 #include <nlohmann/json.hpp>
+#include <array>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -12,6 +14,70 @@
 namespace
 {
     void expect(bool ok, const char* text) { if (!ok) throw std::runtime_error(text); }
+
+    void testGhostFilterIntegration(const elevsafe::sp::Config& offConfig, const std::filesystem::path& enabledConfig)
+    {
+        namespace sp = elevsafe::sp;
+        sp::Config config;
+        expect(config.load(enabledConfig.string()), "ghost-filter fixture config load");
+        sp::SignalPipeline off(offConfig), on(config);
+        expect(off.ok() && on.ok() && !off.ghostFilterEnabled() && on.ghostFilterEnabled(),
+            "expected otherwise equivalent B fixtures with filter OFF and ON");
+        struct Case { int points; float x, y; bool retained; };
+        constexpr Case cases[] = {
+            {19, .25f, .8f, false}, {20, .25f, .8f, true}, {39, .25f, .8f, true},
+            {59, .25f, 1.4f, false}, {60, .25f, 1.4f, true},
+            {40, .35f, 0, false}, {40, .45f, 0, true},
+        };
+        elevsafe::TrackingDemo tracking;
+        std::size_t removed = 0;
+        for (std::size_t i = 0; i < std::size(cases); ++i)
+        {
+            const auto& sample = cases[i];
+            elevsafe::RadarFrame radar;
+            radar.frameCount = static_cast<std::uint32_t>(i);
+            radar.timestampUs = i * 100000;
+            for (int j = 0; j < sample.points; ++j)
+            {
+                elevsafe::RadarPoint point;
+                point.x = sample.x;
+                point.y = sample.y;
+                point.z = 1;
+                point.power = 10;
+                point.targetId = 255;
+                radar.points.push_back(point);
+            }
+            const auto frame = elevsafe::toSignalFrame(radar);
+            const auto unfiltered = off.process(frame, {});
+            const auto unfilteredDetections = elevsafe::toTrackingDetections(unfiltered);
+            expect(unfiltered.clusters.size() == 1 && unfilteredDetections.detections.size() == 1
+                && unfilteredDetections.detections[0].n_points == sample.points, "filter OFF lost a valid B cluster");
+
+            sp::Frame points;
+            const auto filtered = on.process(frame, {}, &points);
+            const auto converted = elevsafe::toTrackingDetections(filtered);
+            const std::size_t kept = sample.retained ? 1 : 0;
+            expect(filtered.clusters.size() == kept && converted.detections.size() == kept,
+                "B ghost boundary or A detection count mismatch");
+            const auto expectedId = sample.retained ? filtered.clusters[0].cluster_id : -1;
+            expect(points.size() == radar.points.size(), "B lost processed points in ghost filter");
+            for (const auto& point : points)
+                expect(point.cluster_id == expectedId, "B ghost/noise point label mismatch");
+            if (sample.retained)
+            {
+                const auto& detection = converted.detections[0];
+                expect(detection.cluster == expectedId && detection.n_points == sample.points
+                    && detection.mean_power == 10.0, "A altered retained B cluster ID, count or power");
+            }
+            else ++removed;
+
+            const auto observed = tracking.observe(filtered);
+            expect(tracking.processedFrames() == i + 1 && observed.frame == frame.frame_id
+                && observed.timestamp_us == frame.timestamp_us, "C skipped or repeated a B frame after ghost filtering");
+        }
+        expect(on.stats().ghosts == removed && off.stats().ghosts == 0, "B ghost removal counters mismatch");
+        std::cout << "B GhostFilter -> A -> C PASS: 19/20/39, rear 59/60, radial in/out, OFF and empty frame\n";
+    }
 
     void testPeriodicSnapshotSchedule()
     {
@@ -261,12 +327,33 @@ int main(int argc, char** argv)
         c.z_min = .25f; c.z_max = 2.25f; c.num_points = 40; c.mean_doppler = .5f;
         c.power_sum = 100.0f;
         c.zone = elevsafe::sp::Zone::CABIN; c.z_top = 1.75f; c.maybe_merged = true;
-        auto small = c; small.num_points = 39;
-        b.clusters = {small, c};
+        constexpr int pointCounts[] = {1, 10, 39, 40, 100};
+        auto invalid = c;
+        for (const int count : {0, -1})
+        {
+            invalid.num_points = count;
+            b.clusters.push_back(invalid);
+        }
+        for (std::size_t i = 0; i < std::size(pointCounts); ++i)
+        {
+            auto cluster = c;
+            cluster.cluster_id = 34 + static_cast<int>(i);
+            cluster.num_points = pointCounts[i];
+            b.clusters.push_back(cluster);
+        }
         const auto fd = elevsafe::toTrackingDetections(b);
         expect(fd.frame == b.frame_id && fd.timestamp_us == b.timestamp_us, "frame/time changed");
-        expect(fd.detections.size() == 1, "39/40 filter boundary");
-        const auto& d = fd.detections.front();
+        expect(fd.detections.size() == std::size(pointCounts), "positive counts retained and invalid counts discarded");
+        for (std::size_t i = 0; i < std::size(pointCounts); ++i)
+        {
+            const auto& detection = fd.detections[i];
+            expect(detection.cluster == 34 + static_cast<int>(i) && detection.n_points == pointCounts[i],
+                "cluster ID, point count or order changed");
+            expect(std::abs(detection.mean_power - 100.0 / pointCounts[i]) < 1e-12
+                && detection.cx == c.cx && detection.cy == c.cy && detection.cz == c.cz
+                && detection.zone == elevsafe::DetZone::CABIN, "mean power, coordinates or zone changed");
+        }
+        const auto& d = fd.detections[3];
         expect(d.cluster == 37 && d.cx == .25 && d.cy == -.5 && d.cz == 1.25,
             "centroid or cluster mapping");
         expect(d.sx == .5 && d.sy == 1 && d.sz == 2 && d.zmin == .25 && d.zmax == 2.25,
@@ -360,20 +447,29 @@ int main(int argc, char** argv)
         b.clusters.clear(); b.timestamp_us += 100000;
         auto empty = demo.process(b, zero + 300ms, utc + 3s);
         expect(empty && Json::parse(*empty)["passengers"].empty(), "empty input did not remove LOST");
+        expect(demo.processedFrames() == 5, "empty B result did not reach C exactly once");
         b.clusters = {c}; b.timestamp_us = 0;
         Demo newSession;
         expect(Json::parse(*newSession.process(b, zero, utc))["passengers"].empty(), "session history leaked");
         TrackOutput inside; inside.state = TrackState::CONFIRMED; inside.id = 8; inside.y = 0;
         TrackOutput lost = inside; lost.state = TrackState::LOST;
         TrackOutput tentative = inside; tentative.state = TrackState::TENTATIVE;
-        for (auto state : {elevsafe::sp::DoorState::OPEN, elevsafe::sp::DoorState::CLOSED,
-                elevsafe::sp::DoorState::UNKNOWN})
+        struct DoorCase { DoorState state; const char* text; DoorCommand crossing; };
+        constexpr std::array doorCases{
+            DoorCase{DoorState::UNKNOWN, "UNKNOWN", DoorCommand::NONE},
+            DoorCase{DoorState::CLOSED, "CLOSED", DoorCommand::NONE},
+            DoorCase{DoorState::OPEN, "OPEN", DoorCommand::HOLD},
+            DoorCase{DoorState::OPENING, "OPENING", DoorCommand::HOLD},
+            DoorCase{DoorState::CLOSING, "CLOSING", DoorCommand::HOLD},
+        };
+        for (const auto& door : doorCases)
         {
-            b.estimated_door_state = state;
+            b.estimated_door_state = door.state;
             json = Json::parse(elevsafe::trackingSnapshot(b, {inside, lost, tentative}, utc));
             expect(json["passengers"].size() == 1 && json["passengers"][0]["state"] == "INSIDE"
                 && json["passengers"][0]["safety_state"].is_null()
-                && json["door_state"] == elevsafe::sp::doorStateToString(state), "state/filter contract");
+                && json.size() == 5 && json["timestamp_us"] == b.timestamp_us
+                && json["door_command"].is_null() && json["door_state"] == door.text, "five-state v7 contract");
         }
         elevsafe::sp::PipelineResult series;
         auto sample = c;
@@ -392,6 +488,40 @@ int main(int argc, char** argv)
             series.timestamp_us += 100000;
             return result;
         };
+        for (const auto& door : doorCases)
+        {
+            Demo crossing;
+            series = {};
+            series.hall_enabled = true;
+            sample.zone = Zone::HALL;
+            sample.cy = -.5f;
+            for (int i = 0; i < 4; ++i) observe(crossing, DoorState::OPEN);
+            sample.zone = Zone::DOOR;
+            sample.cy = -.4f;
+            const auto entered = observe(crossing, door.state);
+            expect(entered.door_command == door.crossing && crossing.processedFrames() == 5,
+                "B state did not reach C with the expected crossing decision");
+            expect(entered.tracks.size() == 1 && entered.tracks[0].state == TrackState::CONFIRMED,
+                "crossing fixture failed to create a confirmed track");
+            if (door.state == DoorState::CLOSING)
+            {
+                const auto id = entered.tracks[0].id;
+                for (const auto& reversal : {doorCases[3], doorCases[2]})
+                {
+                    const auto result = observe(crossing, reversal.state);
+                    auto snapshot = series;
+                    snapshot.timestamp_us = result.timestamp_us;
+                    snapshot.estimated_door_state = reversal.state;
+                    const auto payload = Json::parse(elevsafe::trackingSnapshot(snapshot, result.tracks, utc));
+                    expect(result.door_command == DoorCommand::HOLD && result.tracks.size() == 1
+                        && result.tracks[0].id == id && payload["door_state"] == reversal.text,
+                        "B direction reversal changed C HOLD or folded a D state");
+                }
+            }
+        }
+        series = {};
+        sample.zone = Zone::HALL;
+        sample.cy = -.5f;
         FrameResult observed;
         for (int i = 0; i < 4; ++i) observed = observe(phases, DoorState::OPEN);
         expect(observed.tracks.empty(), "disabled HALL produced a C track");
@@ -468,6 +598,7 @@ int main(int argc, char** argv)
         expect(argc == 2, "signal fixture config required");
         elevsafe::sp::Config config; expect(config.load(argv[1]), "fixture config load");
         elevsafe::sp::SignalPipeline signal(config); expect(signal.ok(), "B init");
+        testGhostFilterIntegration(config, std::filesystem::path(argv[1]).parent_path() / "tracking_ghost_filter_on.cfg");
         Demo realB;
         for (int i = 0; i < 3; ++i)
         {
@@ -486,7 +617,7 @@ int main(int argc, char** argv)
             auto snapshot = realB.process(result, zero + i * 100ms, utc);
             if (i == 2) expect(Json::parse(*snapshot)["passengers"].size() == 1, "A-B-C path failed");
         }
-        std::cout << "tracking_adapter_test PASS: mapping, 39/40, all-frame C, door arbitration, HALL, Phase/Safety, IDs, empty, UTC, v7, session reset, real A-B-C\n";
+        std::cout << "tracking_adapter_test PASS: positive-count mapping, five door states, all-frame C, door arbitration, HALL, Phase/Safety, IDs, empty, UTC, v7, session reset, real A-B-C\n";
         return 0;
     }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

@@ -1,5 +1,6 @@
 #include "elevsafe/websocket_server.h"
 #include "elevsafe/websocket_message.h"
+#include "remote_door_control.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -11,6 +12,7 @@
 #include <future>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <syncstream>
 #include <thread>
 #include <unordered_map>
@@ -45,6 +47,7 @@ namespace elevsafe
         bool notificationPending = false;
         std::mutex commandMutex;
         std::deque<ManualDoorRequest> commands;
+        std::optional<RemoteDoorControl> remoteControl;
         bool manualCommandsEnabled = true; // Protected by commandMutex.
         std::atomic<std::size_t> connected{0}, accepted{0}, sent{0}, ingressDrops{0}, sessionDrops{0};
         std::atomic<std::size_t> received{0}, rejected{0}, queueFull{0};
@@ -55,11 +58,16 @@ namespace elevsafe
         std::future<void> ioFinishedFuture{ioFinished.get_future()};
         std::thread thread;
 
-        Impl(WebSocketConfig value, std::ostream& output) : config(std::move(value)), log(output) {}
+        Impl(WebSocketConfig value, std::ostream& output) : config(std::move(value)), log(output)
+        {
+            if (!config.remoteControlToken.empty()) remoteControl.emplace(config.remoteControlTtlMs);
+        }
+        void postControl(std::uint64_t client, RemoteDoorControl::Json payload);
         void accept();
         void deliver();
         void shutdown(bool force = false);
         void run(bool finalDrain = false);
+        void failWorker(const char* message);
         std::string pendingWork() const;
         void writeLog(const std::string& text)
         {
@@ -81,6 +89,8 @@ namespace elevsafe
         net::steady_timer closeTimer;
         Message active;
         Message pending;
+        std::deque<Message> controlOutbox;
+        bool control = false;
         std::uint64_t writeGeneration = 0;
         bool ready = false;
         bool stopping = false;
@@ -104,21 +114,26 @@ namespace elevsafe
                     if (error) return self->finish("HTTP read", error);
                     if (self->finished) return;
                     const auto& request = self->parser.get();
-                    if (request.target() != "/radar" || !ws::is_upgrade(request))
+                    const bool controlPath = request.target() == "/control-local";
+                    const bool known = request.target() == "/radar" ||
+                        (controlPath && self->owner.remoteControl.has_value());
+                    if (!known) return self->rejectUpgrade(http::status::not_found, request.version());
+                    if (!ws::is_upgrade(request)) return self->rejectUpgrade(http::status::bad_request, request.version());
+                    if (controlPath)
                     {
-                        auto response = std::make_shared<http::response<http::string_body>>(
-                            request.target() != "/radar" ? http::status::not_found : http::status::bad_request,
-                            request.version());
-                        response->set(http::field::content_type, "text/plain");
-                        response->body() = "WebSocket endpoint is /radar\n";
-                        response->prepare_payload();
-                        http::async_write(self->stream.next_layer(), *response,
-                            [self, response](Error error, std::size_t) { self->finish("HTTP rejected", error); });
-                        return;
+                        const auto header = request[http::field::authorization];
+                        if (!RemoteDoorControl::authorized({header.data(), header.size()},
+                                self->owner.config.remoteControlToken))
+                            return self->rejectUpgrade(http::status::forbidden, request.version());
+                        std::lock_guard lock(self->owner.commandMutex);
+                        if (!self->owner.remoteControl->claim(self->id))
+                            return self->rejectUpgrade(http::status::conflict, request.version());
+                        self->control = true;
                     }
                     beast::get_lowest_layer(self->stream).expires_never();
                     self->stream.set_option(ws::stream_base::timeout::suggested(beast::role_type::server));
-                    self->stream.read_message_max(self->owner.config.maxRequestBytes);
+                    self->stream.read_message_max(self->control
+                        ? self->owner.config.maxControlBytes : self->owner.config.maxRequestBytes);
                     self->stream.async_accept(request, [self](Error error)
                     {
                         if (error) return self->finish("handshake", error);
@@ -132,10 +147,27 @@ namespace elevsafe
                 });
         }
 
+        void rejectUpgrade(http::status status, unsigned version)
+        {
+            auto response = std::make_shared<http::response<http::string_body>>(status, version);
+            response->set(http::field::content_type, "text/plain");
+            response->body() = status == http::status::forbidden || status == http::status::conflict
+                ? "WebSocket upgrade rejected\n" : "WebSocket endpoint is /radar\n";
+            response->prepare_payload();
+            http::async_write(stream.next_layer(), *response,
+                [self = shared_from_this(), response](Error error, std::size_t) { self->finish("HTTP rejected", error); });
+        }
+
         void finish(const char* where, Error error = {})
         {
             if (finished) return;
             finished = true;
+            if (control)
+            {
+                std::lock_guard lock(owner.commandMutex);
+                owner.remoteControl->disconnect(id);
+                controlOutbox.clear();
+            }
             Error ignored;
             writeTimer.cancel(ignored);
             closeTimer.cancel(ignored);
@@ -152,13 +184,18 @@ namespace elevsafe
             {
                 --owner.connected;
                 ++owner.disconnected;
-                owner.writeLog("disconnected client=" + std::to_string(id) + " reason=" + where);
             }
-            if (error && error != net::error::operation_aborted && error != ws::error::closed)
-                owner.writeLog(std::string(where) + " client=" + std::to_string(id)
-                    + " code=" + std::to_string(error.value()) + " category=" + error.category().name()
-                    + " message=" + error.message());
             owner.sessions.erase(id);
+            // Diagnostics must not interrupt cancellation, including the forced drain.
+            try
+            {
+                if (ready) owner.writeLog("disconnected client=" + std::to_string(id) + " reason=" + where);
+                if (error && error != net::error::operation_aborted && error != ws::error::closed)
+                    owner.writeLog(std::string(where) + " client=" + std::to_string(id)
+                        + " code=" + std::to_string(error.value()) + " category=" + error.category().name()
+                        + " message=" + error.message());
+            }
+            catch (...) {}
         }
 
         void read()
@@ -172,8 +209,23 @@ namespace elevsafe
                 }
                 if (self->finished || self->stopping) return;
                 const auto text = beast::buffers_to_string(self->input.data());
-                const auto command = self->stream.got_text() ? parseDoorRequest(text) : std::nullopt;
                 self->input.consume(self->input.size());
+                if (self->control)
+                {
+                    if (!self->stream.got_text()) return self->finish("invalid control payload");
+                    std::optional<RemoteDoorControl::Json> reply;
+                    try
+                    {
+                        std::lock_guard lock(self->owner.commandMutex);
+                        reply = self->owner.remoteControl->receive(self->id, text);
+                    }
+                    catch (const std::invalid_argument&) { return self->finish("invalid control payload"); }
+                    catch (const RemoteDoorControl::Json::exception&) { return self->finish("invalid control payload"); }
+                    if (reply) self->offerControl(std::make_shared<const std::string>(reply->dump()));
+                    self->read();
+                    return;
+                }
+                const auto command = self->stream.got_text() ? parseDoorRequest(text) : std::nullopt;
                 if (!command && self->stream.got_text() && self->owner.config.allowNullDoorRequest
                     && isNullDoorRequest(text))
                 {
@@ -191,7 +243,8 @@ namespace elevsafe
                     bool enabled;
                     {
                         std::lock_guard lock(self->owner.commandMutex);
-                        enabled = self->owner.manualCommandsEnabled;
+                        const auto& control = self->owner.remoteControl;
+                        enabled = self->owner.manualCommandsEnabled && !(control && control->hasPriority());
                         full = enabled && self->owner.commands.size() >= self->owner.config.maxCommands;
                         if (enabled && !full) self->owner.commands.push_back({self->id, *command});
                     }
@@ -210,16 +263,32 @@ namespace elevsafe
                     else
                     {
                         ++self->owner.rejected;
-                        self->owner.writeLog("manual request ignored: no active command window");
+                        self->owner.writeLog("manual request ignored: no active command window or remote priority");
                     }
                 }
                 self->read();
             });
         }
 
+        void offerControl(Message message)
+        {
+            if (!ready || stopping || finished || !control) return;
+            if (message->size() > owner.config.maxControlBytes || controlOutbox.size() >= 8)
+                return finish("control output limit");
+            if (active)
+            {
+                controlOutbox.push_back(std::move(message));
+                return;
+            }
+            pending = std::move(message);
+            const auto count = ++owner.sessionPending;
+            owner.peakPending.store(std::max(owner.peakPending.load(), count));
+            write();
+        }
+
         void offer(Message message)
         {
-            if (!ready || stopping || finished) return;
+            if (!ready || stopping || finished || control) return;
             if (pending) ++owner.sessionDrops;
             else
             {
@@ -258,10 +327,16 @@ namespace elevsafe
                     --self->owner.activeWrites;
                     if (error) ++self->owner.discarded;
                     if (error) return self->finish("write", error);
-                    ++self->owner.sent;
+                    if (!self->control) ++self->owner.sent;
                     if (self->finished) return;
                     if (self->stopping) return self->closeHandshake();
-                    if (self->pending) self->write();
+                    if (!self->controlOutbox.empty())
+                    {
+                        auto next = std::move(self->controlOutbox.front());
+                        self->controlOutbox.pop_front();
+                        self->offerControl(std::move(next));
+                    }
+                    else if (self->pending) self->write();
                 });
             }
             catch (...)
@@ -299,6 +374,20 @@ namespace elevsafe
             if (!active) closeHandshake();
         }
     };
+
+    void WebSocketServer::Impl::postControl(std::uint64_t client, RemoteDoorControl::Json payload)
+    {
+        if (!running) return;
+        auto message = std::make_shared<const std::string>(payload.dump());
+        net::post(io, [this, client, message = std::move(message)]
+        {
+            if (!running) return;
+            const auto session = sessions.find(client);
+            if (session == sessions.end()) return;
+            auto current = session->second;
+            current->offerControl(message);
+        });
+    }
 
     void WebSocketServer::Impl::accept()
     {
@@ -351,6 +440,11 @@ namespace elevsafe
             ingressPending = 0;
             notificationPending = false;
         }
+        {
+            std::lock_guard lock(commandMutex);
+            manualCommandsEnabled = false;
+            commands.clear();
+        }
         Error ignored;
         acceptor.cancel(ignored);
         acceptor.close(ignored);
@@ -372,6 +466,14 @@ namespace elevsafe
             + " activeWrites=" + std::to_string(activeWrites.load());
     }
 
+    void WebSocketServer::Impl::failWorker(const char* message)
+    {
+        running = false;
+        shutdown(true);
+        try { writeLog(std::string("I/O handler failed; canceled pending work: ") + message); }
+        catch (...) {} // Preserve teardown even if the diagnostic stream fails.
+    }
+
     void WebSocketServer::Impl::run(bool finalDrain)
     {
         auto nextReport = std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -391,18 +493,8 @@ namespace elevsafe
                 }
                 return;
             }
-            catch (const std::exception& error)
-            {
-                running = false;
-                writeLog(std::string("I/O handler failed; canceling pending work: ") + error.what());
-                shutdown(true);
-            }
-            catch (...)
-            {
-                running = false;
-                writeLog("Unknown I/O handler exception; canceling pending work");
-                shutdown(true);
-            }
+            catch (const std::exception& error) { failWorker(error.what()); }
+            catch (...) { failWorker("unknown exception"); }
             // Asio permits re-entering run() after a handler throws. Only drain
             // canceled work here: running is false, so no connections restart.
         }
@@ -424,7 +516,13 @@ namespace elevsafe
                 || state.config.maxSnapshotBytes == 0 || state.config.maxRequestBytes == 0)
                 throw std::invalid_argument("WebSocket limits must be positive");
             const Tcp::endpoint endpoint(net::ip::make_address(state.config.address), state.config.port);
+            if (state.remoteControl && (!endpoint.address().is_loopback() ||
+                !RemoteDoorControl::validToken(state.config.remoteControlToken) ||
+                state.config.remoteControlTtlMs <= 250 || state.config.remoteControlTtlMs > 10000 ||
+                state.config.maxControlBytes < 512 || state.config.maxControlBytes > 4096))
+                throw std::invalid_argument("Invalid loopback control configuration");
             Error error;
+            const int backlog = static_cast<int>(std::min<std::size_t>(state.config.maxClients, 128));
             const char* stage = "open";
             state.acceptor.open(endpoint.protocol(), error);
             if (!error)
@@ -436,16 +534,26 @@ namespace elevsafe
             {
                 stage = "listen";
                 // A finite backlog matches our client bound and avoids provider-specific SOMAXCONN handling.
-                state.acceptor.listen(static_cast<int>(std::min<std::size_t>(state.config.maxClients, 128)), error);
+                state.acceptor.listen(backlog, error);
             }
             if (error)
             {
+                // Preserve the original failure even if querying the bound endpoint fails.
+                Error endpointError;
+                const auto bound = state.acceptor.local_endpoint(endpointError);
                 Error ignored;
                 state.acceptor.close(ignored);
                 throw boost::system::system_error(error, std::string("WebSocket ") + stage + " failed: "
-                    + state.config.address + ':' + std::to_string(state.config.port));
+                    + state.config.address + ':' + std::to_string(state.config.port)
+                    + " family=" + (endpoint.address().is_v4() ? "IPv4" : "IPv6")
+                    + " address_length=" + std::to_string(endpoint.size())
+                    + " bound_port=" + (endpointError ? std::string("unavailable") : std::to_string(bound.port()))
+                    + (std::string_view(stage) == "listen" ? " backlog=" + std::to_string(backlog) : ""));
             }
-            state.boundPort = state.acceptor.local_endpoint().port();
+            state.boundPort = state.acceptor.local_endpoint(error).port();
+            if (error)
+                throw boost::system::system_error(error, "WebSocket local_endpoint failed: "
+                    + state.config.address + ':' + std::to_string(state.config.port));
             state.running = true;
             state.accept();
             state.thread = std::thread([&state]
@@ -467,7 +575,18 @@ namespace elevsafe
         auto& state = *m_impl;
         if (!state.started) return;
         if (!state.thread.joinable() && state.shutdownStarted && state.io.stopped()) return;
-        state.writeLog("stop.request" + state.pendingWork());
+        const auto reportStop = [&state](const char* phase, bool includeWork, long long elapsedMs = -1) noexcept
+        {
+            try
+            {
+                std::string message(phase);
+                if (elapsedMs >= 0) message += " elapsedMs=" + std::to_string(elapsedMs);
+                if (includeWork) message += state.pendingWork();
+                state.writeLog(message);
+            }
+            catch (...) {} // Logging must not prevent join or cleanup.
+        };
+        reportStop("stop.request", true);
         {
             std::lock_guard lock(state.ingressMutex);
             state.running = false;
@@ -483,42 +602,92 @@ namespace elevsafe
             {
                 const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - start).count();
-                state.writeLog("stop.thread.wait elapsedMs=" + std::to_string(elapsed) + state.pendingWork());
+                reportStop("stop.thread.wait", true, elapsed);
             }
             state.thread.join();
-            state.writeLog("stop.thread.joined");
+            reportStop("stop.thread.joined", false);
         }
         // Also covers failed startup and an I/O thread that already exited.
         state.io.restart();
         state.shutdown(true);
         state.run(true);
-        state.writeLog("stop.complete" + state.pendingWork());
+        reportStop("stop.complete", true);
     }
 
     bool WebSocketServer::publishSnapshot(std::string message)
     {
         auto& state = *m_impl;
-        if (message.size() > state.config.maxSnapshotBytes || !isSnapshot(message)) return false;
+        if (!state.running || message.size() > state.config.maxSnapshotBytes || !isSnapshot(message)) return false;
         auto owned = std::make_shared<const std::string>(std::move(message));
         std::lock_guard lock(state.ingressMutex);
         if (!state.running) return false;
+        // Post before committing the slot. The handler must acquire ingressMutex,
+        // so a failed post leaves no undeliverable snapshot or stuck notification.
+        if (!state.notificationPending)
+        {
+            net::post(state.io, [&state] { state.deliver(); });
+            state.notificationPending = true;
+        }
         if (state.latest) ++state.ingressDrops;
         state.latest = std::move(owned);
         state.ingressPending = 1;
         state.peakIngress = 1;
-        if (!state.notificationPending)
-        {
-            state.notificationPending = true;
-            net::post(state.io, [&state] { state.deliver(); });
-        }
         return true;
     }
 
     void WebSocketServer::setManualCommandsEnabled(bool enabled)
     {
-        std::lock_guard lock(m_impl->commandMutex);
-        m_impl->manualCommandsEnabled = enabled;
-        if (!enabled) m_impl->commands.clear();
+        std::size_t discarded = 0;
+        bool changed;
+        {
+            std::lock_guard lock(m_impl->commandMutex);
+            changed = m_impl->manualCommandsEnabled != enabled;
+            m_impl->manualCommandsEnabled = enabled;
+            if (!enabled)
+            {
+                if (m_impl->remoteControl) m_impl->remoteControl->releasePriority();
+                discarded = m_impl->commands.size();
+                m_impl->commands.clear();
+            }
+        }
+        if (changed || discarded)
+        {
+            try
+            {
+                m_impl->writeLog(std::string("manual command window=") + (enabled ? "open" : "closed")
+                    + " discarded=" + std::to_string(discarded));
+            }
+            catch (...) {} // Queue state is already committed.
+        }
+    }
+
+    void WebSocketServer::updateRemoteDoor(bool active, std::string_view reason)
+    {
+        auto& state = *m_impl;
+        if (!state.remoteControl) return;
+        std::lock_guard lock(state.commandMutex);
+        auto& control = *state.remoteControl;
+        if (!control.update(active, reason)) return;
+        const auto client = control.boundClient();
+        if (!client) return;
+        if (auto cancelled = control.invalidate()) state.postControl(*client, std::move(*cancelled));
+        state.postControl(*client, control.readiness());
+    }
+
+    bool WebSocketServer::applyRemoteDoor(const std::function<bool(const ManualDoorRequest&, bool)>& consume,
+        bool motionFinished)
+    {
+        auto& state = *m_impl;
+        if (!state.remoteControl) return false;
+        std::lock_guard lock(state.commandMutex);
+        auto& control = *state.remoteControl;
+        if (motionFinished) control.releasePriority();
+        const auto client = control.boundClient();
+        std::optional<RemoteDoorControl::Json> reply;
+        const bool applied = client && control.apply(consume, reply);
+        if (control.hasPriority()) state.commands.clear();
+        if (reply) state.postControl(*client, std::move(*reply));
+        return applied;
     }
 
     std::optional<ManualDoorRequest> WebSocketServer::popCommand()

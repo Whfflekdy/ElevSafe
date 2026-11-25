@@ -26,7 +26,10 @@ namespace elevsafe
         {
             switch (state)
             {
-            case sp::DoorState::OPEN: return DoorState::OPEN;
+            case sp::DoorState::OPEN:
+            case sp::DoorState::OPENING:
+            case sp::DoorState::CLOSING:
+                return DoorState::OPEN;
             case sp::DoorState::CLOSED: return DoorState::CLOSED;
             case sp::DoorState::UNKNOWN: return DoorState::UNKNOWN;
             }
@@ -43,7 +46,7 @@ namespace elevsafe
         frame.detections.reserve(result.clusters.size());
         for (const auto& cluster : result.clusters)
         {
-            if (cluster.num_points < 40) continue; // Demo-only threshold; B/C stay unchanged.
+            if (cluster.num_points <= 0) continue; // B clusters must contain at least one point.
             Detection detection;
             detection.cluster = cluster.cluster_id;
             detection.cx = cluster.cx; detection.cy = cluster.cy; detection.cz = cluster.cz;

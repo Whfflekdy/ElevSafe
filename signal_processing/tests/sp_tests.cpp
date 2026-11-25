@@ -6,6 +6,7 @@
 #include "clustering/peak_splitter.h"
 #include "preprocessing/door_state_estimator.h"
 #include "preprocessing/roi_filter.h"
+#include "pipeline/signal_pipeline.h"
 
 using namespace elevsafe::sp;
 
@@ -209,14 +210,14 @@ void testDoorMotion() {
     EXPECT(d.state() == DoorState::UNKNOWN);                            // 근거 없음
 
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));  // 열리는 중 (0.5초 300점)
-    EXPECT(d.state() == DoorState::OPEN);
+    EXPECT(d.state() == DoorState::OPENING);                            // (OPEN → OPENING)
     for (int i = 0; i < 20; ++i) d.update(Frame{});                    // 열린 채 멈춤, 승강장 비어 있음
-    EXPECT(d.state() == DoorState::OPEN);                               // 예전 방식이면 CLOSED가 됐을 상황
+    EXPECT(d.state() == DoorState::OPEN);                               // 그대로
 
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f)); // 닫히는 중
-    EXPECT(d.state() == DoorState::OPEN);                               // 아직 덜 닫힘
+    EXPECT(d.state() == DoorState::CLOSING);                            // (OPEN → CLOSING)
     for (int i = 0; i < 20; ++i) d.update(Frame{});                    // 다 닫힘
-    EXPECT(d.state() == DoorState::CLOSED);
+    EXPECT(d.state() == DoorState::CLOSED);                             // 그대로
 }
 
 void testDoorMotionReopen() {
@@ -229,9 +230,50 @@ void testDoorMotionReopen() {
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, 0.15f));   // 열림
     for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
     for (int i = 0; i < 10; ++i) d.update(doorLeafPoints(30, -0.15f));  // 닫히는 중
+    EXPECT(d.state() == DoorState::CLOSING);
     for (int i = 0; i < 6; ++i)  d.update(doorLeafPoints(30, 0.15f));   // 멈추지 않고 바로 다시 열림
-    for (int i = 0; i < 20; ++i) d.update(Frame{});                     // 열린 채 멈춤
+    for (int i = 0; i < 4; ++i)  d.update(Frame{});                     // 창 평균이 반대 방향으로 넘어감
+    EXPECT(d.state() == DoorState::OPENING);                             // 다시 열리는 중으로 바뀜 (A 리뷰, PR #58)
+    for (int i = 0; i < 16; ++i) d.update(Frame{});                     // 열린 채 멈춤
     EXPECT(d.state() == DoorState::OPEN);   // 누적 합이었다면 −45+27 = −18 → CLOSED로 틀림
+}
+
+// 유령 거르기: 크기 규칙과 위치 규칙 (센서 (-0.65, 1.31), 뒷벽 띠 y ≥ 1.30)
+void testGhostFilter() {
+    GhostFilterConfig g;
+    g.enabled = true;
+    g.sensor_x = -0.65f;
+    g.sensor_y = 1.31f;
+    auto cl = [](float cx, float cy, int n) { Cluster c; c.cx = cx; c.cy = cy; c.num_points = n; return c; };
+
+    EXPECT(g.isGhost(cl(0.0f, 0.8f, 19)));      // 캐빈 가운데라도 20점 미만이면 유령
+    EXPECT(!g.isGhost(cl(0.0f, 0.8f, 20)));     // 캐빈 가운데 20점은 사람
+    EXPECT(g.isGhost(cl(0.3f, 1.40f, 59)));     // 뒷벽 띠 59점은 유령
+    EXPECT(!g.isGhost(cl(0.3f, 1.40f, 60)));    // 뒷벽에 기댄 사람 (60점 이상)은 남김
+    EXPECT(g.isGhost(cl(-0.55f, 1.0f, 40)));    // 센서 아래(수평 0.33 m) 40점은 유령
+    EXPECT(!g.isGhost(cl(-0.10f, 1.0f, 40)));   // 센서에서 0.63 m 떨어진 40점은 사람
+
+    // HALL 문 규칙: 문이 열려 있지 않으면(CLOSED·UNKNOWN) HALL 덩어리는 유령
+    Cluster hall = cl(0.3f, -1.0f, 100);
+    hall.zone = Zone::HALL;
+    EXPECT(!g.isGhost(hall, DoorState::CLOSED));        // 규칙 꺼짐이면 그대로
+    g.hall_needs_open = true;
+    EXPECT(g.isGhost(hall, DoorState::CLOSED));
+    EXPECT(g.isGhost(hall, DoorState::UNKNOWN));
+    EXPECT(!g.isGhost(hall, DoorState::OPEN));
+    EXPECT(!g.isGhost(hall, DoorState::OPENING));
+    EXPECT(!g.isGhost(hall, DoorState::CLOSING));
+    Cluster cabin = cl(0.3f, 0.8f, 100);
+    cabin.zone = Zone::CABIN;
+    EXPECT(!g.isGhost(cabin, DoorState::CLOSED));       // CABIN 은 문 규칙과 무관
+
+    // 문턱 띠 규칙: 문짝 덩어리(작음)는 빼고, 문턱을 지나는 사람(큼)은 남김
+    EXPECT(!g.isGhost(cl(0.37f, 0.0f, 33)));      // 규칙 꺼짐이면 그대로
+    g.door_band = true;
+    EXPECT(g.isGhost(cl(0.37f, 0.0f, 33)));       // 3차 S3-7 문짝 덩어리 (가짜 FALL 원인)
+    EXPECT(g.isGhost(cl(0.0f, -0.30f, 32)));      // 승강장 쪽 문 위 덩어리
+    EXPECT(!g.isGhost(cl(-0.1f, 0.0f, 260)));     // 문턱을 지나는 승객
+    EXPECT(!g.isGhost(cl(0.37f, 0.30f, 33)));     // 문턱 띠 밖(캐빈 쪽)은 크기 규칙만
 }
 
 void run(const char* name, void (*fn)()) {
@@ -255,5 +297,6 @@ int main() {
     run("ROI: HALL 켜짐/꺼짐", testRoiHall);
     run("문 상태: 문짝 움직임", testDoorMotion);
     run("문 상태: 닫히다가 다시 열림", testDoorMotionReopen);
+    run("유령 거르기: 크기·위치·HALL 문·문턱 띠", testGhostFilter);
     return g_failed == 0 ? 0 : 1;
 }

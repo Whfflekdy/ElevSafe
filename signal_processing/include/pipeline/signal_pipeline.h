@@ -5,7 +5,7 @@
 //   PipelineResult r = signal.process(frame, ctx);     // 프레임마다
 //
 // frame: RadarFrame 을 A 의 Adapter 가 바꾼 FrameData (센서 원본 좌표 그대로)
-// 처리 순서: 격자 번호 → 좌표 변환 → 문 상태 추정 → ROI → 정적 배경 제거 → DBSCAN → 덩어리 요약
+// 처리 순서: 격자 번호 → 좌표 변환 → 문 상태 추정 → ROI → 정적 배경 제거 → DBSCAN → 덩어리 요약 → 유령 거르기
 #pragma once
 
 #include <cstdint>
@@ -54,6 +54,34 @@ struct Cluster {
     float z_p50 = 0.0f;        // 점 높이 중앙값 (m). 낙상 높이 분포용
 };
 
+// 유령 덩어리 거르기 (11/24, A 의 시연용 40점 필터를 B 로 옮김)
+//   유령 = 점이 min_points 미만, 또는
+//          중심이 뒷벽 띠(cy ≥ back_y)나 센서 바로 아래(수평 sensor_radius 안)이고 점이 zone_points 미만
+//   근거: 4차 S1 6장면 비교 (tools/dbscan_compare.py). 뒷벽에 기대 선 큰 덩어리(사람)는 zone_points 이상이라 남음
+struct GhostFilterConfig {
+    bool enabled = false;         // 기본은 꺼짐 (cfg 로 켬)
+    int min_points = 20;          // 어디서든 이보다 작으면 유령
+    int zone_points = 60;         // 뒷벽 띠·센서 아래에서는 이보다 작으면 유령
+    float back_y = 1.30f;         // 뒷벽 띠 시작 y (뒷벽은 +1.49)
+    float sensor_x = 0.0f;        // 센서 수평 위치 (cfg 의 sensor.tx, sensor.ty)
+    float sensor_y = 0.0f;
+    float sensor_radius = 0.40f;  // 센서 바로 아래로 볼 수평 반경
+    // HALL 덩어리는 문이 OPEN/OPENING/CLOSING 일 때만 인정 (닫힌 문 너머는 안 보이므로 유령, 11/24)
+    //   근거: 3차 S3-7_t01·S4-4_t01 HALL 켬. 문 CLOSED·UNKNOWN 때 HALL 덩어리 295개 중 진짜 사람 2개
+    bool hall_needs_open = false;
+    // 문턱 띠 규칙: 중심이 문턱 근처(door_y_min ≤ cy ≤ door_y_max, |cx| ≤ door_x)이고 점이 zone_points 미만이면 유령
+    //   문짝·문틀 덩어리(20~50점)가 C 에서 "높이가 떨어진 사람"으로 보여 가짜 FALL 이 나는 것을 막음 (3차 S3-7_t01, 11/24)
+    //   문턱을 지나는 실제 승객은 200점 이상이라 남음
+    bool door_band = false;
+    float door_y_min = -0.35f;
+    float door_y_max = 0.15f;
+    float door_x = 0.60f;
+
+    static GhostFilterConfig fromConfig(const Config& cfg);
+    bool isGhost(const Cluster& c) const;                   // 크기·위치 규칙
+    bool isGhost(const Cluster& c, DoorState door) const;   // + HALL 문 규칙
+};
+
 // B → A: 프레임 하나의 처리 결과
 struct PipelineResult {
     int frame_id = -1;
@@ -73,6 +101,7 @@ struct PipelineStats {
     std::size_t noise = 0;      // 노이즈 점 수 합
     std::size_t splits = 0;                            // PipelineStats 에 추가
     std::size_t merged = 0;
+    std::size_t ghosts = 0;     // 유령 거르기로 뺀 덩어리 수 합
 };
 
 class SignalPipeline {
@@ -88,6 +117,7 @@ public:
                            Frame* processed_points = nullptr);
 
     bool usesBackground() const { return use_bg_; }
+    bool ghostFilterEnabled() const { return ghost_.enabled; }
     const PipelineStats& stats() const { return stats_; }
 
 private:
@@ -105,6 +135,7 @@ private:
     OutlierFilter outlier_;
     DBSCAN dbscan_;
     PeakSplitter splitter_;     
+    GhostFilterConfig ghost_;
     DoorStateEstimator door_est_;   // 프레임 사이 상태를 기억 → process 는 const 아님
     PipelineStats stats_;
 };

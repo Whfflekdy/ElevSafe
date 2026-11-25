@@ -19,6 +19,7 @@ SignalPipeline::SignalPipeline(const Config& cfg)
       outlier_(OutlierConfig::fromConfig(cfg)),
       dbscan_(DBSCANConfig::fromConfig(cfg)),
       splitter_(PeakSplitConfig::fromConfig(cfg)),
+      ghost_(GhostFilterConfig::fromConfig(cfg)),
       door_est_(DoorStateConfig::fromConfig(cfg)) {
     // 설정 검사: ROI 범위와 문 상태 설정이 둘 다 말이 되어야 사용 가능
     // (추정기는 자기 설정을 밖으로 안 보여 주니, 같은 설정을 한 번 더 읽어 검사)
@@ -88,12 +89,66 @@ PipelineResult SignalPipeline::process(const FrameData& frame, const FrameContex
     r.frame_id = frame.frame_id;
     r.timestamp_us = frame.timestamp_us;
     r.clusters = summarize(kept, sr);          // kept 를 넘기기 전에 요약부터!
+
+    // 유령 거르기: 걸린 덩어리는 결과에서 빼고, 그 점은 노이즈(-1)로 표시
+    if (ghost_.enabled) {
+        std::vector<char> drop(static_cast<std::size_t>(sr.num_clusters), 0);
+        std::vector<Cluster> keep;
+        keep.reserve(r.clusters.size());
+        for (const Cluster& c : r.clusters) {
+            if (ghost_.isGhost(c, ds)) {
+                drop[static_cast<std::size_t>(c.cluster_id)] = 1;
+                stats_.ghosts++;
+            } else {
+                keep.push_back(c);
+            }
+        }
+        r.clusters = std::move(keep);
+        for (auto& p : kept)
+            if (p.cluster_id >= 0 && drop[static_cast<std::size_t>(p.cluster_id)]) p.cluster_id = -1;
+    }
     r.estimated_door_state = ds;
     r.hall_enabled = roi_.config().hall_enabled;
 
     // 오프라인용 점 출력 (요약이 끝났으니 이제 넘겨도 됨)
     if (processed_points != nullptr) *processed_points = std::move(kept);
     return r;
+}
+
+// ---------------------------------------------------------------------------
+// 유령 거르기
+// ---------------------------------------------------------------------------
+GhostFilterConfig GhostFilterConfig::fromConfig(const Config& cfg) {
+    GhostFilterConfig g;
+    g.enabled = cfg.getFloat("ghost_filter.enable", 0.0f) != 0.0f;
+    g.min_points = static_cast<int>(cfg.getFloat("ghost_filter.min_points", static_cast<float>(g.min_points)));
+    g.zone_points = static_cast<int>(cfg.getFloat("ghost_filter.zone_points", static_cast<float>(g.zone_points)));
+    g.back_y = cfg.getFloat("ghost_filter.back_y", g.back_y);
+    g.sensor_radius = cfg.getFloat("ghost_filter.sensor_radius", g.sensor_radius);
+    g.hall_needs_open = cfg.getFloat("ghost_filter.hall_needs_open", 0.0f) != 0.0f;
+    g.door_band = cfg.getFloat("ghost_filter.door_band", 0.0f) != 0.0f;
+    g.door_y_min = cfg.getFloat("ghost_filter.door_y_min", g.door_y_min);
+    g.door_y_max = cfg.getFloat("ghost_filter.door_y_max", g.door_y_max);
+    g.door_x = cfg.getFloat("ghost_filter.door_x", g.door_x);
+    g.sensor_x = cfg.getFloat("sensor.tx", 0.0f);
+    g.sensor_y = cfg.getFloat("sensor.ty", 0.0f);
+    return g;
+}
+
+bool GhostFilterConfig::isGhost(const Cluster& c) const {
+    if (c.num_points < min_points) return true;
+    const bool in_door = door_band && c.cy >= door_y_min && c.cy <= door_y_max && std::fabs(c.cx) <= door_x;
+    const bool in_zone = c.cy >= back_y ||
+                         std::hypot(c.cx - sensor_x, c.cy - sensor_y) <= sensor_radius ||
+                         in_door;
+    return in_zone && c.num_points < zone_points;
+}
+
+bool GhostFilterConfig::isGhost(const Cluster& c, DoorState door) const {
+    if (isGhost(c)) return true;
+    if (!hall_needs_open || c.zone != Zone::HALL) return false;
+    const bool open_family = door == DoorState::OPEN || door == DoorState::OPENING || door == DoorState::CLOSING;
+    return !open_family;
 }
 
 // ---------------------------------------------------------------------------

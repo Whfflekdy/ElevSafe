@@ -156,7 +156,9 @@ WebSocket을 활성화하면 transport만 별도의 I/O thread에서 동작합�
 
 설정 로드 및 `SignalPipeline::ok()` 검사를 TCP 연결 전에 수행하며 실패하면 종료합니다.
 연결 세션 동안 B 객체 하나를 유지하고 같은 thread에서 순차 호출합니다.
-`FrameContext::door_state`는 항상 `UNKNOWN`이며 B 추정 결과를 되먹임하지 않습니다.
+합의서 v7에서 `FrameContext`는 빈 확장 구조체입니다. 현재 B 헤더에는
+`door_state`가 기본값 `UNKNOWN`으로 남아 있습니다. A는 이 필드를 읽거나 설정하지 않으며
+B 추정 결과를 다음 프레임에 되먹임하지 않습니다.
 결과 로그에는 frame ID, timestamp, 입력 point 수, cluster 수와 추정 문 상태가 포함됩니다.
 
 프레임 처리의 표준 예외는 frame 번호와 함께 stderr에 기록하고 해당 frame을 건너뜁니다.
@@ -328,6 +330,22 @@ fixture를 제외한 16개입니다.
 & .\backend\tests\repeat_websocket_tests.ps1 -Mode Server -Case queue-bounds-slow-client -Count 20
 & .\backend\tests\repeat_websocket_tests.ps1 -Mode Mock -Count 20
 ```
+
+루트 Windows Release 빌드 경로가 아래와 같다면 수신 복구, 발행 중 종료, 장시간 전송을 별도로 실행할 수 있습니다.
+
+```powershell
+$build = 'backend/build/radar-idle-release'
+$bin = "$build/backend"
+& .\backend\tests\radar_reconnect_fixture.ps1 -BackendExe "$bin/Release/elevsafe_backend.exe" `
+  -SignalConfig backend/tests/data/signal_integration.cfg -Cases idle-recover,idle-limit -Repeat 5
+& .\backend\tests\repeat_websocket_tests.ps1 -BuildDirectory $bin -Case publisher-shutdown -Count 10 -DelayMilliseconds 0
+& .\backend\tests\repeat_websocket_tests.ps1 -BuildDirectory $bin -Case publisher-soak -Count 1 -SoakSeconds 120 -TimeoutSeconds 150
+```
+
+장시간 시험은 약 10Hz로 50KB급 Snapshot을 보내고, 읽지 않는 두 번째 Viewer가 있는 동안
+첫 번째 Viewer의 수신과 종료 후 큐 정리를 확인합니다. `SOAK` 행의 지연은 루프백에서
+메시지 생성 시작부터 빠른 Viewer 수신까지이며 p50/p95/최댓값을 마이크로초로 기록합니다.
+반복 중 실패한 실행과 Winsock 원시 코드는 각각의 로그에 남으며 최종 집계도 실패를 반환합니다.
 
 반복 스크립트는 Windows PowerShell 5.1용이며 기본 프로세스 제한은 45초입니다.
 기본 실행 파일 위치는 통합 빌드이며 다른 빌드는 `-BuildDirectory`로 지정합니다.
@@ -1301,8 +1319,22 @@ B 처리시간은 Parser Benchmark에 포함되지 않습니다. 다만 같은 t
   소켓 정리와 callback 중단은 owner thread에서 수행합니다. select 중에는 최대 100ms,
   재시도 대기 중에는 최대 50ms 간격으로 확인하며 명시적 취소는 코드 0으로 종료합니다.
   진행 중인 B 처리·파일 I/O의 즉시 취소나 강제 종료 시 통계 출력은 보장하지 않습니다.
-- **무응답 TCP의 수신 idle timeout/heartbeat는 구현하지 않았습니다.** 연결 후 데이터가
-  없어도 계속 기다리지만 재연결 모드의 명시적 취소 확인은 유지됩니다.
+- 연결된 Radar가 바이트를 보내지 않을 때도 복구하려면
+  `--radar-reconnect --radar-idle-timeout-ms 5000`처럼 지정합니다. 허용 범위는
+  1–86,400,000ms(24시간)이며 기본값은 비활성화입니다. 첫 수신 전에는 TCP 연결 시각,
+  이후에는 마지막 바이트 수신 시각부터 계산합니다. 부분 패킷이나 파서가 거부한
+  패킷도 바이트가 도착하면 기한을 갱신합니다.
+- 만료 시 `stage=idle_timeout code=0`을 기록하고 기존 재연결 횟수와 예산을
+  사용합니다. 세션 종료 로그는 마지막 바이트와 유효 프레임의 경과 시간 및 파서
+  집계를 표시합니다. 해당 데이터가 한 번도 없으면 경과 시간을 `never`로 기록합니다.
+  0포인트 정상 프레임도 유효 프레임이며 유효 프레임만 정체된 경우에는 복구를 시작하지 않습니다.
+- 소켓 실패 로그는 원시 코드와 호출명을 함께 기록합니다. 연결 실패의 `operation` 값으로
+  `connect`, `select_connect`, `getsockopt_SO_ERROR` 호출 실패와 `connect_SO_ERROR` 결과를 구분할 수 있습니다.
+  WebSocket 리스너 실패에는 요청 주소와 포트, 주소 패밀리, 확인 가능한 실제 할당 포트가 포함됩니다.
+  Winsock 10014의 근본 원인은 미확정이며 기존 재시도 대상은 유지됩니다.
+- `[radar]` 세션 로그에는 종료 이유와 소요 시간, 발행 수가 포함됩니다. Mock/Emulator의
+  `[door-sim] manual` 로그는 접수한 명령의 적용 여부와 가상 상태·모드를 표시합니다.
+  명령 창을 닫을 때 폐기한 FIFO 항목 수는 `[ws] manual command window`에 기록합니다.
 
 매 연결 시도마다 새 RetinaClient·Parser·RelativeFrameClock·BackendPipeline(용량 1)을
 사용합니다. 같은 Config로 새 SignalPipeline을 생성해 문 추정 이력과 누적 통계를 초기화하고
@@ -1453,7 +1485,7 @@ Backend 독립 CTest는 12/14가 통과했습니다. Backend의 WebSocket 서버
 - 실제 센서와 D 화면을 포함한 전체 통합 검증
 - 수동 문 제어 실행 및 ACK
 - Radar 처리의 producer/consumer multithreading
-- 무응답 TCP 수신 idle timeout / heartbeat
+- Radar TCP heartbeat
 - Device Discovery
 - Target Section 상세 Parsing
 
@@ -1472,7 +1504,15 @@ Radar 모드의 `--signal-config PATH --websocket` 조합에서만 활성화하�
 
 매 프레임 `RadarFrame → toSignalFrame → SignalPipeline::process → toTrackingDetections →
 TrackingEngine::processFrame`으로 처리합니다. `processPoints()`나 두 번째 DBSCAN은 호출하지 않습니다.
-Adapter의 `num_points >= 40` 필터를 유지합니다. 중심·bbox·z 범위·점 수·Doppler와
+A의 시연용 40점 필터를 제거했습니다. B가 반환하는 양수 점 개수의 모든 Cluster를
+원래 순서대로 C에 전달합니다. 0점과 음수는 입력 유효성 검사에서 제외합니다.
+PR #60부터 B가 선택적으로 유령 Cluster를 제거합니다. `ghost_filter.enable`의 기본값은 OFF이며,
+3차·4차 실행용 설정에서 ON입니다. 기본 기준은 일반 영역 20점 이상, 뒷벽 띠
+(`cy >= 1.30m`) 또는 센서 수평 반경 0.40m 이내 60점 이상입니다. 센서 위치는
+`sensor.tx`, `sensor.ty`를 사용합니다. B는 제거한 Cluster를 결과에서 제외하고 해당 점의
+`cluster_id`를 `-1`로 표시합니다. A는 B가 남긴 20~39점 Cluster도 C에 전달합니다.
+이 설명은 병합된 코드의 동작을 반영합니다. 공식 A–B–C v8 확정 여부는 별도 확인 대상입니다.
+중심·bbox·z 범위·점 수·Doppler와
 B의 zone, z_top, maybe_merged를 옮기고,
 평균 power는 B의 `power_sum / num_points`를 `mean_power`로 전달합니다. 비유한 합계는
 Detection을 유지하고 평균만 0으로 대체하므로, 이 값으로 실제 평균 0과 미측정을 구분할 수 없습니다.
@@ -1481,7 +1521,26 @@ Detection을 유지하고 평균만 0으로 대체하므로, 이 값으로 실�
 C 객체는 TCP 세션 동안 유지하고 재연결 시 트랙, Phase, Safety 이력을 새로 시작합니다.
 
 Snapshot은 v7의 기존 5개 필드를 사용합니다. `timestamp`는 발행 시점 UTC ISO 문자열,
-`timestamp_us`는 B 결과 그대로, `door_state`는 B 추정값(UNKNOWN 포함), `door_command`는 null입니다.
+일반 Radar에서 `timestamp_us`는 B 결과 그대로이며 `door_command`는 null입니다.
+기본 발행과 `--ws-periodic-snapshot` 모두 D에 B의 원래 `door_state`를 보냅니다.
+C에는 다음 표에 따라 별도로 변환합니다.
+
+| B 추정 상태 | C 입력 | D Snapshot |
+| --- | --- | --- |
+| UNKNOWN | UNKNOWN | UNKNOWN |
+| CLOSED | CLOSED | CLOSED |
+| OPEN | OPEN | OPEN |
+| OPENING | OPEN | OPENING |
+| CLOSING | OPEN | CLOSING |
+
+`door_state.motion_enable=1`인 3차와 4차 실행용 설정은 문짝 Doppler 기반입니다.
+세션에서 처음 문 움직임이 감지되기 전까지 B는 UNKNOWN을 유지합니다.
+`motion_enable=0`인 가시성 방식은 UNKNOWN, OPEN, CLOSED 세 상태를 사용합니다.
+`elevator_3rd_wide.cfg`, `elevator_4th_wide.cfg`는 정지 반사 분석용입니다.
+실시간 승객 추적에는 `elevator_3rd.cfg`, `elevator_4th.cfg` 등 해당 녹화의 실행용 설정을 사용합니다.
+
+Emulator의 가상 문은 별도 규칙을 사용합니다. 가상 OPENING과 MANUAL CLOSING은
+C UNKNOWN으로, AUTO CLOSING은 C OPEN으로 전달합니다. D에는 가상 상태를 그대로 보냅니다.
 `passengers`는 CONFIRMED 공개 Tracking ID와 x/y(m)의 전체 목록입니다. B cluster_id나 센서
 Target ID를 사용하지 않습니다. `state`는 C의 Phase(OUTSIDE, ENTERING, INSIDE, EXITING)이고,
 `safety_state`는 NORMAL일 때 null, 위험 상태일 때 FALL 또는 IMMOBILE입니다.
@@ -1511,8 +1570,20 @@ ctest --test-dir backend/build/demo-root -C Release --output-on-failure
 cmake -S backend -B backend/build/demo-backend -A x64 -DEigen3_DIR=<동일-Eigen3-경로>
 ```
 
-`tracking_adapter_test`는 Detection 매핑과 39·40 경계, HALL, Phase/Safety, 빈 프레임, Tracking ID,
-100ms 발행 제한, 새 세션 초기화 및 실제 B 호출을 검사합니다. Windows의 `tracking_radar_websocket_test`는
+`tracking_adapter_test`는 1·10·39·40·100점 전달과 0 이하 제외, Detection 필드 및 평균 power,
+B 문 상태 5종, C의 문턱 HOLD와 방향 반전, HALL, Phase/Safety, 빈 프레임, Tracking ID,
+100ms 발행 제한, 새 세션 초기화 및 실제 B 호출을 검사합니다. B GhostFilter의 19/20/39점,
+뒷벽 59/60점, 센서 반경 안팎과 OFF 경로를 실제 `SignalPipeline` 입력으로 검증합니다.
+B가 모든 Cluster를 제거한 프레임도 C 호출에 포함합니다.
+`signal_replay_compare_self_test`와 `signal_tcp_compare_self_test`도 CTest에 등록됩니다.
+리플레이는 기존 `frame_id,num_clusters,door_state`와 B v7 `frame_id,timestamp_us,state,hall_enabled`
+기준 CSV를 읽고, 입력 형식에 따라 점검할 수 있는 Cluster 수 또는 타임스탬프와 문 상태를
+비교합니다. 요약의 `open`, `opening`, `closing`은 정확한 상태별 집계이고 `open_family`는
+과거 B 요약과 비교하기 위한 합계입니다. 상태 일치 판정에는 원래 5종 값을 사용합니다.
+기존 3차 CSV를 비교하기 전 기록에 사용된 설정과 `motion_enable`을 확인하세요.
+가시성 방식 CSV에서 문짝 움직임 방식과 값이 달라질 수 있습니다. 기준 파일은 보존하고
+새 측정은 별도 출력 디렉터리에 저장하세요.
+CTest에서 관련 시험만 실행하려면 `ctest --test-dir backend/build/demo-root -C Release -R 'tracking_adapter_test|signal_(replay|tcp)_compare_self_test' --output-on-failure`를 사용합니다. Windows의 `tracking_radar_websocket_test`는
 기존 wire layout의 합성 20Hz TCP 입력 64프레임을 실제 Backend로 보내 두 클라이언트 수신,
 추적 ID·위치·빈 목록·입력 중단 시 발행 중단·EOF 종료를 검사합니다. 이는 FOV 실데이터 시험이 아닙니다.
 C의 CSV 로더 시험에는 별도 입력이 필요합니다. `detection_loader_test`는 `tracking/S0-1_t01.csv`,
@@ -1575,13 +1646,19 @@ Radar TCP 실행에 `--signal-config`, `--websocket`과 함께 `--ws-periodic-sn
 지연된 발행을 한꺼번에 보내지 않습니다. 입력 일시정지 중에는 실제 마지막 `timestamp_us`와
 승객 목록을 유지하고, `timestamp`만 현재 UTC 발행 시각을 사용합니다. B/C는 새 Radar
 프레임에서만 실행합니다. TCP 재연결 대기 및 새 세션의 첫 관측 전에는 발행하지 않습니다.
-이미 WebSocket 큐에 들어간 Snapshot은 송신 중일 수 있습니다.
+세션이 종료되면 해당 세션의 새 발행을 막은 뒤 작업자를 합류시킵니다.
+이전 세션의 Snapshot이 이미 ingress, Viewer 대기열 또는 소켓에 있었다면 늦게 도착할 수 있습니다.
+재연결된 세션은 첫 유효 관측을 받을 때까지 발행하지 않으며 첫 `timestamp_us`는 0입니다.
+`--radar-reconnect --radar-idle-timeout-ms 5000`과 함께 사용할 수 있습니다.
 
 Emulator의 문 동작은 기존 수신 루프가 처리합니다. 적용된 명령은 발행 슬롯에 한 번만 싣고
 다음에 적용 명령이 없으면 `null`입니다. 여러 명령이나 대기 Snapshot은 최신값으로 교체될 수
 있으며 이는 명령 완료 ACK가 아닙니다.
 
-세션 종료 로그의 `[ws-periodic]`은 발행 수와 평균 발행 간격(µs)을 기록합니다.
+세션 종료 로그의 `[ws-periodic]`은 발행 수, 세션 무효화 시점의 enqueue 수,
+평균 발행 간격(µs)을 기록합니다. Radar 입력 중단 중에도 수신 스레드가 작업자 오류를
+확인하고 작업자를 합류시킵니다. 발행 오류는 TCP 재연결 사유로 처리하지 않습니다.
+Emulator 로그의 `C-request`와 `auto-applied`는 C의 요청과 A에서 적용한 명령을 구분합니다.
 이 수치는 Viewer의 수신 간격과 다를 수 있습니다. D에서 오래된 위치 및 세션 시각 초기화
 처리가 완료되기 전까지 명시적으로 필요한 실행에만 옵션을 사용합니다.
 
@@ -1641,3 +1718,33 @@ FOV_t03 원본 및 배경맵 파일은 확인했지만, GUI 도구의 native pip
 파일 선택·재생은 완료하지 못했습니다. 실행 시도한 Emulator는 종료했습니다.
 따라서 실제 FOV Background ON 재생 및 D React 화면 표시는 미검증입니다.
 로그는 Git 제외 `backend/build/abcd-demo-20261111/`에 보존합니다.
+
+
+
+### 외부 관제용 가상 문 접수
+
+--ws-remote-control과 CONTROL_LOCAL_TOKEN을 지정하면 loopback의
+/control-local에서 인증된 Bridge의 원격 요청을 받는다. 지원 모드는
+--emulator-door-sim 또는 시험용 --ws-mock --ws-door-sim이다.
+일반 Radar 관측 모드는 기존 Snapshot 경로를 사용한다.
+
+Emulator에서는 첫 유효 관측 이후 최근 1초 이내의 실제 수신을 요구한다.
+주기 발행이 계속되는 동안에도 새 관측이 없으면 원격 요청을 거부한다.
+UNKNOWN이나 Radar 재연결 대기도 원격 명령을 접수하지 않는다.
+Mock에서는 시험용 상태를 독립적으로 사용한다.
+
+원격 수동, 현장 로컬 수동, C 자동 안전, A 정상 운행 순서로 적용한다.
+원격 OPEN/CLOSE는 진행 중 우선하며 완료 뒤 AUTO로 돌아간다.
+관제 연결 무효화가 감지되면 해당 연결의 원격 우선권과 미적용 요청을
+폐기한다. 진행 중인 동작은 별도 명령이 없으면 정상 완료한다. 이미
+적용한 HOLD는 계속 유지되며 단절이나 정상 운행 타이머가 CLOSE를
+발생시키지 않는다. 새 현장 OPEN/CLOSE 또는 새 유효 원격 요청으로
+제어를 재개한다. Radar TCP 종료 시에는 기존대로 가상 문을 초기화한다.
+
+A는 Relay가 응답한 남은 TTL에서 왕복 경과 전체를 차감하는 방식으로
+단조 시계 기한을 정하고 적용 직전에 만료와 세션을 다시 확인한다.
+확인 응답이 없는 요청은 적용하지 않는다.
+동일한 활성 수동 동작을 새 원격 관제 연결이 인수하면 동작을 재시작하지
+않고 APPLIED를 반환하며 기존 JSON v7 door_command 적용 이벤트를 남긴다.
+동일 소유자의 중복 명령은 거부하고 제어권을 변경하지 않는다.
+인증 및 배포 설정은 deploy/README.md에 설명한다.
