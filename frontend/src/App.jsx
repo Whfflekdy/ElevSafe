@@ -106,10 +106,10 @@ function FloorPlan({ doorState, children }) {
       speed = remainingCm > 0 ? -CLOSE_SPEED : 0;
       duration = remainingCm / CLOSE_SPEED;
     } else if (doorState === 'OPEN') {
-      targetCm = HALF_DOOR_CM; // 덜 열렸어도 백엔드 OPEN 확정 시 즉시 동기화
+      targetCm = HALF_DOOR_CM; // 덜 열렸어도 백엔드 OPEN 확정 시 즉시 완전 열림 동기화
     } else {
       // CLOSED 또는 UNKNOWN
-      targetCm = 0;            // 덜 닫혔어도 백엔드 CLOSED 확정 시 즉시 동기화
+      targetCm = 0;            // 덜 닫혔어도 백엔드 CLOSED 확정 시 즉시 완전 닫힘 동기화
     }
 
     doorAnimRef.current = {
@@ -122,7 +122,15 @@ function FloorPlan({ doorState, children }) {
     };
   }
 
-  const inlineTransition = `transform ${doorAnimRef.current.duration.toFixed(3)}s linear`;
+  const { duration, targetCm } = doorAnimRef.current;
+  // OPEN / CLOSED / UNKNOWN 확정 시에는 애니메이션 없이 즉시 목표 위치로 고정
+  const isMoving = doorState === 'OPENING' || doorState === 'CLOSING';
+  const inlineTransition = isMoving && duration > 0
+    ? `transform ${duration.toFixed(3)}s linear`
+    : 'none';
+
+  // 열림 비율(0 ~ 1): 0이면 완전 닫힘, 1이면 완전 열림
+  const openRatio = targetCm / HALF_DOOR_CM;
   const isDoorOpen = doorState === 'OPEN' || doorState === 'OPENING';
 
   return (
@@ -161,10 +169,22 @@ function FloorPlan({ doorState, children }) {
           height: CONFIG_CM.DOOR_THICKNESS * SCALE,
         }}
       >
-        <div className="plan-door plan-door-left" style={{ transition: inlineTransition }}>
+        <div
+          className="plan-door plan-door-left"
+          style={{
+            transition: inlineTransition,
+            transform: `translateX(-${openRatio * 100}%)`,
+          }}
+        >
           {doorState === 'UNKNOWN' && '문 상태'}
         </div>
-        <div className="plan-door plan-door-right" style={{ transition: inlineTransition }}>
+        <div
+          className="plan-door plan-door-right"
+          style={{
+            transition: inlineTransition,
+            transform: `translateX(${openRatio * 100}%)`,
+          }}
+        >
           {doorState === 'UNKNOWN' && '확인 중'}
         </div>
       </div>
