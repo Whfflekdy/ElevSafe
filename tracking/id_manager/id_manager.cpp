@@ -154,7 +154,8 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         if (t.state == TrackState::LOST) {
             t.state = TrackState::CONFIRMED;
         } else if (t.state == TrackState::TENTATIVE) {
-            if (++t.hits >= cfg_.n_init) confirm(t);
+            const int req_hits = t.seen_non_door ? cfg_.n_init : cfg_.door_only_n_init;
+            if (++t.hits >= req_hits) confirm(t);
         }
     }
 
@@ -185,7 +186,8 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         t.kf = makeFilter(cfg_, ts * 1e-6, d.cx, d.cy, d.cz);
         t.syncState();
         t.z_history.push_back({ts, d.cz});
-        if (t.hits >= cfg_.n_init) confirm(t);
+        const int req_hits = t.seen_non_door ? cfg_.n_init : cfg_.door_only_n_init;
+        if (t.hits >= req_hits) confirm(t);
         tracks_.push_back(std::move(t));
     }
     return tracks_;
