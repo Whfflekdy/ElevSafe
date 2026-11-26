@@ -1,5 +1,6 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect, [switch]$PeriodicIdle)
+param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect, [switch]$PeriodicIdle,
+    [ValidateSet('CLOSED','OPEN','UNKNOWN')][string]$SeedInitial)
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
@@ -16,7 +17,21 @@ if ($DoorArbitration) {
     [IO.File]::WriteAllText($SignalConfig,$config)
 }
 
-function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8) {
+if ($SeedInitial) {
+    # Use the identity transform and two-frame window of signal_integration.cfg.
+    $config = [IO.File]::ReadAllText($SignalConfig) + @"
+
+door_state.motion_enable = 1
+door_state.motion.initial = $SeedInitial
+door_state.motion.z_min = 0.8
+door_state.motion.on = 2
+door_state.motion.off = 0
+"@
+    $SignalConfig = Join-Path $logs 'door-motion.cfg'
+    [IO.File]::WriteAllText($SignalConfig, $config)
+}
+
+function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8, [single]$doppler = 0) {
     # Existing retina_protocol_test / websocket_radar_fixture wire layout, no new protocol.
     $memory = [IO.MemoryStream]::new(); $writer = [IO.BinaryWriter]::new($memory)
     try {
@@ -24,7 +39,7 @@ function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8) {
             [uint32](16 + 24 * $count),[uint32]0,[uint32]0,[uint32]0,[uint32]0)) { $writer.Write($word) }
         $writer.Write([uint64]578437695752307201); $writer.Write($frameId); $writer.Write($count)
         for ($j=0; $j -lt $count; $j++) {
-            foreach ($v in @([single]0.25,$y,[single]1,[single]0,[single]10)) { $writer.Write($v) }
+            foreach ($v in @([single]0.25,$y,[single]1,$doppler,[single]10)) { $writer.Write($v) }
         }
         for ($j=0; $j -lt $count; $j++) { $writer.Write([int32]255) }
         $writer.Flush(); return ,$memory.ToArray()
@@ -67,6 +82,7 @@ try {
     if ($PeriodicSnapshot) { $arguments+='--ws-periodic-snapshot' }
     if ($PeriodicReconnect) { $arguments+=@('--radar-reconnect','--radar-reconnect-eof') }
     if ($PeriodicIdle) { $arguments+=@('--radar-reconnect','--radar-idle-timeout-ms','1800') }
+    if ($SeedInitial) { $arguments+=@('--radar-reconnect','--radar-idle-timeout-ms','1500') }
     if ($PeriodicSnapshot) {
         # MSVC buffers redirected stdout. Give the Backend a console so its existing
         # frame log is visible before EOF; keep stderr and the actual Backend exit code.
@@ -176,6 +192,58 @@ try {
         if ($reset.timestamp_us -ne 0 -or $reset.door_state -ne 'CLOSED' -or $null -ne $reset.door_command -or $reset.passengers.Count -ne 0) {
             throw 'Radar/Tracking or virtual door state leaked across sessions'
         }
+    }
+
+    if ($SeedInitial) {
+        function Check-SeedFrame([int]$frameId, [single]$velocity, [string]$expected) {
+            # Allow the normal 100 ms publication gate to open between observations.
+            if ($frameId -gt 1) { Start-Sleep -Milliseconds 130 }
+            $points = if ($velocity -eq 0) { 0 } else { 2 }
+            $bytes = Packet $frameId $points 0 $velocity
+            $peer.GetStream().Write($bytes, 0, $bytes.Length)
+            $snapshot = Read-SimSnapshot
+            if ($snapshot.door_state -cne $expected -or $null -ne $snapshot.door_command -or
+                ($frameId -eq 1 -and ($snapshot.timestamp_us -ne 0 -or $snapshot.passengers.Count -ne 0))) {
+                throw "Unexpected Snapshot for frame $frameId, expected $expected, got $($snapshot | ConvertTo-Json -Compress)"
+            }
+        }
+        function Next-SeedSession([int]$session, [int]$frames, [string]$last) {
+            $accept = $listener.AcceptTcpClientAsync()
+            Wait-SimLog "session=$session end stage=idle_timeout .* B_frames=$frames .* last_door_state=$last\b"
+            if (!$accept.Wait(6000)) { throw "No reconnect after session $session" }
+            $peer.Dispose()
+            return $accept.GetAwaiter().GetResult()
+        }
+        $stage = "seed.$SeedInitial"
+        $opening = $SeedInitial -ne 'OPEN'
+        $speed = if ($opening) { 0.25 } else { -0.25 }
+        $stable = if ($opening) { 'OPEN' } else { 'CLOSED' }
+        $moving = if ($opening) { 'OPENING' } else { 'CLOSING' }
+        $reverse = if ($opening) { 'CLOSING' } else { 'OPENING' }
+
+        Check-SeedFrame 1 0 $SeedInitial
+        Check-SeedFrame 2 $speed $moving
+        Check-SeedFrame 3 0 $moving
+        Check-SeedFrame 4 0 $stable
+        $peer = Next-SeedSession 1 4 $stable
+        if ($SeedInitial -eq 'UNKNOWN') {
+            Check-SeedFrame 1 0 $stable
+            Check-SeedFrame 2 (-$speed) $reverse
+            $peer = Next-SeedSession 2 2 $reverse
+            Check-SeedFrame 1 0 'UNKNOWN'
+            $peer = Next-SeedSession 3 1 'UNKNOWN'
+        } else {
+            # Session 2 receives no bytes. Session 3 must inherit session 1's output.
+            $peer = Next-SeedSession 2 0 'UNKNOWN'
+            Check-SeedFrame 1 0 $stable
+            Check-SeedFrame 2 (-$speed) $reverse
+            $peer = Next-SeedSession 3 2 $reverse
+        }
+        Check-SeedFrame 1 0 $SeedInitial
+        $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        if (!$child.WaitForExit(4000) -or $child.ExitCode -ne 0) { throw 'Expected clean final EOF' }
+        Write-Host "PASS seed initial=$SeedInitial stable=$stable interrupted=$reverse sessions=4"
+        return
     }
 
     if ($PeriodicSnapshot) {

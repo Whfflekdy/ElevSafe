@@ -680,6 +680,7 @@ int main(int argc, char** argv)
         elevsafe::RadarReconnectBudget retryBudget;
         // Accessed only by the Radar owner thread, including its synchronous callbacks.
         bool arrivalPending = emulatorAutoCycle;
+        std::optional<elevsafe::sp::DoorState> reconnectDoorState;
         for (std::size_t session = 1;; ++session)
         {
             if (reconnectEnabled && radarStop.load(std::memory_order_relaxed)) return 0;
@@ -692,6 +693,7 @@ int main(int argc, char** argv)
                     if (!signal->ok()) throw std::runtime_error("SignalPipeline reinitialization failed");
                     if (signal->usesBackground() != initialBackground)
                         throw std::runtime_error("Background activation changed across Radar sessions");
+                    if (reconnectDoorState) signal->seedDoorState(*reconnectDoorState);
                     std::cerr << "SignalPipeline ready: config=" << *signalConfigPath
                               << " background=" << (signal->usesBackground() ? "enabled" : "disabled") << '\n';
                 }
@@ -787,7 +789,7 @@ int main(int argc, char** argv)
             };
             bool summaryPrinted = false;
             std::optional<std::uint64_t> firstTimestamp;
-            auto lastDoorState = elevsafe::sp::DoorState::UNKNOWN;
+            std::optional<elevsafe::sp::DoorState> lastDoorState;
             client.setFrameCallback([&pipeline, &client, &signal, &abProfile, benchmarkMode, quietFrames,
                 &summaryPrinted, &lastRadarObservationAt, reconnectEnabled, &firstTimestamp, &lastDoorState, &tracking, &websocket, &snapshotsPublished, &periodic,
                 emulatorDoorSim, &radarTimestamp, &radarTracks, &newRadarObservation, &serviceDoor, &doorArbitration, &virtualDoor, session, &lastCRequest](const elevsafe::RadarFrame& frame)
@@ -1041,7 +1043,8 @@ int main(int argc, char** argv)
                           << " buffered=" << profileDiagnostics.bufferedBytes;
                 if (signal) sessionLog << " B_frames=" << signal->stats().frames
                                       << " background=" << signal->usesBackground()
-                                      << " last_door_state=" << elevsafe::sp::doorStateToString(lastDoorState);
+                                      << " last_door_state=" << elevsafe::sp::doorStateToString(
+                                             lastDoorState.value_or(elevsafe::sp::DoorState::UNKNOWN));
                 if (firstTimestamp) sessionLog << " first_timestamp_us=" << *firstTimestamp;
                 if (profileDiagnostics.connected)
                 {
@@ -1067,6 +1070,7 @@ int main(int argc, char** argv)
                 std::cerr << "[radar] recovery exhausted retries=" << retryBudget.retries() << " (limit=3, budget=15s)\n";
                 result = 1; break;
             }
+            if (lastDoorState) reconnectDoorState = lastDoorState;
             std::osyncstream(std::cerr) << "[radar] retry=" << retryBudget.retries()
                 << "/3 wait_ms=1000 connect_timeout_ms=3000 after_session=" << session
                 << " reason=" << profileDiagnostics.stage << " code=" << profileDiagnostics.errorCode << '\n';
