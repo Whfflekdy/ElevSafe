@@ -159,14 +159,15 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         }
     }
 
-    // 5-b. 매칭 안 된 트랙: TENTATIVE는 삭제, CONFIRMED는 LOST (LOST는 그대로)
+    // 5-b. 매칭 안 된 트랙: TENTATIVE는 삭제, CONFIRMED는 lost_after_s 넘게 매칭이 없으면 LOST (LOST는 그대로)
     {
         std::vector<Track> kept;
         for (int ti = 0; ti < (int)tracks_.size(); ++ti) {
             Track& t = tracks_[ti];
             if (track_to_det[ti] < 0) {
                 if (t.state == TrackState::TENTATIVE) { removed_.push_back(t); continue; }
-                if (t.state == TrackState::CONFIRMED) t.state = TrackState::LOST;
+                if (t.state == TrackState::CONFIRMED && t.time_since_update_s > cfg_.lost_after_s)
+                    t.state = TrackState::LOST;
             }
             kept.push_back(std::move(t));
         }

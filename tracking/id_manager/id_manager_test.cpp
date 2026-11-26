@@ -50,7 +50,8 @@ static void testCrossing() {
 static void testMissedFrames() {
     std::printf("[2] 검출 놓침 (frame 20~21)\n");
     {
-        TrackManager m;
+        TrackerConfig c0; c0.lost_after_s = 0;   // 예전 동작: 한 프레임만 놓쳐도 바로 LOST
+        TrackManager m(c0);
         int id0 = -1; bool sawLost = false;
         for (int f = 0; f < 40; ++f) {
             std::vector<Detection> ds;
@@ -106,6 +107,27 @@ static double lostPositionAfterWalk(double decay) {
     return m.tracks().empty() ? -1e9 : m.tracks()[0].x();
 }
 
+// 짧은 미검출 유예 (lost_after_s): 0.2초 이내로 놓치면 CONFIRMED 유지, 넘으면 LOST
+static void testShortMissGrace() {
+    std::printf("[2b] 짧은 미검출 유예 (lost_after_s = 0.2)\n");
+    TrackManager m;   // 기본값 0.2초, 10Hz
+    bool keptConfirmed = true, sawLost = false;
+    int id0 = -1;
+    for (int f = 0; f < 60; ++f) {
+        std::vector<Detection> ds;
+        const bool miss1 = (f == 25);                 // 1프레임(0.1초) 놓침
+        const bool miss3 = (f >= 40 && f <= 42);      // 3프레임(0.3초) 놓침
+        if (!miss1 && !miss3) ds.push_back(det(0.5, 4.0, 1.0));
+        m.update(frame(f, ds));
+        if (f == 24) id0 = nearestId(m, 0.5, 4.0);
+        if (miss1 && (m.tracks().empty() || m.tracks()[0].state != TrackState::CONFIRMED)) keptConfirmed = false;
+        if (f == 42 && !m.tracks().empty() && m.tracks()[0].state == TrackState::LOST) sawLost = true;
+    }
+    CHECK(keptConfirmed, "0.1초 놓침: CONFIRMED 유지 (화면에서 안 사라짐)");
+    CHECK(sawLost, "0.3초 놓침: LOST로 바뀜");
+    CHECK(!m.tracks().empty() && m.tracks()[0].id == id0 && m.confirmedIdCount() == 1, "같은 ID 유지");
+}
+
 static void testLostVelocityDamping() {
     std::printf("[2c] LOST 중 속도 감쇠 (1 m/s로 걷다 2초간 소실)\n");
     double damped = lostPositionAfterWalk(0.3), undamped = lostPositionAfterWalk(1.0);
@@ -127,6 +149,7 @@ static void testSpuriousDetection() {
 int main() {
     testCrossing();
     testMissedFrames();
+    testShortMissGrace();
     testLostVelocityDamping();
     testFall(1.0, true, "[3a] FALL: gate_z = 1.0 (기본)");
     testFall(0.1, false, "[3b] FALL 대조군: gate_z = 0.1");
