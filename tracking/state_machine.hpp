@@ -1,4 +1,4 @@
-// ElevSafe 상태 머신 (C) — 룰표 v2(2026-11-19) 구현
+// ElevSafe 상태 머신 (C) — 룰표 v2.1 구현
 // - Passenger Phase: OUTSIDE / ENTERING / INSIDE / EXITING
 // - Safety Status  : NORMAL / FALL / IMMOBILE
 // - door_command   : NONE(=null) / OPEN / HOLD / CLOSE
@@ -27,7 +27,7 @@ struct PersonObs {            // 프레임당 추적 객체 1명
   float z_top = 0, z_min = 0, cz = 0;
   int   num_points = 0;
   float mean_doppler = 0;
-  bool  measured = true;      // [수정] 실제 측정된 프레임이면 true (LOST 예측 프레임이면 false). 안 채워도 기본 true
+  bool  measured = true;      // 실제 측정된 프레임이면 true (LOST 예측 프레임이면 false)
 };
 
 struct FrameInput {
@@ -38,36 +38,37 @@ struct FrameInput {
 
 struct Config {
   // --- FALL (변화량 + 하강 속도, 절대 높이 아님) ---
-  double fall_window_sec   = 0.9;   // 0.8 -> 0.9 (무릎 꿇고 엎드리는 2단계 전도 포착)
-  double fall_drop_m       = 0.72;  // 0.75 -> 0.72
-  double fall_speed_mps    = 1.05;  // 1.15 -> 1.05
-  double baseline_band_m   = 0.15;  // 평소 높이 갱신 허용 범위(쪼그려 앉기가 기준을 끌어내리지 않게)
-  double baseline_alpha    = 0.05;
-  double warmup_sec          = 2.0;   // [수정] 트랙 생성 후 FALL 판정 보류, baseline은 이 구간 중앙값
-  double baseline_down_alpha = 0.1;   // [수정] z가 안정적일 때 baseline을 아래로 당기는 비율
-  double stable_range_m      = 0.15;  // [수정] 1초 창 z 변동폭이 이 이하면 "안정"
-  bool   door_fall_enabled   = false; // [추가] false면 DOOR 구역 통과 중 포인트 손실에 의한 FALL 오탐 방지
+  double fall_window_sec     = 0.9;   // 무릎 꿇고 엎드리는 2단계 전도 포착
+  double fall_drop_m         = 0.72;
+  double fall_speed_mps      = 1.05;
+  double baseline_band_m     = 0.15;  // 평소 높이 갱신 허용 범위(쪼그려 앉기가 기준을 끌어내리지 않게)
+  double baseline_alpha      = 0.05;
+  double warmup_sec          = 2.0;   // 트랙 생성 후 FALL 판정 보류, baseline은 이 구간 중앙값
+  double baseline_down_alpha = 0.1;   // z가 안정적일 때 baseline을 아래로 당기는 비율
+  double stable_range_m      = 0.15;  // 1초 창 z 변동폭이 이 이하면 "안정"
+  bool   door_fall_enabled   = true;  // 출입구(DOOR) 구역 낙상 판정 활성화
+  int    door_fall_min_points = 25;   // DOOR 구역 통과 중 포인트 손실에 의한 FALL 오탐 방지용 최소 점 수
   // --- 낮은 자세 / 회복 ---
-  double low_drop_m        = 0.50;  // TUNE: baseline - low_drop 이하면 낮은 자세
-  double stand_margin_m    = 0.25;  // TUNE: baseline - margin 이상이면 서 있음
-  double recover_hold_sec  = 5.0;   // 회복 유지 시간(초기값)
-  double immobile_sec      = 40.0;  // IMMOBILE 기준(초기값, 출입구·내부 공통)
-  bool   use_doppler_gate  = true;  // 낮은 자세여도 움직임이 크면 IMMOBILE 타이머 리셋
-  double move_doppler_thr  = 0.15;  // TUNE (m/s)
+  double low_drop_m          = 0.50;  // baseline - low_drop 이하면 낮은 자세
+  double stand_margin_m      = 0.25;  // baseline - margin 이상이면 서 있음
+  double recover_hold_sec    = 5.0;   // 회복 유지 시간(초기값)
+  double immobile_sec        = 40.0;  // IMMOBILE 기준(초기값, 출입구·내부 공통)
+  bool   use_doppler_gate    = true;  // 낮은 자세여도 움직임이 크면 IMMOBILE 타이머 리셋
+  double move_doppler_thr    = 0.15;  // (m/s)
   // --- 추적 끊김 ---
-  double lost_grace_sec    = 2.0;   // 1~2초 끊김은 사람이 있다고 간주
-  double lost_grace_danger_sec = 5.0; // FALL/IMMOBILE 승객은 더 오래 상태 유지 (TrackManager max_age_s 기본값과 같게)
+  double lost_grace_sec      = 2.0;   // 1~2초 끊김은 사람이 있다고 간주
+  double lost_grace_danger_sec = 5.0; // FALL/IMMOBILE 승객은 더 오래 상태 유지
   // --- Phase 방향 판정 ---
-  double dir_window_sec    = 1.0;
-  double dir_dy_m          = 0.10;
-  bool   cabin_is_plus_y   = true;  // 인터페이스 v4: Y 캐빈 안쪽 +, 승강장 쪽 − (원점=문턱 띠 가운데)
+  double dir_window_sec      = 1.0;
+  double dir_dy_m            = 0.10;
+  bool   cabin_is_plus_y     = true;  // Y 캐빈 안쪽 +, 승강장 쪽 − (원점=문턱 띠 가운데)
   // --- 문 제어 ---
-  bool   hall_enabled      = false; // false면 승강장 zone은 UNKNOWN 취급
-  bool   hall_safety_enabled = false; // [수정 11/25] false면 HALL zone 승객은 FALL/IMMOBILE 판정 안 함 (회의 결정)
-  double hold_max_sec      = 30.0;  // 초과 시 "경고"만, 문턱 점유 중 HOLD는 해제하지 않음
-  double close_wait_sec    = 3.0;   // 통과 후 CLOSE까지 대기(설정값)
-  bool   emit_close        = true;  // A가 정상 CLOSE를 담당하면 false
-  double door_open_max_sec = 60.0;  // 시설 측 문 열림 최대 시간
+  bool   hall_enabled        = false; // false면 승강장 zone은 UNKNOWN 취급
+  bool   hall_safety_enabled = false; // false면 HALL zone 승객은 FALL/IMMOBILE 판정 안 함
+  double hold_max_sec        = 30.0;  // 초과 시 "경고"만, 문턱 점유 중 HOLD는 해제하지 않음
+  double close_wait_sec      = 3.0;   // 통과 후 CLOSE까지 대기(설정값)
+  bool   emit_close          = true;  // A가 정상 CLOSE를 담당하면 false
+  double door_open_max_sec   = 60.0;  // 시설 측 문 열림 최대 시간
   double door_open_warn_lead_sec = 10.0;
 };
 
@@ -103,9 +104,11 @@ class StateMachine {
     const double t = in.t;
     for (const auto& p : in.persons) updateTrack(tracks_[p.id], p, t);
     for (auto it = tracks_.begin(); it != tracks_.end();) {
-      // FALL/IMMOBILE 승객은 추적이 끊겨도 lost_grace_danger_sec 동안 상태를 유지한다.
-      const double grace = (it->second.safety != Safety::NORMAL) ? cfg_.lost_grace_danger_sec
-                                                                  : cfg_.lost_grace_sec;
+      // 미확정 DOOR 트랙(id < 0)은 즉시 사라지면 바로 정리, 확정 트랙은 grace 적용
+      const double grace = (it->first < 0)
+                               ? 0.25
+                               : ((it->second.safety != Safety::NORMAL) ? cfg_.lost_grace_danger_sec
+                                                                        : cfg_.lost_grace_sec);
       it = (t - it->second.last_seen > grace) ? tracks_.erase(it) : std::next(it);
     }
 
@@ -113,6 +116,11 @@ class StateMachine {
     bool occupied = false, door_danger = false;
     for (const auto& kv : tracks_) {
       const Track& k = kv.second;
+      if (kv.first < 0) {
+        // DOOR 구역 미확정(TENTATIVE) 트랙은 문턱 점유(HOLD) 판단에만 즉시 반영
+        if (k.phase == Phase::ENTERING || k.phase == Phase::EXITING) occupied = true;
+        continue;
+      }
       out.tracks.push_back({kv.first, k.phase, k.safety, k.fall_t, k.immobile_t});
       if (static_cast<int>(k.safety) > static_cast<int>(out.safety_state)) out.safety_state = k.safety;
       if (k.phase == Phase::ENTERING || k.phase == Phase::EXITING) {
@@ -137,16 +145,14 @@ class StateMachine {
   struct Track {
     Phase phase = Phase::INSIDE; Zone zone = Zone::UNKNOWN; Safety safety = Safety::NORMAL;
     double last_seen = 0, fall_t = -1, immobile_t = -1, low_since = -1, stand_since = -1;
-    double pending_fall_t = -1;          // [추가] 급하강 감지 후 실제 바닥 유지 검증 시작 시각
+    double pending_fall_t = -1;          // 급하강 감지 후 실제 바닥 유지 검증 시작 시각
     double baseline = -1;
-    double first_t = -1;                 // [수정] 트랙이 처음 측정된 시각
-    std::vector<double> warm;            // [수정] 워밍업 구간 z 샘플
+    double first_t = -1;                 // 트랙이 처음 측정된 시각
+    std::vector<double> warm;            // 워밍업 구간 z 샘플
     std::deque<std::pair<double, double>> zhist, yhist;
     bool seen = false;
   };
 
-  // [수정 11/25] 안전(FALL/IMMOBILE) 판정 이력을 모두 지운다. HALL 에 있는 동안 매 프레임 호출되므로,
-  // HALL 을 벗어난 첫 프레임부터 warmup_sec 동안 baseline 을 새로 잡는다 (승강장에서 본 높이를 기준으로 쓰지 않음).
   static void resetSafety(Track& k) {
     k.safety = Safety::NORMAL;
     k.fall_t = k.immobile_t = k.low_since = k.stand_since = k.pending_fall_t = -1;
@@ -156,13 +162,17 @@ class StateMachine {
 
   void updateTrack(Track& k, const PersonObs& p, double t) {
     k.last_seen = t; k.zone = p.zone;
-    if (!p.measured) return;             // [수정] 예측(LOST) 프레임은 z/y 이력에 넣지 않음
-    if (k.first_t < 0) k.first_t = t;    // [수정]
+    if (!p.measured) return;             // 예측(LOST) 프레임은 z/y 이력에 넣지 않음
+    if (k.first_t < 0) k.first_t = t;
     push(k.zhist, t, p.z_top, cfg_.fall_window_sec);
     push(k.yhist, t, p.y, cfg_.dir_window_sec);
     if (k.baseline < 0) k.baseline = p.z_top;
     updatePhase(k, p);
-    if (p.zone == Zone::HALL && !cfg_.hall_safety_enabled) {   // [수정 11/25] 승강장은 FALL/IMMOBILE 판정 안 함
+    if (p.id < 0) {                      // 미확정 DOOR 트랙은 Phase 및 문턱 점유만 업데이트
+      k.seen = true;
+      return;
+    }
+    if (p.zone == Zone::HALL && !cfg_.hall_safety_enabled) {
       resetSafety(k);
       return;
     }
@@ -179,15 +189,15 @@ class StateMachine {
     switch (p.zone) {
       case Zone::CABIN: k.phase = Phase::INSIDE; break;
       case Zone::HALL:  k.phase = cfg_.hall_enabled ? Phase::OUTSIDE : k.phase; break;
-      case Zone::UNKNOWN: break;                       // 정보 없음 → 이전 Phase 유지
+      case Zone::UNKNOWN: break;
       case Zone::DOOR: {
         double dy = k.yhist.back().second - k.yhist.front().second;
         if (!cfg_.cabin_is_plus_y) dy = -dy;
         if (dy >= cfg_.dir_dy_m) k.phase = Phase::ENTERING;
         else if (dy <= -cfg_.dir_dy_m) k.phase = Phase::EXITING;
-        else if (k.phase == Phase::INSIDE) k.phase = Phase::EXITING;   // 방향 불명확 시 직전 위치로 추정
+        else if (k.phase == Phase::INSIDE) k.phase = Phase::EXITING;
         else if (k.phase == Phase::OUTSIDE) k.phase = Phase::ENTERING;
-        break;  // 이미 ENTERING/EXITING이면 유지 (어느 쪽이든 닫힘 보류)
+        break;
       }
     }
   }
@@ -195,7 +205,7 @@ class StateMachine {
   void updateSafety(Track& k, const PersonObs& p, double t) {
     const double z = p.z_top;
 
-    // [수정] 워밍업: 트랙 생성 직후에는 FALL 판정을 하지 않고 baseline을 z 중앙값으로 잡는다.
+    // 워밍업: 트랙 생성 직후에는 FALL 판정을 하지 않고 baseline을 z 중앙값으로 잡는다.
     if (t - k.first_t < cfg_.warmup_sec) {
       k.warm.push_back(z);
       auto w = k.warm;
@@ -204,19 +214,21 @@ class StateMachine {
       return;
     }
 
-    // [추가] DOOR 구역 통과 중 포인트 손실에 의한 FALL 오탐 방지 (이미 FALL/IMMOBILE이면 유지)
-    if (p.zone == Zone::DOOR && !cfg_.door_fall_enabled && k.safety == Safety::NORMAL) {
-      return;
+    // DOOR 구역에서는 활성화 플래그 및 최소 포인트 수 충족 시에만 신규 FALL 평가
+    if (p.zone == Zone::DOOR && k.safety == Safety::NORMAL) {
+      if (!cfg_.door_fall_enabled || p.num_points < cfg_.door_fall_min_points) {
+        return;
+      }
     }
 
     const bool standing = z >= k.baseline - cfg_.stand_margin_m;
     const bool low = z <= k.baseline - cfg_.low_drop_m;
 
     if (k.safety == Safety::NORMAL) {
-      if (z > k.baseline - cfg_.baseline_band_m)       // 서 있는 높이 근처에서만 기준 갱신
+      if (z > k.baseline - cfg_.baseline_band_m)
         k.baseline += cfg_.baseline_alpha * (z - k.baseline);
       if (z > k.baseline) k.baseline = z;
-      {                                                // [수정] z가 안정적이면 baseline을 아래로도 추종
+      {
         auto mm = std::minmax_element(k.zhist.begin(), k.zhist.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
         if (!k.zhist.empty() && mm.second->second - mm.first->second < cfg_.stable_range_m
@@ -233,7 +245,7 @@ class StateMachine {
             k.low_since = t; k.stand_since = -1; k.pending_fall_t = -1;
           }
         } else {
-          k.pending_fall_t = -1;               // 보행 교차 스파이크처럼 즉시 서 있는 키로 복귀하면 취소
+          k.pending_fall_t = -1;
         }
       }
       return;
@@ -254,7 +266,6 @@ class StateMachine {
         if (k.low_since < 0) k.low_since = t;
         if (t - k.low_since >= cfg_.immobile_sec) { k.safety = Safety::IMMOBILE; k.immobile_t = t; }
       }
-      // 낮지도 서 있지도 않은(앉은/기는) 구간은 타이머를 그대로 둠
     }
   }
 
@@ -269,40 +280,40 @@ class StateMachine {
   }
 
   void doorLogic(DoorState door, bool occupied, double t, Output& out) {
-    if (door == DoorState::UNKNOWN) {                              // 룰: null 유지, 신규/유지 명령 모두 없음
+    if (door == DoorState::UNKNOWN) {
       closing_ = false; out.reason = "door UNKNOWN -> null"; return;
     }
-    if (door == DoorState::CLOSED) {                               // 닫힘 확인되면 CLOSE 유지 종료
+    if (door == DoorState::CLOSED) {
       hold_since_ = clear_since_ = -1; closing_ = false; out.reason = "closed"; return;
     }
     // door == OPEN
     if (occupied) {
-      closing_ = false;                                            // 닫는 중에 다시 점유되면 CLOSE 취소, HOLD로 복귀
+      closing_ = false;
       clear_since_ = -1;
       if (hold_since_ < 0) hold_since_ = t;
       out.door_command = DoorCommand::HOLD;
-      out.hold_exceeded = (t - hold_since_ > cfg_.hold_max_sec);   // 경고만, 해제 안 함
+      out.hold_exceeded = (t - hold_since_ > cfg_.hold_max_sec);
       out.reason = "threshold occupied -> HOLD";
       return;
     }
-    if (hold_since_ >= 0) {                                        // 우리가 HOLD하던 문
+    if (hold_since_ >= 0) {
       if (clear_since_ < 0) clear_since_ = t;
       if (cfg_.emit_close && t - clear_since_ >= cfg_.close_wait_sec) {
         out.door_command = DoorCommand::CLOSE; hold_since_ = clear_since_ = -1;
-        closing_ = true;                                           // 문이 CLOSED 로 바뀔 때까지 CLOSE 유지
+        closing_ = true;
         out.reason = "cleared -> CLOSE";
       } else {
         out.door_command = DoorCommand::HOLD; out.reason = "cleared, waiting";
       }
-    } else if (closing_) {                                         // CLOSE 를 낸 뒤 아직 문이 열려 있음
+    } else if (closing_) {
       out.door_command = DoorCommand::CLOSE; out.reason = "CLOSE latched until door CLOSED";
-    } else out.reason = "normal operation";                        // A의 정상 운행에 맡김
+    } else out.reason = "normal operation";
   }
 
   Config cfg_;
   std::map<int, Track> tracks_;
   double open_since_ = -1, hold_since_ = -1, clear_since_ = -1;
-  bool closing_ = false;   // CLOSE 명령을 내고 문이 닫히기를 기다리는 중
+  bool closing_ = false;
 };
 
 }  // namespace elevsafe
