@@ -42,6 +42,11 @@ struct TrackOutput {
     bool        lost = false;                     // 현재 LOST (예측 위치)
     elevsafe::Phase  phase  = elevsafe::Phase::INSIDE;     // 위치 단계
     elevsafe::Safety safety = elevsafe::Safety::NORMAL;    // 안전 상태
+    // --- 화면 표시용 (processFrame() 에서만 채워진다. 안전 판정과 무관) ---
+    // CONFIRMED 이면 항상 true. LOST 이면 time_since_update_s <= display_grace 일 때만 true
+    // (예측 위치로 잠깐 이어서 그림). 승객 수 집계는 visible 이 아니라 !lost 로 할 것.
+    bool        visible = true;
+    float       display_alpha = 1.0f;             // 1.0 정상, LOST 유예 중이면 1.0 -> 0.3 으로 감소
 };
 
 // processFrame() 결과 (프레임당 1개)
@@ -110,10 +115,22 @@ public:
             TrackOutput o = makeOutput(t);
             for (const elevsafe::TrackStatus& s : st.tracks)
                 if (s.id == t.id) { o.phase = s.phase; o.safety = s.safety; break; }
+            // 표시 유예: CONFIRMED 는 항상 표시, LOST 는 유예 시간 이내일 때만 표시
+            if (o.lost) {
+                o.visible = (o.time_since_update_s <= display_grace_s_);
+                const double ratio = (display_grace_s_ > 0) ? (o.time_since_update_s / display_grace_s_) : 1.0;
+                o.display_alpha = o.visible ? static_cast<float>(1.0 - 0.7 * ratio) : 0.0f;
+            }
             r.tracks.push_back(o);
         }
         return r;
     }
+
+    // 화면 표시 유예 [s]: LOST 트랙을 이 시간까지 예측 위치로 계속 표시한다 (0 이면 끔).
+    // 입력 클러스터가 몇 프레임 빠질 때 점이 깜빡이는 것을 가리기 위한 표시 전용 설정이다.
+    // 추적·상태 판단(낙상/HOLD/문 제어)에는 영향이 없다.
+    void setDisplayGrace(double s) { display_grace_s_ = (s < 0 ? 0 : s); }
+    double displayGrace() const { return display_grace_s_; }
 
     // 세션 초기화·재연결: 트랙, ID 번호, 상태 머신(낙상/부동/HOLD/CLOSE 상태)을 모두 지운다.
     void reset() { tm_.reset(); sm_.reset(); }
@@ -167,4 +184,5 @@ private:
     ClusterParams cluster_;
     int min_points_;
     elevsafe::StateMachine sm_;
+    double display_grace_s_ = 0.5;   // LOST 표시 유예 [s]. 끊김이 남으면 1.0 까지 올려볼 것
 };
