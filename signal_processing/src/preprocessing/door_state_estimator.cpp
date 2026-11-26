@@ -2,6 +2,7 @@
 #include "preprocessing/door_state_estimator.h"
 
 #include <cmath>
+#include <string>
 
 namespace elevsafe::sp {
 
@@ -43,10 +44,21 @@ DoorStateConfig DoorStateConfig::fromConfig(const Config& cfg) {
     c.motion_on  = cfg.getFloat("door_state.motion.on",  100.0f);
     c.motion_off = cfg.getFloat("door_state.motion.off",  30.0f);
     c.motion_reverse_speed = cfg.getFloat("door_state.motion.reverse_speed", 0.10f);
+    const std::string init = cfg.getString("door_state.motion.initial", "UNKNOWN");
+    if (init == "OPEN")         c.motion_initial = DoorState::OPEN;
+    else if (init == "CLOSED")  c.motion_initial = DoorState::CLOSED;
+    else if (init != "UNKNOWN") c.motion_initial_ok = false;   // 오타 등은 설정 오류로
     return c;
 }
 
-DoorStateEstimator::DoorStateEstimator(const DoorStateConfig& config) : config_(config) {}
+DoorStateEstimator::DoorStateEstimator(const DoorStateConfig& config) : config_(config) {
+    if (config_.motion_enabled) state_ = config_.motion_initial;   // 첫 움직임 전 상태
+}
+
+void DoorStateEstimator::seed(DoorState s) {
+    if (!config_.motion_enabled || motion_seen_) return;
+    if (s == DoorState::OPEN || s == DoorState::CLOSED) state_ = s;
+}
 
 DoorState DoorStateEstimator::updateView(std::size_t n) {
     last_count_ = n;
@@ -134,7 +146,7 @@ DoorState DoorStateEstimator::update(const Frame& points) {
 
     // (2) 문짝 움직임
     updateMotion(points);
-    // 문짝 움직임 방식에서는 문 너머 보기를 쓰지 않음. 첫 움직임 전까지는 UNKNOWN.
+    // 문짝 움직임 방식에서는 문 너머 보기를 쓰지 않음. 첫 움직임 전까지는 시작 상태(기본 UNKNOWN).
     //  4차: 승강장이 비면 열린 문을 CLOSED로(S0-2), 캐빈에 사람이 있으면 거울상 때문에
     //  닫힌 문을 OPEN으로(S1-8_t02, S1-5) 봐서, 시작 상태로도 믿을 수 없음.
     (void)view;

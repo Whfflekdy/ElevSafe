@@ -9,7 +9,9 @@ static int g_fail = 0;
     else { std::printf("  [FAIL] %s\n", msg); ++g_fail; } } while (0)
 
 static Detection det(double x, double y, double z) {
-    Detection d; d.cx = x; d.cy = y; d.cz = z; d.n_points = 10; return d;
+    Detection d; d.cx = x; d.cy = y; d.cz = z; d.n_points = 30;
+    d.zone = elevsafe::DetZone::CABIN;
+    return d;
 }
 static FrameDetections frame(int f, std::vector<Detection> ds) {
     FrameDetections fd; fd.frame = f; fd.timestamp_us = (int64_t)f * 100000;  // 10 Hz
@@ -32,29 +34,31 @@ static void testCrossing() {
     std::mt19937 rng(1);
     std::normal_distribution<double> n(0, 0.03);
     int idA0 = -1, idB0 = -1;
-    for (int f = 0; f < 40; ++f) {
-        double ax = -2 + 0.1 * f, bx = 2 - 0.1 * f;
+    // n_init=17 이므로 17프레임 이상 경과 후 초기 ID 확인
+    for (int f = 0; f < 45; ++f) {
+        double ax = -2.2 + 0.1 * f, bx = 2.2 - 0.1 * f;
         m.update(frame(f, {det(ax + n(rng), 3.0 + n(rng), 1.0 + n(rng)),
                            det(bx + n(rng), 3.3 + n(rng), 1.0 + n(rng))}));
-        if (f == 5) { idA0 = nearestId(m, ax, 3.0); idB0 = nearestId(m, bx, 3.3); }
+        if (f == 18) { idA0 = nearestId(m, ax, 3.0); idB0 = nearestId(m, bx, 3.3); }
     }
-    int idA1 = nearestId(m, -2 + 0.1 * 39, 3.0), idB1 = nearestId(m, 2 - 0.1 * 39, 3.3);
+    int idA1 = nearestId(m, -2.2 + 0.1 * 44, 3.0), idB1 = nearestId(m, 2.2 - 0.1 * 44, 3.3);
     CHECK(idA0 > 0 && idB0 > 0 && idA0 != idB0, "초기에 서로 다른 ID 2개 확정");
     CHECK(idA1 == idA0 && idB1 == idB0, "교차 후에도 ID 유지 (스위칭 없음)");
     CHECK(m.confirmedIdCount() == 2, "공개 ID가 총 2개만 발급됨");
 }
 
 static void testMissedFrames() {
-    std::printf("[2] 검출 놓침 (frame 10~11)\n");
+    std::printf("[2] 검출 놓침 (frame 20~21)\n");
     {
-        TrackManager m;
+        TrackerConfig c0; c0.lost_after_s = 0;   // 예전 동작: 한 프레임만 놓쳐도 바로 LOST
+        TrackManager m(c0);
         int id0 = -1; bool sawLost = false;
-        for (int f = 0; f < 30; ++f) {
+        for (int f = 0; f < 40; ++f) {
             std::vector<Detection> ds;
-            if (f != 10 && f != 11) ds.push_back(det(0.5 * 0.1 * f, 4.0, 1.0));
+            if (f != 20 && f != 21) ds.push_back(det(0.5 * 0.1 * f, 4.0, 1.0));
             m.update(frame(f, ds));
-            if (f == 5) id0 = nearestId(m, 0.25, 4.0);
-            if (f == 11 && !m.tracks().empty() && m.tracks()[0].state == TrackState::LOST) sawLost = true;
+            if (f == 18) id0 = nearestId(m, 0.5 * 0.1 * 18, 4.0);
+            if (f == 21 && !m.tracks().empty() && m.tracks()[0].state == TrackState::LOST) sawLost = true;
         }
         CHECK(sawLost, "놓친 동안 CONFIRMED -> LOST");
         CHECK(m.tracks().size() == 1 && m.tracks()[0].state == TrackState::CONFIRMED, "다시 잡히면 CONFIRMED 복귀");
@@ -64,9 +68,9 @@ static void testMissedFrames() {
         TrackerConfig c; c.max_age_s = 0.15;  // 0.3초 놓치면 삭제되도록
         TrackManager m(c);
         bool removed = false;
-        for (int f = 0; f < 30; ++f) {
+        for (int f = 0; f < 45; ++f) {
             std::vector<Detection> ds;
-            if (f < 10 || f > 12) ds.push_back(det(0.05 * f, 4.0, 1.0));
+            if (f < 20 || f > 22) ds.push_back(det(0.05 * f, 4.0, 1.0));
             m.update(frame(f, ds));
             if (!m.removedTracks().empty()) removed = true;
         }
@@ -79,8 +83,8 @@ static void testFall(double gate_z, bool expectSameId, const char* title) {
     std::printf("%s\n", title);
     TrackerConfig c; c.gate_z = gate_z;
     TrackManager m(c);
-    for (int f = 0; f < 30; ++f) {
-        double z = f < 15 ? 1.0 : (f == 15 ? 0.65 : 0.3);  // 2프레임 만에 1.0 -> 0.3
+    for (int f = 0; f < 45; ++f) {
+        double z = f < 22 ? 1.0 : (f == 22 ? 0.65 : 0.3);  // CONFIRMED 이후 2프레임 만에 1.0 -> 0.3
         m.update(frame(f, {det(1.0, 4.0, z)}));
     }
     if (expectSameId) {
@@ -95,12 +99,33 @@ static void testFall(double gate_z, bool expectSameId, const char* title) {
 static double lostPositionAfterWalk(double decay) {
     TrackerConfig c; c.lost_vel_decay_per_s = decay;
     TrackManager m(c);
-    for (int f = 0; f < 35; ++f) {
+    for (int f = 0; f < 42; ++f) {
         std::vector<Detection> ds;
-        if (f < 15) ds.push_back(det(0.1 * f, 4.0, 1.0));  // 1 m/s로 걷다가 15프레임부터 안 보임 (2초)
+        if (f < 22) ds.push_back(det(0.1 * f, 4.0, 1.0));  // 1 m/s로 걷다가 22프레임부터 안 보임 (2초)
         m.update(frame(f, ds));
     }
     return m.tracks().empty() ? -1e9 : m.tracks()[0].x();
+}
+
+// 짧은 미검출 유예 (lost_after_s): 0.2초 이내로 놓치면 CONFIRMED 유지, 넘으면 LOST
+static void testShortMissGrace() {
+    std::printf("[2b] 짧은 미검출 유예 (lost_after_s = 0.2)\n");
+    TrackManager m;   // 기본값 0.2초, 10Hz
+    bool keptConfirmed = true, sawLost = false;
+    int id0 = -1;
+    for (int f = 0; f < 60; ++f) {
+        std::vector<Detection> ds;
+        const bool miss1 = (f == 25);                 // 1프레임(0.1초) 놓침
+        const bool miss3 = (f >= 40 && f <= 42);      // 3프레임(0.3초) 놓침
+        if (!miss1 && !miss3) ds.push_back(det(0.5, 4.0, 1.0));
+        m.update(frame(f, ds));
+        if (f == 24) id0 = nearestId(m, 0.5, 4.0);
+        if (miss1 && (m.tracks().empty() || m.tracks()[0].state != TrackState::CONFIRMED)) keptConfirmed = false;
+        if (f == 42 && !m.tracks().empty() && m.tracks()[0].state == TrackState::LOST) sawLost = true;
+    }
+    CHECK(keptConfirmed, "0.1초 놓침: CONFIRMED 유지 (화면에서 안 사라짐)");
+    CHECK(sawLost, "0.3초 놓침: LOST로 바뀜");
+    CHECK(!m.tracks().empty() && m.tracks()[0].id == id0 && m.confirmedIdCount() == 1, "같은 ID 유지");
 }
 
 static void testLostVelocityDamping() {
@@ -113,7 +138,7 @@ static void testLostVelocityDamping() {
 static void testSpuriousDetection() {
     std::printf("[4] 단발 노이즈 검출\n");
     TrackManager m;
-    for (int f = 0; f < 10; ++f) {
+    for (int f = 0; f < 20; ++f) {
         std::vector<Detection> ds;
         if (f == 4) ds.push_back(det(-1.0, 6.0, 0.5));
         m.update(frame(f, ds));
@@ -124,6 +149,7 @@ static void testSpuriousDetection() {
 int main() {
     testCrossing();
     testMissedFrames();
+    testShortMissGrace();
     testLostVelocityDamping();
     testFall(1.0, true, "[3a] FALL: gate_z = 1.0 (기본)");
     testFall(0.1, false, "[3b] FALL 대조군: gate_z = 0.1");

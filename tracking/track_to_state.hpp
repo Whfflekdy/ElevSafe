@@ -18,18 +18,24 @@ inline Zone toStateZone(DetZone z) {
     }
 }
 
-// 이번 프레임에 검출과 매칭된 CONFIRMED 트랙만 넘긴다.
-//  - TENTATIVE: 공개 ID가 없으므로 제외
+// 이번 프레임에 검출과 매칭된 CONFIRMED 트랙 + DOOR 구역 미확정(TENTATIVE, hits >= 3) 트랙을 넘긴다.
+//  - DOOR 구역 TENTATIVE: door_only_n_init(50) 전이라도 문턱 점유(HOLD) 지연 방지를 위해 음수 임시 ID로 전달
 //  - LOST(이번 프레임 매칭 없음): 넘기지 않는다. 끊김 처리(lost_grace_sec / lost_grace_danger_sec)는
 //    상태 머신이 마지막으로 본 시각 기준으로 한다.
 inline std::vector<PersonObs> toPersonObs(const std::vector<Track>& tracks) {
     std::vector<PersonObs> out;
     out.reserve(tracks.size());
     for (const Track& t : tracks) {
-        if (t.state != TrackState::CONFIRMED || t.id < 0) continue;
         if (t.time_since_update_s > 1e-9) continue;       // 이번 프레임에 매칭되지 않음
+
+        const bool is_confirmed = (t.state == TrackState::CONFIRMED && t.id >= 0);
+        const bool is_door_tentative = (t.state == TrackState::TENTATIVE &&
+                                        t.det_zone == DetZone::DOOR &&
+                                        t.hits >= 3);
+        if (!is_confirmed && !is_door_tentative) continue;
+
         PersonObs p;
-        p.id = t.id;
+        p.id = is_confirmed ? t.id : -(t.internal_id + 1);
         p.zone = toStateZone(t.det_zone);
         p.x = static_cast<float>(t.x());
         p.y = static_cast<float>(t.y());

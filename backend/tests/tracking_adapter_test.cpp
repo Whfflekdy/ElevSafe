@@ -426,13 +426,22 @@ int main(int argc, char** argv)
         expect(emptyDetections.detections.empty() && emptyDetections.frame == b.frame_id
             && emptyDetections.timestamp_us == b.timestamp_us, "empty frame or metadata changed");
         b.clusters = {c};
+        const int confirmationFrames = TrackerConfig{}.n_init;
         Demo demo;
         auto first = demo.process(b, zero, utc);
         expect(first && Json::parse(*first)["passengers"].empty(), "tentative exposed");
         b.timestamp_us += 50000; ++b.frame_id;
         expect(!demo.process(b, zero + 50ms, utc), "50ms should not publish");
-        b.timestamp_us += 50000; ++b.frame_id;
-        auto confirmed = demo.process(b, zero + 100ms, utc + 1s);
+        auto elapsed = 50ms;
+        for (int i = 2; i < confirmationFrames - 1; ++i)
+        {
+            elapsed += 50ms;
+            b.timestamp_us += 50000; ++b.frame_id;
+            demo.process(b, zero + elapsed, utc);
+        }
+        elapsed += 100ms;
+        b.timestamp_us += 100000; ++b.frame_id;
+        auto confirmed = demo.process(b, zero + elapsed, utc + 1s);
         expect(confirmed && elevsafe::isSnapshot(*confirmed), "confirmed snapshot missing");
         auto json = Json::parse(*confirmed);
         expect(json["timestamp"] == "1970-01-01T00:00:01Z", "wall UTC not used");
@@ -441,13 +450,14 @@ int main(int argc, char** argv)
         expect(json["passengers"].size() == 1 && json["passengers"][0]["id"] == 1
             && json["passengers"][0]["state"] == "INSIDE", "C CABIN phase must override negative y");
         b.clusters[0].cluster_id = 99; b.timestamp_us += 100000;
-        json = Json::parse(*demo.process(b, zero + 200ms, utc + 2s));
+        json = Json::parse(*demo.process(b, zero + elapsed + 100ms, utc + 2s));
         expect(json["passengers"][0]["id"] == 1, "B cluster ID became tracking ID");
-        expect(demo.processedFrames() == 4, "C skipped rate-limited input");
-        b.clusters.clear(); b.timestamp_us += 100000;
-        auto empty = demo.process(b, zero + 300ms, utc + 3s);
+        expect(demo.processedFrames() == confirmationFrames + 1u, "C skipped rate-limited input");
+        // C는 lost_after_s(0.2초) 이내 미검출에는 CONFIRMED를 유지하므로, 그보다 긴 공백으로 LOST를 만든다.
+        b.clusters.clear(); b.timestamp_us += 100000 + static_cast<std::int64_t>(TrackerConfig{}.lost_after_s * 1000000);
+        auto empty = demo.process(b, zero + elapsed + 200ms, utc + 3s);
         expect(empty && Json::parse(*empty)["passengers"].empty(), "empty input did not remove LOST");
-        expect(demo.processedFrames() == 5, "empty B result did not reach C exactly once");
+        expect(demo.processedFrames() == confirmationFrames + 2u, "empty B result did not reach C exactly once");
         b.clusters = {c}; b.timestamp_us = 0;
         Demo newSession;
         expect(Json::parse(*newSession.process(b, zero, utc))["passengers"].empty(), "session history leaked");
@@ -495,11 +505,11 @@ int main(int argc, char** argv)
             series.hall_enabled = true;
             sample.zone = Zone::HALL;
             sample.cy = -.5f;
-            for (int i = 0; i < 4; ++i) observe(crossing, DoorState::OPEN);
+            for (int i = 0; i < confirmationFrames; ++i) observe(crossing, DoorState::OPEN);
             sample.zone = Zone::DOOR;
             sample.cy = -.4f;
             const auto entered = observe(crossing, door.state);
-            expect(entered.door_command == door.crossing && crossing.processedFrames() == 5,
+            expect(entered.door_command == door.crossing && crossing.processedFrames() == confirmationFrames + 1u,
                 "B state did not reach C with the expected crossing decision");
             expect(entered.tracks.size() == 1 && entered.tracks[0].state == TrackState::CONFIRMED,
                 "crossing fixture failed to create a confirmed track");
@@ -523,10 +533,10 @@ int main(int argc, char** argv)
         sample.zone = Zone::HALL;
         sample.cy = -.5f;
         FrameResult observed;
-        for (int i = 0; i < 4; ++i) observed = observe(phases, DoorState::OPEN);
+        for (int i = 0; i < confirmationFrames; ++i) observed = observe(phases, DoorState::OPEN);
         expect(observed.tracks.empty(), "disabled HALL produced a C track");
         series.hall_enabled = true;
-        for (int i = 0; i < 4; ++i) observed = observe(phases, DoorState::OPEN);
+        for (int i = 0; i < confirmationFrames; ++i) observed = observe(phases, DoorState::OPEN);
         expect(observed.tracks.size() == 1 && observed.tracks[0].phase == elevsafe::Phase::OUTSIDE,
             "B HALL flag did not enable C tracking");
         const auto hallId = observed.tracks[0].id;
@@ -565,7 +575,14 @@ int main(int argc, char** argv)
             sample.z_max = top;
             return observe(safety, DoorState::CLOSED);
         };
-        for (int i = 0; i < 20; ++i) observed = height(1.7f);
+        const elevsafe::Config safetyConfig;
+        for (int i = 0; i < confirmationFrames; ++i) observed = height(1.7f);
+        const auto holdHeight = [&](float top, double seconds)
+        {
+            const auto until = observed.timestamp_us + static_cast<int64_t>(std::ceil(seconds * 1000000));
+            do { observed = height(top); } while (observed.timestamp_us < until);
+        };
+        holdHeight(1.7f, safetyConfig.warmup_sec + .1);
         const auto safetyJson = [&](const FrameResult& result)
         {
             const auto snapshot = phaseSnapshot(result, DoorState::CLOSED);
@@ -577,21 +594,25 @@ int main(int argc, char** argv)
         const auto safetyId = passenger["id"];
         expect(passenger["safety_state"].is_null(), "NORMAL must be JSON null");
         for (int i = 1; i <= 5; ++i) observed = height(1.7f - .28f * i);
+        holdHeight(.3f, 1.0);
         passenger = safetyJson(observed);
         expect(passenger["id"] == safetyId && passenger["safety_state"] == "FALL",
             "C FALL did not reach v7 with the same ID");
-        for (int i = 0; i < 420; ++i) observed = height(.3f);
+        holdHeight(.3f, safetyConfig.immobile_sec + .1);
         passenger = safetyJson(observed);
         expect(passenger["id"] == safetyId && passenger["safety_state"] == "IMMOBILE",
             "C IMMOBILE did not reach v7 with the same ID");
         series.clusters.clear();
+        series.timestamp_us += static_cast<std::int64_t>(TrackerConfig{}.lost_after_s * 1000000);   // lost_after_s 를 넘는 공백
         observed = safety.observe(series);
         expect(observed.tracks.size() == 1 && observed.tracks[0].lost
             && observed.safety_state == elevsafe::Safety::IMMOBILE, "empty frame did not preserve C LOST safety");
         expect(phaseSnapshot(observed, DoorState::CLOSED)["passengers"].empty(), "LOST track exposed in v7");
         Demo resetSafety;
         series = {};
-        for (int i = 0; i < 4; ++i) observed = observe(resetSafety, DoorState::CLOSED);
+        observed = observe(resetSafety, DoorState::CLOSED);
+        expect(phaseSnapshot(observed, DoorState::CLOSED)["passengers"].empty(), "tentative visible after reset");
+        for (int i = 1; i < confirmationFrames; ++i) observed = observe(resetSafety, DoorState::CLOSED);
         expect(observed.tracks.size() == 1 && observed.tracks[0].id == 1
             && safetyJson(observed)["safety_state"].is_null(), "new session retained C safety or ID state");
 
@@ -600,7 +621,7 @@ int main(int argc, char** argv)
         elevsafe::sp::SignalPipeline signal(config); expect(signal.ok(), "B init");
         testGhostFilterIntegration(config, std::filesystem::path(argv[1]).parent_path() / "tracking_ghost_filter_on.cfg");
         Demo realB;
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < confirmationFrames; ++i)
         {
             elevsafe::RadarFrame frame; frame.frameCount = i; frame.timestampUs = i * 100000;
             for (int j = 0; j < 40; ++j)
@@ -615,7 +636,7 @@ int main(int argc, char** argv)
             expect(fromB.detections.size() == 1 && fromB.detections.front().mean_power == 10.0,
                 "B power sum did not reach C detection as a mean");
             auto snapshot = realB.process(result, zero + i * 100ms, utc);
-            if (i == 2) expect(Json::parse(*snapshot)["passengers"].size() == 1, "A-B-C path failed");
+            if (i + 1 == confirmationFrames) expect(Json::parse(*snapshot)["passengers"].size() == 1, "A-B-C path failed");
         }
         std::cout << "tracking_adapter_test PASS: positive-count mapping, five door states, all-frame C, door arbitration, HALL, Phase/Safety, IDs, empty, UTC, v7, session reset, real A-B-C\n";
         return 0;

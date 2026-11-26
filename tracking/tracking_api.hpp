@@ -60,7 +60,7 @@ class TrackingEngine {
 public:
     explicit TrackingEngine(const TrackerConfig& cfg = TrackerConfig(),
                             const ClusterParams& cluster = ClusterParams(),
-                            int min_points = 3,
+                            int min_points = 21,
                             const elevsafe::Config& state_cfg = elevsafe::Config())
         : tm_(cfg), cluster_(cluster), min_points_(min_points), sm_(state_cfg) {}
 
@@ -125,20 +125,26 @@ public:
     const TrackManager& manager() const { return tm_; }
 
 private:
-    // hall_enabled 가 꺼져 있으면 zone == HALL 검출을 버린 뒤 추적한다.
+    // hall_enabled 가 꺼져 있으면 zone == HALL 검출을 버리고, min_points_ 미만 검출도 동일하게 필터링한다.
     const std::vector<Track>& runTracking(const FrameDetections& fd) {
-        if (!sm_.config().hall_enabled) {
-            bool has_hall = false;
-            for (const Detection& d : fd.detections)
-                if (d.zone == elevsafe::DetZone::HALL) { has_hall = true; break; }
-            if (has_hall) {
-                FrameDetections f;
-                f.frame = fd.frame;
-                f.timestamp_us = fd.timestamp_us;
-                for (const Detection& d : fd.detections)
-                    if (d.zone != elevsafe::DetZone::HALL) f.detections.push_back(d);
-                return tm_.update(f);
+        const bool filter_hall = !sm_.config().hall_enabled;
+        bool need_filter = false;
+        for (const Detection& d : fd.detections) {
+            if ((filter_hall && d.zone == elevsafe::DetZone::HALL) || d.n_points < min_points_) {
+                need_filter = true;
+                break;
             }
+        }
+        if (need_filter) {
+            FrameDetections f;
+            f.frame = fd.frame;
+            f.timestamp_us = fd.timestamp_us;
+            for (const Detection& d : fd.detections) {
+                if (filter_hall && d.zone == elevsafe::DetZone::HALL) continue;
+                if (d.n_points < min_points_) continue;
+                f.detections.push_back(d);
+            }
+            return tm_.update(f);
         }
         return tm_.update(fd);
     }
