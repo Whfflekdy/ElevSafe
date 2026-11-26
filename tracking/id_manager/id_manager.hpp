@@ -12,15 +12,14 @@
 
 enum class TrackState { TENTATIVE, CONFIRMED, LOST };  // 삭제된 트랙은 목록에서 제거됨(removedTracks)
 
-// 아래 기본값은 전부 임시값이다. 승객이 있는 녹화본으로 gate, n_init, max_age_s 등을 정할 것.
-// (칼만 관련 기본값은 kalman_track.hpp의 makeTrack과 같은 값)
 struct TrackerConfig {
     // 매칭
-    double gate_xy = 0.8;               // [m] 수평 거리 게이트
+    double gate_xy = 0.55;              // [m] 수평 거리 게이트 (2인 교차 분리용 튜닝값)
     double gate_z = 1.0;                // [m] 수직 게이트 (FALL 대응으로 xy보다 넉넉하게)
     double z_weight = 0.5;              // 비용 계산에서 z 오차 가중치 (1이면 일반 유클리드)
     // 생명주기
-    int    n_init = 3;                  // CONFIRMED까지 필요한 연속 매칭 수
+    int    n_init = 17;                 // CONFIRMED까지 필요한 연속 매칭 수 (CABIN/HALL 경유 시)
+    int    door_only_n_init = 50;     // 45 -> 50 (2차 녹화 문 개폐 반사 18~22프레임 완전 차단)
     double max_age_s = 5.0;             // LOST 상태로 기다리는 최대 시간 [s]
     double tentative_max_gap_s = 1.0;   // TENTATIVE가 이 시간 넘게 갱신 없으면 삭제 [s]
     double lost_vel_decay_per_s = 0.3;  // LOST 중 초당 속도 감쇠 비율 (0.3 = 1초에 30%만 남김, 1이면 감쇠 없음)
@@ -53,9 +52,13 @@ struct Track {
     elevsafe::DetZone det_zone = elevsafe::DetZone::UNKNOWN;
     double det_z_top = 0, det_z_min = 0, det_cz = 0, det_mean_doppler = 0;
     bool   det_maybe_merged = false;
+    bool   seen_non_door = false;       // CABIN 또는 HALL에서 한 번이라도 관측된 이력
     void setFromDetection(const Detection& d) {
         n_points = d.n_points;
         det_zone = d.zone;
+        if (d.zone == elevsafe::DetZone::CABIN || d.zone == elevsafe::DetZone::HALL) {
+            seen_non_door = true;
+        }
         det_z_top = d.z_top; det_z_min = d.zmin; det_cz = d.cz;
         det_mean_doppler = d.mean_doppler;
         det_maybe_merged = d.maybe_merged != 0;

@@ -2,7 +2,6 @@
 // - Passenger Phase: OUTSIDE / ENTERING / INSIDE / EXITING
 // - Safety Status  : NORMAL / FALL / IMMOBILE
 // - door_command   : NONE(=null) / OPEN / HOLD / CLOSE
-// 모든 임계값은 Config로 분리. "TUNE" 표시 값은 4차 녹화 데이터로 정할 임시값(실측값 아님).
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -28,6 +27,7 @@ struct PersonObs {            // 프레임당 추적 객체 1명
   float z_top = 0, z_min = 0, cz = 0;
   int   num_points = 0;
   float mean_doppler = 0;
+  bool  measured = true;      // [수정] 실제 측정된 프레임이면 true (LOST 예측 프레임이면 false). 안 채워도 기본 true
 };
 
 struct FrameInput {
@@ -37,12 +37,16 @@ struct FrameInput {
 };
 
 struct Config {
-  // --- FALL (TUNE: 변화량 + 하강 속도, 절대 높이 아님) ---
-  double fall_window_sec   = 1.0;   // 이 창 안의 최고 z_top 대비 하강량으로 판단
-  double fall_drop_m       = 0.60;  // TUNE
-  double fall_speed_mps    = 0.80;  // TUNE
+  // --- FALL (변화량 + 하강 속도, 절대 높이 아님) ---
+  double fall_window_sec   = 0.9;   // 0.8 -> 0.9 (무릎 꿇고 엎드리는 2단계 전도 포착)
+  double fall_drop_m       = 0.72;  // 0.75 -> 0.72
+  double fall_speed_mps    = 1.05;  // 1.15 -> 1.05
   double baseline_band_m   = 0.15;  // 평소 높이 갱신 허용 범위(쪼그려 앉기가 기준을 끌어내리지 않게)
   double baseline_alpha    = 0.05;
+  double warmup_sec          = 2.0;   // [수정] 트랙 생성 후 FALL 판정 보류, baseline은 이 구간 중앙값
+  double baseline_down_alpha = 0.1;   // [수정] z가 안정적일 때 baseline을 아래로 당기는 비율
+  double stable_range_m      = 0.15;  // [수정] 1초 창 z 변동폭이 이 이하면 "안정"
+  bool   door_fall_enabled   = false; // [추가] false면 DOOR 구역 통과 중 포인트 손실에 의한 FALL 오탐 방지
   // --- 낮은 자세 / 회복 ---
   double low_drop_m        = 0.50;  // TUNE: baseline - low_drop 이하면 낮은 자세
   double stand_margin_m    = 0.25;  // TUNE: baseline - margin 이상이면 서 있음
@@ -59,6 +63,7 @@ struct Config {
   bool   cabin_is_plus_y   = true;  // 인터페이스 v4: Y 캐빈 안쪽 +, 승강장 쪽 − (원점=문턱 띠 가운데)
   // --- 문 제어 ---
   bool   hall_enabled      = false; // false면 승강장 zone은 UNKNOWN 취급
+  bool   hall_safety_enabled = false; // [수정 11/25] false면 HALL zone 승객은 FALL/IMMOBILE 판정 안 함 (회의 결정)
   double hold_max_sec      = 30.0;  // 초과 시 "경고"만, 문턱 점유 중 HOLD는 해제하지 않음
   double close_wait_sec    = 3.0;   // 통과 후 CLOSE까지 대기(설정값)
   bool   emit_close        = true;  // A가 정상 CLOSE를 담당하면 false
@@ -132,17 +137,35 @@ class StateMachine {
   struct Track {
     Phase phase = Phase::INSIDE; Zone zone = Zone::UNKNOWN; Safety safety = Safety::NORMAL;
     double last_seen = 0, fall_t = -1, immobile_t = -1, low_since = -1, stand_since = -1;
+    double pending_fall_t = -1;          // [추가] 급하강 감지 후 실제 바닥 유지 검증 시작 시각
     double baseline = -1;
+    double first_t = -1;                 // [수정] 트랙이 처음 측정된 시각
+    std::vector<double> warm;            // [수정] 워밍업 구간 z 샘플
     std::deque<std::pair<double, double>> zhist, yhist;
     bool seen = false;
   };
 
+  // [수정 11/25] 안전(FALL/IMMOBILE) 판정 이력을 모두 지운다. HALL 에 있는 동안 매 프레임 호출되므로,
+  // HALL 을 벗어난 첫 프레임부터 warmup_sec 동안 baseline 을 새로 잡는다 (승강장에서 본 높이를 기준으로 쓰지 않음).
+  static void resetSafety(Track& k) {
+    k.safety = Safety::NORMAL;
+    k.fall_t = k.immobile_t = k.low_since = k.stand_since = k.pending_fall_t = -1;
+    k.first_t = -1; k.baseline = -1;
+    k.warm.clear(); k.zhist.clear();
+  }
+
   void updateTrack(Track& k, const PersonObs& p, double t) {
     k.last_seen = t; k.zone = p.zone;
+    if (!p.measured) return;             // [수정] 예측(LOST) 프레임은 z/y 이력에 넣지 않음
+    if (k.first_t < 0) k.first_t = t;    // [수정]
     push(k.zhist, t, p.z_top, cfg_.fall_window_sec);
     push(k.yhist, t, p.y, cfg_.dir_window_sec);
     if (k.baseline < 0) k.baseline = p.z_top;
     updatePhase(k, p);
+    if (p.zone == Zone::HALL && !cfg_.hall_safety_enabled) {   // [수정 11/25] 승강장은 FALL/IMMOBILE 판정 안 함
+      resetSafety(k);
+      return;
+    }
     updateSafety(k, p, t);
     k.seen = true;
   }
@@ -171,6 +194,21 @@ class StateMachine {
 
   void updateSafety(Track& k, const PersonObs& p, double t) {
     const double z = p.z_top;
+
+    // [수정] 워밍업: 트랙 생성 직후에는 FALL 판정을 하지 않고 baseline을 z 중앙값으로 잡는다.
+    if (t - k.first_t < cfg_.warmup_sec) {
+      k.warm.push_back(z);
+      auto w = k.warm;
+      std::nth_element(w.begin(), w.begin() + w.size() / 2, w.end());
+      k.baseline = w[w.size() / 2];
+      return;
+    }
+
+    // [추가] DOOR 구역 통과 중 포인트 손실에 의한 FALL 오탐 방지 (이미 FALL/IMMOBILE이면 유지)
+    if (p.zone == Zone::DOOR && !cfg_.door_fall_enabled && k.safety == Safety::NORMAL) {
+      return;
+    }
+
     const bool standing = z >= k.baseline - cfg_.stand_margin_m;
     const bool low = z <= k.baseline - cfg_.low_drop_m;
 
@@ -178,9 +216,25 @@ class StateMachine {
       if (z > k.baseline - cfg_.baseline_band_m)       // 서 있는 높이 근처에서만 기준 갱신
         k.baseline += cfg_.baseline_alpha * (z - k.baseline);
       if (z > k.baseline) k.baseline = z;
+      {                                                // [수정] z가 안정적이면 baseline을 아래로도 추종
+        auto mm = std::minmax_element(k.zhist.begin(), k.zhist.end(),
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+        if (!k.zhist.empty() && mm.second->second - mm.first->second < cfg_.stable_range_m
+            && z < k.baseline)
+          k.baseline += cfg_.baseline_down_alpha * (z - k.baseline);
+      }
       if (fallCondition(k, z, t)) {
-        k.safety = Safety::FALL; k.fall_t = t; k.immobile_t = -1;
-        k.low_since = t; k.stand_since = -1;
+        if (k.pending_fall_t < 0) k.pending_fall_t = t;
+      }
+      if (k.pending_fall_t >= 0) {
+        if (low) {
+          if (t - k.pending_fall_t >= 0.8) {   // 0.8초 이상 실제 낮은 자세 유지 시 FALL 확정
+            k.safety = Safety::FALL; k.fall_t = k.pending_fall_t; k.immobile_t = -1;
+            k.low_since = t; k.stand_since = -1; k.pending_fall_t = -1;
+          }
+        } else {
+          k.pending_fall_t = -1;               // 보행 교차 스파이크처럼 즉시 서 있는 키로 복귀하면 취소
+        }
       }
       return;
     }
@@ -211,7 +265,7 @@ class StateMachine {
     const double drop = peak.second - z;
     const double dt = std::max(t - peak.first, 0.05);
     return drop >= cfg_.fall_drop_m && drop / dt >= cfg_.fall_speed_mps &&
-           z <= k.baseline - cfg_.fall_drop_m * 0.5;
+           z <= k.baseline - cfg_.fall_drop_m;
   }
 
   void doorLogic(DoorState door, bool occupied, double t, Output& out) {

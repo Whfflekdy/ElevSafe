@@ -130,6 +130,40 @@ int main() {
     o = step(sm, t, DoorState::CLOSED, {});
     CHECK(o.tracks.empty() && o.safety_state == Safety::NORMAL && o.door_command == DoorCommand::NONE);
   }
+  { // 13) HALL 에서는 FALL/IMMOBILE 판정 안 함 (hall_enabled=true 여도). 승강장에서 캐빈으로 들어오면 baseline 을 새로 잡는다
+    Config c; c.hall_enabled = true; StateMachine sm(c); double t = 0; Output o;
+    for (int i = 0; i < 30; ++i, t += dt) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::HALL, -1.5f, 1.7f)});
+    CHECK(o.tracks[0].phase == Phase::OUTSIDE);
+    for (int i = 0; i < 5; ++i, t += dt) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::HALL, -1.5f, 1.7f - 0.28f * (i + 1))});
+    CHECK(o.safety_state == Safety::NORMAL);              // 승강장 낙상 급 하강 -> FALL 아님
+    for (int i = 0; i < 500; ++i, t += dt) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::HALL, -1.5f, 0.3f)});
+    CHECK(o.safety_state == Safety::NORMAL);              // 50초 누워 있어도 IMMOBILE 아님
+    for (int i = 0; i < 40; ++i, t += dt) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::CABIN, 0.6f, 1.7f)});
+    CHECK(o.safety_state == Safety::NORMAL);              // 캐빈으로 오면 정상 (누운 높이가 baseline 으로 남지 않음)
+    for (int i = 0; i < 5; ++i, t += dt) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::CABIN, 0.6f, 1.7f - 0.28f * (i + 1))});
+    CHECK(o.safety_state == Safety::FALL);                // 캐빈에서는 정상적으로 FALL 판정
+  }
+  { // 14) 누운 동안 덩어리가 최대 0.46초(9프레임 @20Hz)씩 반복해서 끊겨도 같은 ID 로 FALL -> 40초 뒤 IMMOBILE
+    StateMachine sm; const double d = 0.05; double t = 0; Output o; int n = 0;
+    for (int i = 0; i < 60; ++i, t += d) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::CABIN, 0.6f, 1.7f)});
+    for (int i = 0; i < 5; ++i, t += d) o = step(sm, t, DoorState::CLOSED, {P(1, Zone::CABIN, 0.6f, 1.7f - 0.28f * (i + 1))});
+    CHECK(o.safety_state == Safety::FALL);
+    const double t_fall = t;
+    bool immobile_early = false;
+    while (t - t_fall < 39.5) {                           // 31 프레임 검출 + 9 프레임 끊김 반복
+      bool gap = (n % 40) >= 31;
+      o = step(sm, t, DoorState::CLOSED, gap ? std::vector<PersonObs>{} : std::vector<PersonObs>{P(1, Zone::CABIN, 0.6f, 0.3f)});
+      if (o.safety_state == Safety::IMMOBILE) immobile_early = true;
+      t += d; ++n;
+    }
+    CHECK(!immobile_early && o.safety_state != Safety::NORMAL);   // 40초 전: FALL 유지, 상태 안 사라짐
+    for (int i = 0; i < 60; ++i, t += d, ++n) {
+      bool gap = (n % 40) >= 31;
+      o = step(sm, t, DoorState::CLOSED, gap ? std::vector<PersonObs>{} : std::vector<PersonObs>{P(1, Zone::CABIN, 0.6f, 0.3f)});
+    }
+    CHECK(o.safety_state == Safety::IMMOBILE);            // 끊김이 있어도 IMMOBILE 확정
+    CHECK(!o.tracks.empty() && o.tracks[0].id == 1);
+  }
   std::printf(fails ? "FAILED %d\n" : "ALL PASSED\n", fails);
   return fails != 0;
 }
