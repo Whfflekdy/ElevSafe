@@ -1339,6 +1339,11 @@ B 처리시간은 Parser Benchmark에 포함되지 않습니다. 다만 같은 t
 매 연결 시도마다 새 RetinaClient·Parser·RelativeFrameClock·BackendPipeline(용량 1)을
 사용합니다. 같은 Config로 새 SignalPipeline을 생성해 문 추정 이력과 누적 통계를 초기화하고
 배경맵을 다시 로드합니다. 최초 실행과 실제 `usesBackground()`가 달라지면 실패 종료합니다.
+재시도에서는 마지막으로 B가 출력한 문 상태 하나를 새 파이프라인에 전달합니다.
+B 결과가 없는 연결 시도는 건너뛰며, 실제 UNKNOWN·OPENING·CLOSING 출력도 마지막 값으로 기록합니다.
+문짝 움직임 방식은 첫 움직임 전에 OPEN·CLOSED만 이어받고 다른 값은 cfg 초기값을 유지합니다.
+기본 초기값은 UNKNOWN이며 3차 시연 cfg의 CLOSED는 시작 가정입니다. 단절 중 문 움직임은 관측할 수 없습니다.
+가상 문은 계속 세션마다 CLOSED로 시작합니다.
 첫 유효 프레임의 `timestamp_us`는 다시 0이며 frameCount는 원본 그대로 전달합니다.
 이전 연결의 partial packet은 buffered byte 수만 기록한 뒤 버리고 다음 연결로 넘기지 않습니다.
 
