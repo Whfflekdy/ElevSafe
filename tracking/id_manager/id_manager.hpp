@@ -20,6 +20,8 @@ struct TrackerConfig {
     // 생명주기
     int    n_init = 17;                 // CONFIRMED까지 필요한 연속 매칭 수 (CABIN/HALL 경유 시)
     int    door_only_n_init = 50;     // 45 -> 50 (2차 녹화 문 개폐 반사 18~22프레임 완전 차단)
+    double lost_after_s = 0.2;          // CONFIRMED가 이 시간 넘게 매칭이 없을 때 LOST로 바꿈 [s]
+                                        // (1~3프레임 짧은 미검출에 화면 승객이 깜빡이는 것 방지. 0이면 예전처럼 바로 LOST)
     double max_age_s = 5.0;             // LOST 상태로 기다리는 최대 시간 [s]
     double tentative_max_gap_s = 1.0;   // TENTATIVE가 이 시간 넘게 갱신 없으면 삭제 [s]
     double lost_vel_decay_per_s = 0.3;  // LOST 중 초당 속도 감쇠 비율 (0.3 = 1초에 30%만 남김, 1이면 감쇠 없음)

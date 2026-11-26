@@ -453,7 +453,8 @@ int main(int argc, char** argv)
         json = Json::parse(*demo.process(b, zero + elapsed + 100ms, utc + 2s));
         expect(json["passengers"][0]["id"] == 1, "B cluster ID became tracking ID");
         expect(demo.processedFrames() == confirmationFrames + 1u, "C skipped rate-limited input");
-        b.clusters.clear(); b.timestamp_us += 100000;
+        // C는 lost_after_s(0.2초) 이내 미검출에는 CONFIRMED를 유지하므로, 그보다 긴 공백으로 LOST를 만든다.
+        b.clusters.clear(); b.timestamp_us += 100000 + static_cast<std::int64_t>(TrackerConfig{}.lost_after_s * 1000000);
         auto empty = demo.process(b, zero + elapsed + 200ms, utc + 3s);
         expect(empty && Json::parse(*empty)["passengers"].empty(), "empty input did not remove LOST");
         expect(demo.processedFrames() == confirmationFrames + 2u, "empty B result did not reach C exactly once");
@@ -602,6 +603,7 @@ int main(int argc, char** argv)
         expect(passenger["id"] == safetyId && passenger["safety_state"] == "IMMOBILE",
             "C IMMOBILE did not reach v7 with the same ID");
         series.clusters.clear();
+        series.timestamp_us += static_cast<std::int64_t>(TrackerConfig{}.lost_after_s * 1000000);   // lost_after_s 를 넘는 공백
         observed = safety.observe(series);
         expect(observed.tracks.size() == 1 && observed.tracks[0].lost
             && observed.safety_state == elevsafe::Safety::IMMOBILE, "empty frame did not preserve C LOST safety");
