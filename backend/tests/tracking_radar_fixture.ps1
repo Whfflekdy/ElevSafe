@@ -1,5 +1,6 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect, [switch]$PeriodicIdle)
+param([Parameter(Mandatory)][string]$BackendExe, [Parameter(Mandatory)][string]$SignalConfig, [switch]$EmulatorDoorSim, [switch]$DoorArbitration, [switch]$AutoCycle, [switch]$PeriodicSnapshot, [switch]$PeriodicReconnect, [switch]$PeriodicIdle,
+    [ValidateSet('CLOSED','OPEN','UNKNOWN')][string]$SeedInitial)
 $ErrorActionPreference = 'Stop'
 $BackendExe = (Resolve-Path -LiteralPath $BackendExe).Path
 $SignalConfig = (Resolve-Path -LiteralPath $SignalConfig).Path
@@ -16,7 +17,21 @@ if ($DoorArbitration) {
     [IO.File]::WriteAllText($SignalConfig,$config)
 }
 
-function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8) {
+if ($SeedInitial) {
+    # Use the identity transform and two-frame window of signal_integration.cfg.
+    $config = [IO.File]::ReadAllText($SignalConfig) + @"
+
+door_state.motion_enable = 1
+door_state.motion.initial = $SeedInitial
+door_state.motion.z_min = 0.8
+door_state.motion.on = 2
+door_state.motion.off = 0
+"@
+    $SignalConfig = Join-Path $logs 'door-motion.cfg'
+    [IO.File]::WriteAllText($SignalConfig, $config)
+}
+
+function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8, [single]$doppler = 0) {
     # Existing retina_protocol_test / websocket_radar_fixture wire layout, no new protocol.
     $memory = [IO.MemoryStream]::new(); $writer = [IO.BinaryWriter]::new($memory)
     try {
@@ -24,7 +39,7 @@ function Packet([uint32]$frameId, [uint32]$count, [single]$y = 0.8) {
             [uint32](16 + 24 * $count),[uint32]0,[uint32]0,[uint32]0,[uint32]0)) { $writer.Write($word) }
         $writer.Write([uint64]578437695752307201); $writer.Write($frameId); $writer.Write($count)
         for ($j=0; $j -lt $count; $j++) {
-            foreach ($v in @([single]0.25,$y,[single]1,[single]0,[single]10)) { $writer.Write($v) }
+            foreach ($v in @([single]0.25,$y,[single]1,$doppler,[single]10)) { $writer.Write($v) }
         }
         for ($j=0; $j -lt $count; $j++) { $writer.Write([int32]255) }
         $writer.Flush(); return ,$memory.ToArray()
@@ -67,6 +82,7 @@ try {
     if ($PeriodicSnapshot) { $arguments+='--ws-periodic-snapshot' }
     if ($PeriodicReconnect) { $arguments+=@('--radar-reconnect','--radar-reconnect-eof') }
     if ($PeriodicIdle) { $arguments+=@('--radar-reconnect','--radar-idle-timeout-ms','1800') }
+    if ($SeedInitial) { $arguments+=@('--radar-reconnect','--radar-idle-timeout-ms','1500') }
     if ($PeriodicSnapshot) {
         # MSVC buffers redirected stdout. Give the Backend a console so its existing
         # frame log is visible before EOF; keep stderr and the actual Backend exit code.
@@ -178,6 +194,58 @@ try {
         }
     }
 
+    if ($SeedInitial) {
+        function Check-SeedFrame([int]$frameId, [single]$velocity, [string]$expected) {
+            # Allow the normal 100 ms publication gate to open between observations.
+            if ($frameId -gt 1) { Start-Sleep -Milliseconds 130 }
+            $points = if ($velocity -eq 0) { 0 } else { 2 }
+            $bytes = Packet $frameId $points 0 $velocity
+            $peer.GetStream().Write($bytes, 0, $bytes.Length)
+            $snapshot = Read-SimSnapshot
+            if ($snapshot.door_state -cne $expected -or $null -ne $snapshot.door_command -or
+                ($frameId -eq 1 -and ($snapshot.timestamp_us -ne 0 -or $snapshot.passengers.Count -ne 0))) {
+                throw "Unexpected Snapshot for frame $frameId, expected $expected, got $($snapshot | ConvertTo-Json -Compress)"
+            }
+        }
+        function Next-SeedSession([int]$session, [int]$frames, [string]$last) {
+            $accept = $listener.AcceptTcpClientAsync()
+            Wait-SimLog "session=$session end stage=idle_timeout .* B_frames=$frames .* last_door_state=$last\b"
+            if (!$accept.Wait(6000)) { throw "No reconnect after session $session" }
+            $peer.Dispose()
+            return $accept.GetAwaiter().GetResult()
+        }
+        $stage = "seed.$SeedInitial"
+        $opening = $SeedInitial -ne 'OPEN'
+        $speed = if ($opening) { 0.25 } else { -0.25 }
+        $stable = if ($opening) { 'OPEN' } else { 'CLOSED' }
+        $moving = if ($opening) { 'OPENING' } else { 'CLOSING' }
+        $reverse = if ($opening) { 'CLOSING' } else { 'OPENING' }
+
+        Check-SeedFrame 1 0 $SeedInitial
+        Check-SeedFrame 2 $speed $moving
+        Check-SeedFrame 3 0 $moving
+        Check-SeedFrame 4 0 $stable
+        $peer = Next-SeedSession 1 4 $stable
+        if ($SeedInitial -eq 'UNKNOWN') {
+            Check-SeedFrame 1 0 $stable
+            Check-SeedFrame 2 (-$speed) $reverse
+            $peer = Next-SeedSession 2 2 $reverse
+            Check-SeedFrame 1 0 'UNKNOWN'
+            $peer = Next-SeedSession 3 1 'UNKNOWN'
+        } else {
+            # Session 2 receives no bytes. Session 3 must inherit session 1's output.
+            $peer = Next-SeedSession 2 0 'UNKNOWN'
+            Check-SeedFrame 1 0 $stable
+            Check-SeedFrame 2 (-$speed) $reverse
+            $peer = Next-SeedSession 3 2 $reverse
+        }
+        Check-SeedFrame 1 0 $SeedInitial
+        $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+        if (!$child.WaitForExit(4000) -or $child.ExitCode -ne 0) { throw 'Expected clean final EOF' }
+        Write-Host "PASS seed initial=$SeedInitial stable=$stable interrupted=$reverse sessions=4"
+        return
+    }
+
     if ($PeriodicSnapshot) {
         function Send-AfterQuiet($radarPeer, [switch]$AllowInFlight) {
             $buffer=[byte[]]::new(65536)
@@ -213,14 +281,19 @@ try {
 
         $stage='periodic.active-input'
         $feed=[Diagnostics.Stopwatch]::StartNew()
-        $finalFrameId=112
-        for ($frameId=101; $frameId -le $finalFrameId; ++$frameId) {
-            $wait=50*($frameId-101)-$feed.Elapsed.TotalMilliseconds
-            if ($wait -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Ceiling($wait)) }
-            $bytes=Packet $frameId 40
+        $finalFrameId=100
+        $lastTime=$initial.timestamp_us
+        do {
+            if ($finalFrameId -ge 164 -or $feed.ElapsedMilliseconds -ge 7000) { throw 'No confirmed CABIN passenger during periodic input' }
+            ++$finalFrameId
+            $bytes=Packet $finalFrameId 40
             $peer.GetStream().Write($bytes,0,$bytes.Length)
-        }
-        # This process has a fresh log directory and only session 1 receives frame 112.
+            $s=Read-SimSnapshot -timeoutMs 1000
+            if ($s.timestamp_us -lt $lastTime -or $null -ne $s.door_command) { throw 'Invalid active-input Snapshot' }
+            $lastTime=$s.timestamp_us
+        } until ($s.passengers.Count -eq 1)
+        $sentFrames=$finalFrameId-99
+        # Synchronize with the final observation even if the Viewer was one frame behind.
         $budgetMs=if ($PeriodicIdle) { 1500 } else { 3500 }
         $sync=[Diagnostics.Stopwatch]::StartNew()
         $pattern="\bsignal frame_id=$finalFrameId timestamp_us=(\d+) inputPoints="
@@ -233,7 +306,6 @@ try {
             Start-Sleep -Milliseconds 10
         } while ($true)
         $finalTime=[long]$match.Groups[1].Value
-        $lastTime=$initial.timestamp_us
         do {
             $remaining=$budgetMs-$sync.ElapsedMilliseconds
             if ($remaining -le 0) { throw "Missing Viewer Snapshot for final frame $finalFrameId at $finalTime" }
@@ -374,7 +446,7 @@ try {
         $published=[int]$Matches[1]
         $meanUs=[int]$Matches[2]
         if ($published -lt $count -or $meanUs -lt 95000 -or $meanUs -gt 180000 -or
-            $text -notmatch '\[tracking-demo\] session=1 frames=13 snapshots=\d+ exit=0' -or
+            $text -notmatch "\[tracking-demo\] session=1 frames=$sentFrames snapshots=\d+ exit=0" -or
             $text -match '10014|Signal frame failed|\[ws-periodic\] stopped') { throw 'Backend cadence/processing metrics invalid' }
         if ($expectedExit -eq 1 -and $text -notmatch '\[ws-periodic\] session=3 published=0 mean_interval_us=0') {
             throw 'Periodic publication during a reconnect with no observation'
@@ -410,12 +482,19 @@ try {
             $null=Expect-SimState $done ''
         }
         function Occupy-Threshold {
+            $feed=[Diagnostics.Stopwatch]::StartNew()
+            for ($i=0; $i -lt 64 -and $feed.ElapsedMilliseconds -lt 8000; ++$i) {
+                $cabin=Next-Radar 0.4
+                if ($cabin.door_state -ne 'OPEN' -or $null -ne $cabin.door_command) { throw 'Unexpected door action during CABIN confirmation' }
+                if ($cabin.passengers.Count -eq 1 -and $cabin.passengers[0].state -eq 'INSIDE') { break }
+            }
+            if ($cabin.passengers.Count -ne 1 -or $cabin.passengers[0].state -ne 'INSIDE') { throw 'No confirmed CABIN track before threshold entry' }
             # Move a matched track into the threshold gradually.
             foreach ($y in @(0.4,0.32,0.24,0.16,0.08,0.0,0.0,0.0)) {
                 $s=Next-Radar $y
                 if ($s.door_state -ne 'OPEN') { throw 'Door closed on threshold approach' }
                 if ($s.door_command -eq 'HOLD') {
-                    if ($s.passengers.Count -ne 1 -or $s.passengers[0].state -notin @('ENTERING','EXITING') -or
+                    if ($s.passengers.Count -ne 1 -or $s.passengers[0].id -ne $cabin.passengers[0].id -or $s.passengers[0].state -notin @('ENTERING','EXITING') -or
                     $null -ne $s.passengers[0].safety_state) { throw 'HOLD did not carry the C threshold phase' }
                     return $s.passengers[0].id
                 }
@@ -538,19 +617,17 @@ try {
         $stage='emulator-door.pre-frame'
         Send-Door $first 'CLOSE'
         Wait-SimLog 'manual request ignored: no active command window'
-        $batch=[IO.MemoryStream]::new()
-        try {
-            for ($i=0; $i -lt 12; ++$i) {
-                $bytes=Packet ([uint32](100+$i)) ([uint32]40)
-                $batch.Write($bytes,0,$bytes.Length)
-            }
-            $initial=$batch.ToArray()
-            $peer.GetStream().Write($initial,0,$initial.Length)
-        } finally { $batch.Dispose() }
+        $sentFrames=0
+        $feed=[Diagnostics.Stopwatch]::StartNew()
         do {
-            $last=Read-SimSnapshot
+            if ($sentFrames -ge 64 -or $feed.ElapsedMilliseconds -ge 10000) { throw 'No confirmed CABIN passenger before manual OPEN' }
+            $bytes=Packet (100+$sentFrames) 40
+            $peer.GetStream().Write($bytes,0,$bytes.Length)
+            ++$sentFrames
+            $last=Read-SimSnapshot -timeoutMs 1200
             if ($last.door_state -ne 'CLOSED' -or $null -ne $last.door_command) { throw 'Unexpected initial virtual state' }
-        } while ($last.passengers.Count -ne 1)
+            Start-Sleep -Milliseconds 125
+        } until ($last.passengers.Count -eq 1)
         $stage='emulator-door.paused-open'
         Send-Door $first 'OPEN'
         Wait-SimLog '\[door-sim\] manual session=1 client=\d+ command=OPEN decision=applied state=OPENING mode=MANUAL'
@@ -595,7 +672,8 @@ try {
         Expect-Door 'CLOSING' ''
         Expect-Door 'CLOSED' ''
         $stage='emulator-door.resume'
-        $frame=Packet ([uint32]112) ([uint32]40)
+        $frame=Packet (100+$sentFrames) 40
+        ++$sentFrames
         $peer.GetStream().Write($frame,0,$frame.Length)
         $resumed=Read-SimSnapshot
         if ($resumed.timestamp_us -le $frozenTime -or $resumed.door_state -ne 'CLOSED' -or $null -ne $resumed.door_command) {
@@ -629,7 +707,7 @@ try {
         $peer.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
         if (-not $child.WaitForExit(6000) -or $child.ExitCode -ne 1) { throw 'Expected bounded retry exhaustion' }
         $text=[IO.File]::ReadAllText($stderr)+[IO.File]::ReadAllText($stdout)
-        if ($text -notmatch '\[tracking-demo\] session=1 frames=13 snapshots=\d+ exit=0' -or
+        if ($text -notmatch "\[tracking-demo\] session=1 frames=$sentFrames snapshots=\d+ exit=0" -or
             $text -notmatch '\[radar\] session=1 end[\s\S]*?last_door_state=CLOSED' -or
             $text -notmatch 'recovery exhausted' -or $text -match '10014|Signal frame failed') {
             throw 'Missing continued B observation, Radar frame accounting or clean retry exhaustion'

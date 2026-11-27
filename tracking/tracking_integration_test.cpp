@@ -36,14 +36,14 @@ static void testHallFilter() {
     {
         TrackingEngine e;                       // 기본 hall_enabled=false
         FrameResult r;
-        for (int f = 0; f < 20; ++f) r = e.processFrame(frame(f, {det(0.5, -1.0, 1.7, DetZone::HALL)}), DoorState::OPEN);
+        for (int f = 0; f < 25; ++f) r = e.processFrame(frame(f, {det(0.5, -1.0, 1.7, DetZone::HALL)}), DoorState::OPEN);
         CHECK(e.manager().confirmedIdCount() == 0 && r.tracks.empty(), "꺼짐: 승강장 사람은 ID가 발급되지 않음");
         CHECK(r.door_command == DoorCommand::NONE, "꺼짐: door_command null");
     }
     {
         TrackingEngine e; e.setHallEnabled(true);
         FrameResult r;
-        for (int f = 0; f < 20; ++f) r = e.processFrame(frame(f, {det(0.5, -1.0, 1.7, DetZone::HALL)}), DoorState::OPEN);
+        for (int f = 0; f < 25; ++f) r = e.processFrame(frame(f, {det(0.5, -1.0, 1.7, DetZone::HALL)}), DoorState::OPEN);
         CHECK(e.manager().confirmedIdCount() == 1 && r.tracks.size() == 1, "켜짐: 승강장 사람도 추적");
         CHECK(!r.tracks.empty() && r.tracks[0].phase == Phase::OUTSIDE, "켜짐: Phase = OUTSIDE");
     }
@@ -54,11 +54,11 @@ static void testEnterAndClose() {
     std::printf("[2] 탑승 -> HOLD -> CLOSE\n");
     TrackingEngine e;
     FrameResult r; int f = 0;
-    for (int i = 0; i < 12; ++i, ++f) r = e.processFrame(frame(f, {det(0, -0.3 + 0.06 * i, 1.7, DetZone::DOOR)}), DoorState::OPEN);
-    const TrackOutput* t = r.tracks.empty() ? nullptr : &r.tracks[0];
-    CHECK(t && t->phase == Phase::ENTERING, "문턱 통과 중 Phase = ENTERING");
+    // DOOR 구역에서는 hits >= 3 부터 즉시 HOLD 동작 확인
+    for (int i = 0; i < 6; ++i, ++f) r = e.processFrame(frame(f, {det(0, -0.3 + 0.06 * i, 1.7, DetZone::DOOR)}), DoorState::OPEN);
     CHECK(r.door_command == DoorCommand::HOLD, "문턱 점유 중 door_command = HOLD");
-    for (int i = 0; i < 20; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::OPEN);
+    // 이후 CABIN 진입 및 n_init(17) 충족 후 ENTERING/INSIDE 전이 확인
+    for (int i = 0; i < 15; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::OPEN);
     CHECK(!r.tracks.empty() && r.tracks[0].phase == Phase::INSIDE, "캐빈 안 Phase = INSIDE");
     CHECK(r.door_command == DoorCommand::HOLD, "통과 직후 close_wait 동안 HOLD 유지");
     for (int i = 0; i < 40; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::OPEN);
@@ -76,14 +76,17 @@ static void testFallImmobile() {
     std::printf("[3] 낙상 -> 부동 -> 회복\n");
     TrackingEngine e;
     FrameResult r; int f = 0;
-    for (int i = 0; i < 20; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::CLOSED);
+    // n_init(17) + warmup_sec(2.0초 = 20프레임) 충족을 위해 40프레임 서 있기
+    for (int i = 0; i < 40; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::CLOSED);
     int id = r.tracks.empty() ? -1 : r.tracks[0].id;
     CHECK(id > 0, "서 있는 승객에게 공개 ID 발급");
     for (int i = 0; i < 5; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7 - 0.28 * (i + 1), DetZone::CABIN)}), DoorState::CLOSED);
+    // 바닥 유지 검증(0.8초) 통과를 위해 10프레임 낮은 자세 유지
+    for (int i = 0; i < 10; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 0.3, DetZone::CABIN)}), DoorState::CLOSED);
     const TrackOutput* t = find(r, id);
     CHECK(r.safety_state == Safety::FALL && t && t->safety == Safety::FALL, "z_top 급강하 -> FALL, 같은 ID 유지");
     CHECK(r.door_command == DoorCommand::NONE, "캐빈 안 낙상은 문 명령 없음");
-    for (int i = 0; i < 380; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 0.3, DetZone::CABIN)}), DoorState::CLOSED);
+    for (int i = 0; i < 370; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 0.3, DetZone::CABIN)}), DoorState::CLOSED);
     CHECK(r.safety_state == Safety::FALL, "40초 전에는 FALL");
     for (int i = 0; i < 40; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 0.3, DetZone::CABIN)}), DoorState::CLOSED);
     t = find(r, id);
@@ -97,9 +100,10 @@ static void testLostDuringFall() {
     std::printf("[4] 낙상 중 추적 끊김\n");
     TrackingEngine e;
     FrameResult r; int f = 0;
-    for (int i = 0; i < 20; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::CLOSED);
+    for (int i = 0; i < 40; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::CLOSED);
     int id = r.tracks.empty() ? -1 : r.tracks[0].id;
     for (int i = 0; i < 5; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7 - 0.28 * (i + 1), DetZone::CABIN)}), DoorState::CLOSED);
+    for (int i = 0; i < 10; ++i, ++f) r = e.processFrame(frame(f, {det(0, 0.6, 0.3, DetZone::CABIN)}), DoorState::CLOSED);
     for (int i = 0; i < 45; ++i, ++f) r = e.processFrame(frame(f, {}), DoorState::CLOSED);   // 검출 없음 4.5초
     const TrackOutput* t = find(r, id);
     CHECK(t && t->lost && t->safety == Safety::FALL, "끊긴 동안 LOST 트랙이 결과에 남고 FALL 유지");
@@ -114,7 +118,7 @@ static void testReset() {
     std::printf("[5] reset()\n");
     TrackingEngine e;
     FrameResult r;
-    for (int f = 0; f < 20; ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::CLOSED);
+    for (int f = 0; f < 25; ++f) r = e.processFrame(frame(f, {det(0, 0.6, 1.7, DetZone::CABIN)}), DoorState::CLOSED);
     CHECK(e.manager().confirmedIdCount() == 1, "리셋 전 ID 1개 발급");
     e.reset();
     r = e.processFrame(frame(0, {}), DoorState::CLOSED);

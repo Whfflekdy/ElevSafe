@@ -98,6 +98,12 @@ if(WIN32)
         -NoProfile -NonInteractive -Command
         "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/radar_reconnect_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg'")
     set_tests_properties(radar_reconnect_cli_test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+    foreach(initial IN ITEMS CLOSED OPEN UNKNOWN)
+        add_test(NAME radar_door_seed_${initial}_test COMMAND "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe"
+            -NoProfile -NonInteractive -Command
+            "& ([scriptblock]::Create((Get-Content -LiteralPath '${CMAKE_CURRENT_SOURCE_DIR}/tests/tracking_radar_fixture.ps1' -Raw -Encoding UTF8))) -BackendExe '$<TARGET_FILE:elevsafe_backend>' -SignalConfig '${CMAKE_CURRENT_SOURCE_DIR}/tests/data/signal_integration.cfg' -SeedInitial ${initial}")
+        set_tests_properties(radar_door_seed_${initial}_test PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+    endforeach()
 endif()
 
 add_executable(frame_buffer_test

@@ -2,6 +2,8 @@
 // 인터페이스 합의 v4(11/19) 확정 사항:
 //   DetZone  : B의 Zone과 숫자를 똑같이 맞춤 (UNKNOWN=0, DOOR=1, CABIN=2, HALL=3). A가 static_cast로 변환.
 //   DoorState: 지금은 OPEN / CLOSED / UNKNOWN 세 가지만 (OPENING/CLOSING 구분 없음).
+// 인터페이스 합의 v7(11/23): B 추정 문 상태에 OPENING/CLOSING이 추가됨(문짝 Doppler 방식일 때만).
+//   C DoorState는 3종을 유지하고, 문자열 OPENING/CLOSING은 parseDoorState에서 OPEN으로 읽는다.
 // 이전에는 cluster_loader.hpp 와 state_machine.hpp 가 DoorState 를 각자 정의해서
 // 같은 파일에 같이 include 하면 재정의 오류가 났다. 이제 여기 한 곳에만 둔다.
 #pragma once
@@ -32,6 +34,8 @@ enum class DoorState { UNKNOWN, OPEN, CLOSED };
 
 inline DoorState parseDoorState(const std::string& s) {
     if (s == "OPEN") return DoorState::OPEN;
+    // v7: B 추정 OPENING/CLOSING -> C 입력은 OPEN (움직이는 동안 재점유 시 HOLD 판단 가능)
+    if (s == "OPENING" || s == "CLOSING") return DoorState::OPEN;
     if (s == "CLOSED") return DoorState::CLOSED;
     return DoorState::UNKNOWN;  // 알 수 없는 문자열도 UNKNOWN (door_command=null 쪽으로 안전)
 }

@@ -154,18 +154,20 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         if (t.state == TrackState::LOST) {
             t.state = TrackState::CONFIRMED;
         } else if (t.state == TrackState::TENTATIVE) {
-            if (++t.hits >= cfg_.n_init) confirm(t);
+            const int req_hits = t.seen_non_door ? cfg_.n_init : cfg_.door_only_n_init;
+            if (++t.hits >= req_hits) confirm(t);
         }
     }
 
-    // 5-b. 매칭 안 된 트랙: TENTATIVE는 삭제, CONFIRMED는 LOST (LOST는 그대로)
+    // 5-b. 매칭 안 된 트랙: TENTATIVE는 삭제, CONFIRMED는 lost_after_s 넘게 매칭이 없으면 LOST (LOST는 그대로)
     {
         std::vector<Track> kept;
         for (int ti = 0; ti < (int)tracks_.size(); ++ti) {
             Track& t = tracks_[ti];
             if (track_to_det[ti] < 0) {
                 if (t.state == TrackState::TENTATIVE) { removed_.push_back(t); continue; }
-                if (t.state == TrackState::CONFIRMED) t.state = TrackState::LOST;
+                if (t.state == TrackState::CONFIRMED && t.time_since_update_s > cfg_.lost_after_s)
+                    t.state = TrackState::LOST;
             }
             kept.push_back(std::move(t));
         }
@@ -185,7 +187,8 @@ const std::vector<Track>& TrackManager::update(const FrameDetections& fd) {
         t.kf = makeFilter(cfg_, ts * 1e-6, d.cx, d.cy, d.cz);
         t.syncState();
         t.z_history.push_back({ts, d.cz});
-        if (t.hits >= cfg_.n_init) confirm(t);
+        const int req_hits = t.seen_non_door ? cfg_.n_init : cfg_.door_only_n_init;
+        if (t.hits >= req_hits) confirm(t);
         tracks_.push_back(std::move(t));
     }
     return tracks_;

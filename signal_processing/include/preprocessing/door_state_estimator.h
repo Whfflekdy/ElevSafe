@@ -4,7 +4,8 @@
 //       승강장에 반사물이 없으면 열린 문을 닫힘으로 잘못 봄 (2차, 4차).
 //   (2) 문짝 움직임 (door_state.motion_enable = 1): 문 위쪽 상자에서 움직이는 점이
 //       많이 찍히면 문이 움직이는 중. 도플러 부호로 열림(+) / 닫힘(−)을 구분.
-//       첫 움직임 전까지는 (1)로 시작 상태를 정하고, 그 뒤로는 움직임만 따른다.
+//       첫 움직임 전까지는 시작 상태(door_state.motion.initial, 기본 UNKNOWN)를 내고,
+//       그 뒤로는 움직임만 따른다. 재연결 때는 A 가 seed() 로 이전 상태를 넣을 수 있다.
 // 좌표 변환 직후, ROI 전에 호출해야 한다 (ROI가 문 너머·문 위쪽 점을 지우기 전).
 #pragma once
 
@@ -32,13 +33,15 @@ struct DoorStateConfig {
     float motion_min_doppler = 0.05f; // 이보다 느린 점은 안 셈 [m/s]
     float motion_on = 100.0f;         // window 합이 이 이상이면 문 움직임 시작 (4차: 문 250~480, 사람 75 이하)
     float motion_off = 30.0f;         // window 합이 이 이하로 떨어지면 움직임 끝
+    DoorState motion_initial = DoorState::UNKNOWN; // door_state.motion.initial: 첫 움직임 전 상태 (UNKNOWN / OPEN / CLOSED)
+    bool motion_initial_ok = true;    // initial 값이 위 세 가지 중 하나인지
     float motion_reverse_speed = 0.10f; // 움직이는 도중 평균 속도가 이 이상으로 반대 방향이면 방향이 바뀐 것으로 봄 [m/s]
                                         // 닫힘 끝의 약한 튕김(평균 0.07 이하)은 무시 (1차 S0-3)
 
     static DoorStateConfig fromConfig(const Config& cfg);
     bool isValid() const {
         return view_zone.isValid() && window > 0 && close_threshold < open_threshold &&
-               (!motion_enabled || (motion_zone.isValid() && motion_off < motion_on));
+               (!motion_enabled || (motion_zone.isValid() && motion_off < motion_on && motion_initial_ok));
     }
 };
 
@@ -50,6 +53,10 @@ public:
     DoorState update(const Frame& points);
 
     DoorState state() const { return state_; }
+    // 첫 움직임 전 상태를 바깥에서 정함 (재연결 때 이전 세션의 마지막 상태).
+    // 문짝 움직임 방식에서 아직 움직임을 못 봤을 때만, OPEN·CLOSED 만 받는다.
+    // OPENING·CLOSING(움직이던 중 끊김)·UNKNOWN 은 끝 상태를 모르니 무시한다.
+    void seed(DoorState s);
     std::size_t lastCount() const { return last_count_; }     // 이번 프레임의 문 너머 점 수
     float average() const { return average_; }                // 최근 window 프레임 평균 (문 너머)
     std::size_t motionCount() const { return motion_sum_; }   // 최근 window 프레임의 문짝 움직임 점 합
